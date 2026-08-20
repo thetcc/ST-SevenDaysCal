@@ -7,15 +7,17 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write #关键：给token推送代码权限
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Sync upstream
         uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
         with:
-          upstream_repository: atonal519/ST-SevenDaysCal
-          target_branch: master
-          upstream_branch: master
+          upstream_sync_repo: atonal519/ST-SevenDaysCal
+          target_sync_branch: master
+          upstream_sync_branch: master
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
