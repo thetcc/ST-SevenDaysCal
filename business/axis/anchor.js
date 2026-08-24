@@ -18,8 +18,10 @@ import { parseCalendar } from '../point/parse.js';
 import * as memory from '../../memory.js';
 import {
     DEFAULT_CAL, loadCalDesc, calYearLen, almDayOfYear, almClampInt, almItemCoversDoy,
-    almValidMonthDay, almDateFromChat, monthDayFromDayKey, calExplicitWeekdayRef, calRealWeekdayRef, parseWeekdayToken,
+    almValidMonthDay, almDateFromChat,
 } from './data.js';
+import { storyWeekdayRef, latestStoryClock } from './story-clock.js';
+import { daysBetweenCalendarDates } from './full-ordinal.js';
 
 let env = null;
 // env: { getDateAnchor, charStableKey, getLinesCacheKey, parseLines, TERMINAL_STAGES, getCacheKey }
@@ -60,26 +62,15 @@ export function almTodayAnchor() {
             if (md) return md;
         }
     } catch { /* 往下走 */ }
-    // ③ 线：活跃线 when/desc/next 里的绝对日期
-    try {
-        const saved = readStore(env.getLinesCacheKey());
-        const lines = saved?.raw ? env.parseLines(saved.raw) : [];
-        for (const l of lines) {
-            if (!l.name || env.TERMINAL_STAGES.has(l.stage)) continue;
-            const md = monthDayFromDayKey(extractDayFromTime(l.when))
-                    || monthDayFromDayKey(extractDayFromTime(`${l.desc || ''} ${l.next || ''}`));
-            if (md) return md;
-        }
-    } catch { /* 往下走 */ }
-    // ④ 点：日程 StartDate（自定义历法不读取现实日期）
+    // ③ 点：日程 StartDate（自定义历法不读取现实日期）
     if (loadCalDesc() === DEFAULT_CAL) {
         try {
             const saved = readStore(env.getCacheKey());
             if (saved?.raw) {
-                const { startDate } = parseCalendar(saved.raw);
+                const { startDate } = parseCalendar(saved.raw, loadCalDesc());
                 if (startDate instanceof Date && !isNaN(startDate)) {
                     const md = almValidMonthDay({ month: startDate.getMonth() + 1, day: startDate.getDate() });
-                    if (md) return md;
+                    if (md) return { ...md, year: startDate.getFullYear() };
                 }
             }
         } catch { /* 往下走 */ }
@@ -87,7 +78,7 @@ export function almTodayAnchor() {
     // ⑤ 聊天正文里写明的绝对日期
     try {
         const hit = almDateFromChat();
-        if (hit) return { month: hit.month, day: hit.day };
+        if (hit) return hit;
     } catch { /* 往下走 */ }
     // ⑥ 全拿不到 → 1 月 1 日
     return { month: 1, day: 1 };
@@ -100,95 +91,34 @@ export function almDaysUntil(month, day, anchor, cal = loadCalDesc()) {
     return (almDayOfYear(month, day, cal) - almDayOfYear(a.month, a.day, cal) + total) % total;
 }
 
+// 完整纪年 ordinal：一次性事项的 year 已知时禁止使用上面的环形月日差。
+// 自定义历法每年长度由当前历法描述提供，月日序仍由 almDayOfYear 统一计算。
+export function almDaysBetweenFull(from, to, cal = loadCalDesc()) {
+    return daysBetweenCalendarDates(from, to, cal);
+}
+
 // 取「参照日→周几」锚：先扫所有来源的显式星期，再允许真实公历推算。返回 {refDoy, refWd}。
 export function almWeekdayRef(cal = loadCalDesc()) {
-    // 第一阶段：当前聊天/状态栏中的显式星期最高，不能被其它来源或 getDay 抢先。
-    try {
-        const hit = almDateFromChat(true);
-        if (hit?.wd != null) return { refDoy: almDayOfYear(hit.month, hit.day, cal), refWd: hit.wd };
-    } catch { /* 往下走 */ }
-    // 其次是柏宝书与记忆中的显式星期。
-    try {
-        const api = globalThis.STBaiBaiBook;
-        if (api && typeof api.getSnapshot === 'function') {
-            const msgs = getContext().chat || [];
-            let last = -1;
-            for (let i = 0; i < msgs.length; i++) if (!msgs[i].is_user) last = i;
-            if (last >= 0) {
-                const time = api.getSnapshot({ floor: last, at: 'after' })?.state?.time;
-                const explicit = calExplicitWeekdayRef(time, cal);
-                if (explicit) return explicit;
-                const wd = parseWeekdayToken(time);
-                if (wd != null) { const a = almTodayAnchor(); return { refDoy: almDayOfYear(a.month, a.day, cal), refWd: wd }; }
-            }
-        }
-    } catch { /* 往下走 */ }
-    // ② 记忆库「时间锚点」尾段
-    try {
-        const memText = typeof memory.getMemoryContext === 'function' ? memory.getMemoryContext() : '';
-        const anchors = [...String(memText).matchAll(/时间锚点\s*[:：]\s*([^\n]+)/g)];
-        if (anchors.length) {
-            const line = anchors[anchors.length - 1][1];
-            const explicit = calExplicitWeekdayRef(line, cal);
-            if (explicit) return explicit;
-            const wd = parseWeekdayToken(line.split(/→|->/).pop()) ?? parseWeekdayToken(line);
-            if (wd != null) { const a = almTodayAnchor(); return { refDoy: almDayOfYear(a.month, a.day, cal), refWd: wd }; }
-        }
-    } catch { /* 往下走 */ }
-    // 第二阶段：没有显式星期后，才允许按现有来源计算真实公历周几。
-    // ① 柏宝书快照 time：无显式 token 时按真实年计算
-    try {
-        const api = globalThis.STBaiBaiBook;
-        if (api && typeof api.getSnapshot === 'function') {
-            const msgs = getContext().chat || [];
-            let last = -1;
-            for (let i = 0; i < msgs.length; i++) if (!msgs[i].is_user) last = i;
-            if (last >= 0) {
-                const real = calRealWeekdayRef(api.getSnapshot({ floor: last, at: 'after' })?.state?.time, cal);
-                if (real) return real;
-            }
-        }
-    } catch { /* 往下走 */ }
-    // ② 记忆库时间锚点：无显式 token 时按真实年计算
-    try {
-        const memText = typeof memory.getMemoryContext === 'function' ? memory.getMemoryContext() : '';
-        const anchors = [...String(memText).matchAll(/时间锚点\s*[:：]\s*([^\n]+)/g)];
-        if (anchors.length) {
-            const line = anchors[anchors.length - 1][1];
-            const real = calRealWeekdayRef(line, cal);
-            if (real) return real;
-        }
-    } catch { /* 往下走 */ }
-    // ③ 聊天正文（含状态栏）→ 无显式星期时按真实年 getDay()
-    if (cal === DEFAULT_CAL) {
-        try {
-            const hit = almDateFromChat();
-            if (hit) {
-                let refWd = null;
-                if (hit.date instanceof Date && !isNaN(hit.date)) refWd = hit.date.getDay();
-                if (refWd != null) return { refDoy: almDayOfYear(hit.month, hit.day, cal), refWd };
-            }
-        } catch { /* 往下走 */ }
+    const automatic = storyWeekdayRef(getContext(), cal, 100);
+    const manual = env.getStoryCalibration?.();
+    if (manual && automatic && Number.isInteger(manual.floor) && automatic.floor === manual.floor) {
+        const refMonth = manual.refMonth ?? manual.month; const refDay = manual.refDay ?? manual.day;
+        return { refDoy: almDayOfYear(refMonth, refDay, cal), refWd: manual.weekday, weekdayText: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][manual.weekday], floor: automatic.floor, source: 'manual' };
     }
-    // ④ 点 StartDate：最后的真实年份来源
-    if (cal === DEFAULT_CAL) {
-        try {
-            const saved = readStore(env.getCacheKey());
-            if (saved?.raw) {
-                const { startDate } = parseCalendar(saved.raw);
-                if (startDate instanceof Date && !isNaN(startDate)) {
-                    return { refDoy: almDayOfYear(startDate.getMonth() + 1, startDate.getDate(), cal), refWd: startDate.getDay() };
-                }
-            }
-        } catch { /* 往下走 */ }
-    }
-    // ⑤ 默认：1 月 1 日 = 周一
-    return { refDoy: 1, refWd: 1 };
+    if (automatic) return automatic;
+    if (!manual || !Number.isInteger(manual.weekday) || !Number.isInteger(manual.month) || !Number.isInteger(manual.day)) return null;
+    const manualDoy = almDayOfYear(manual.refMonth ?? manual.month, manual.refDay ?? manual.day, cal);
+    const currentClock = latestStoryClock(getContext(), 100);
+    const currentMeta = currentClock?.endMeta?.valid ? currentClock.endMeta : (currentClock?.startMeta?.valid ? currentClock.startMeta : null);
+    const currentDoy = currentMeta ? almDayOfYear(currentMeta.month, currentMeta.day, cal) : almDayOfYear(manual.month, manual.day, cal);
+    const refWd = (manual.weekday + currentDoy - manualDoy + 7000) % 7;
+    return Number.isInteger(currentDoy) && Number.isInteger(manualDoy) ? { refDoy: currentDoy, refWd, weekdayText: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][refWd], source: 'manual' } : null;
 }
 
 // 某月日的周几（0..6），纯日序偏移，不涉年。ref 可复用（较重，整轮渲染算一次传进来）。
 export function almWeekdayFor(month, day, ref, cal = loadCalDesc()) {
     const r = ref || almWeekdayRef(cal);
+    if (!r || !Number.isInteger(r.refWd) || !Number.isInteger(r.refDoy)) return null;
     return ((r.refWd + almDayOfYear(month, day, cal) - r.refDoy) % 7 + 7) % 7;
 }
 

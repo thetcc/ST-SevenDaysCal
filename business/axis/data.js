@@ -4,6 +4,7 @@ import { getSettings } from '../../runtime/settings.js';
 import { saveSettingsDebounced } from '../../../../../../script.js';
 import { extractDayFromTime } from '../../utils/cn-date.js';
 import { getContext } from '../../../../../extensions.js';
+import { validateCalendarDescriptor as validateFormalCalendarDescriptor } from '../calendar/validator.js';
 const ALM_TYPES = ['festival', 'birthday', 'anniversary', 'custom'];
 
 function almId() { return 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
@@ -65,7 +66,10 @@ function monthDayFromDayKey(key, cal = loadCalDesc()) {
     if (!key) return null;
     let m;
     if ((m = String(key).match(/^(\d+)-(\d+)-(\d+)$/)) || (m = String(key).match(/^cn-(\d+)-(\d+)-(\d+)$/))) {
-        return almValidMonthDay({ month: +m[2], day: +m[3] }, cal);   // 严格按当前历校验；越界=不可信来源，返回 null 让链继续
+        const md = almValidMonthDay({ month: +m[2], day: +m[3] }, cal);   // 严格按当前历校验；越界=不可信来源，返回 null 让链继续
+        if (!md) return null;
+        const year = +m[1];
+        return year > 0 ? { ...md, year } : md;
     }
     return null;
 }
@@ -257,6 +261,10 @@ function getCalDescKey() { return keyDesc('caldesc', 'user', ''); }   // 固定 
 
 function normalizeCalDesc(raw) {
     if (!raw || typeof raw !== 'object') return null;
+    const explicitKind = raw.kind === 'gregorian' || raw.kind === 'custom' ? raw.kind : 'custom';
+    const id = String(raw.id || (explicitKind === 'gregorian' ? 'default-gregorian' : 'custom-calendar')).trim();
+    const revision = Number.isInteger(raw.revision) && raw.revision > 0 ? raw.revision : 1;
+    const weekdayCycle = Number.isInteger(raw.weekdayCycle) && raw.weekdayCycle > 0 ? raw.weekdayCycle : 7;
     const era = String(raw.era || '').trim().slice(0, 24);
     const months = (Array.isArray(raw.months) ? raw.months : [])
         .slice(0, 60)   // 最多 60 个月，防滥用撑爆
@@ -266,7 +274,10 @@ function normalizeCalDesc(raw) {
         }));
     if (!months.length) return null;                                   // 无月 → 不成历法，退默认
     if (months.reduce((a, b) => a + b.days, 0) > 2000) return null;    // 年过长 → 视为无效
-    return { era, months };
+    const epoch = {};
+    for (const key of ['epochYear', 'epochOrdinal', 'epochWeekday']) if (Number.isInteger(raw[key])) epoch[key] = raw[key];
+    if (raw.absoluteCycle === true) epoch.absoluteCycle = true;
+    return { kind: explicitKind, id, revision, weekdayCycle, era, months, ...epoch };
 }
 
 function saveCalDesc(desc) {
@@ -279,6 +290,10 @@ function saveCalDesc(desc) {
 const ALM_DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 const DEFAULT_CAL = Object.freeze({
+    kind  : 'gregorian',
+    id    : 'default-gregorian',
+    revision: 1,
+    weekdayCycle: 7,
     era   : '',
     months: Object.freeze(ALM_DAYS_IN_MONTH.map((d, i) => Object.freeze({ name: `${i + 1}月`, days: d }))),
 });
@@ -308,10 +323,24 @@ const CALENDAR_LIMITS = Object.freeze({
 const CALENDAR_TEMPLATE_NAME_LENGTH = 40;
 
 function cloneCalDesc(cal) {
-    return { era: String(cal.era || ''), months: cal.months.map(month => ({ name: String(month.name), days: Number(month.days) })) };
+    const src = cal || DEFAULT_CAL;
+    const epoch = {};
+    for (const key of ['epochYear', 'epochOrdinal', 'epochWeekday']) if (Number.isInteger(src[key])) epoch[key] = src[key];
+    if (src.absoluteCycle === true) epoch.absoluteCycle = true;
+    return {
+        kind: src.kind === 'gregorian' ? 'gregorian' : 'custom',
+        id: String(src.id || (src.kind === 'gregorian' ? 'default-gregorian' : 'custom-calendar')),
+        revision: Number.isInteger(src.revision) && src.revision > 0 ? src.revision : 1,
+        weekdayCycle: Number.isInteger(src.weekdayCycle) && src.weekdayCycle > 0 ? src.weekdayCycle : 7,
+        era: String(src.era || ''),
+        months: (src.months || []).map(month => ({ name: String(month.name), days: Number(month.days) })),
+        ...epoch,
+    };
 }
 
 function validateCalendarDesc(raw) {
+    return validateFormalCalendarDescriptor(raw);
+    /*
     const era = String(raw?.era || '').trim();
     if (era.length > CALENDAR_LIMITS.eraNameLength) return { error: `纪年名最多 ${CALENDAR_LIMITS.eraNameLength} 个字` };
     const months = Array.isArray(raw?.months) ? raw.months : [];
@@ -327,7 +356,16 @@ function validateCalendarDesc(raw) {
         out.push({ name, days });
     }
     if (out.reduce((sum, month) => sum + month.days, 0) > CALENDAR_LIMITS.yearDays) return { error: `全年总天数不能超过 ${CALENDAR_LIMITS.yearDays} 天` };
-    return { value: { era, months: out } };
+    const value = {
+        kind: raw?.kind === 'gregorian' ? 'gregorian' : 'custom',
+        id: String(raw?.id || (raw?.kind === 'gregorian' ? 'default-gregorian' : 'custom-calendar')),
+        revision: Number.isInteger(raw?.revision) && raw.revision > 0 ? raw.revision : 1,
+        weekdayCycle: Number.isInteger(raw?.weekdayCycle) && raw.weekdayCycle > 0 ? raw.weekdayCycle : 7,
+        era, months: out,
+    };
+    for (const key of ['epochYear', 'epochOrdinal', 'epochWeekday']) if (Number.isInteger(raw?.[key])) value[key] = raw[key];
+    if (raw?.absoluteCycle === true) value.absoluteCycle = true;
+    return { value }; */
 }
 
 function loadCalendarTemplates() {
@@ -344,6 +382,13 @@ function saveCalendarTemplates(list) {
     getSettings().calendarTemplates = list.map(item => ({
         id: item.id,
         name: item.name,
+        kind: item.kind,
+        revision: item.revision,
+        weekdayCycle: item.weekdayCycle,
+        epochYear: item.epochYear,
+        epochOrdinal: item.epochOrdinal,
+        epochWeekday: item.epochWeekday,
+        absoluteCycle: item.absoluteCycle,
         era: item.era,
         months: item.months.map(month => ({ name: month.name, days: month.days })),
         createdAt: item.createdAt,
@@ -386,7 +431,7 @@ function almDateFromChat(explicitWeekdayOnly = false, cal = loadCalDesc()) {
             if (!pair) continue;
             const md = almValidMonthDay({ month: pair.month, day: pair.day }, cal);
             if (!md) continue;
-            return { month: md.month, day: md.day, date: cal === DEFAULT_CAL ? pair.date : null, wd: pair.wd };
+            return { month: md.month, day: md.day, ...(pair.year != null ? { year: pair.year } : {}), date: cal === DEFAULT_CAL ? pair.date : null, wd: pair.wd };
         }
         const key = extractDayFromTime(raw);
         const md  = monthDayFromDayKey(key);
@@ -398,7 +443,7 @@ function almDateFromChat(explicitWeekdayOnly = false, cal = loadCalDesc()) {
         // 同楼里紧贴日期的「状态栏周几」token：供上层压过真实 getDay()（写死的剧情周几 > 公历）。缺则 null，退回 getDay。
         const wd = weekdayAdjacent(raw);
         if (explicitWeekdayOnly && wd == null) continue;
-        return { month: md.month, day: md.day, date, wd };
+        return { month: md.month, day: md.day, ...(md.year != null ? { year: md.year } : {}), date, wd };
     }
     return null;
 }
