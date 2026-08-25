@@ -11,7 +11,7 @@ export const LEDGER_FIELD_SPEC = `- 每个事件一行，用全角竖线「｜�
   · 类型：持续状态 / 约定待办 / 周期（只能三选一，原样写这三个词之一）
   · 牵扯：涉及的人物，多个用顿号「、」分隔；没有就留空
   · 标签：检索关键词，多个用「、」分隔（如：伤、左手、身体）
-  · 现状：此刻状态一句话（如「新伤口，仍在流血」）
+  · 现状：此刻状态的完整句（如「新伤口，仍在流血。」），必须以合适的终止标点结束；若句末有闭合引号，标点写在引号内
   · 到期：只有这件事有一个「你会特意关心的具体未来日子」才填——约定的赴约日、或周期里你想知道「下次哪天」的（月经、发薪、值班）。纯背景例行、天天都在做、不用盯某天的（每日洗漱更衣、每天喂马、日常晨练）到期留空。填时写大致哪天（如「第3月20日」，本世界观自定义历法请按其月名/月序），说不清也留空
   · 周期：仅周期类填天数（如 30）；其它类型留空
   · 来源锚：只能填正文前的可信 FxxS/FxxE 令牌；角色卡/世界书既定机制填 SET；没有把握时留空`;
@@ -132,7 +132,7 @@ function capturePromptParts() {
     const fieldSpec = env.fieldSpec || '';
     return { eventTypes, fieldSpec };
 }
-function buildCapturePrompt(first = false) {
+export function buildCapturePrompt(first = false) {
     const { eventTypes, fieldSpec } = capturePromptParts();
     if (first) return `请暂停角色扮演，作为剧情分析助手，只做一件事：这是本故事**第一次**建立「刻度」，请把所有【需要长期按时间追踪】的事项一次性记入刻度，覆盖两个来源：
 
@@ -172,9 +172,9 @@ ${fieldSpec}
 - 若没有任何新事件可登记，只回一个字：无
 不要解释，不要输出表头，不要输出多余文字。`;
 }
-function buildProvenancePrompt(candidates, batchNo, batchTotal) {
+export function buildProvenancePrompt(candidates, batchNo, batchTotal) {
     const list = (candidates || []).map(item => `- ${item._candidateId}｜${item.事由}（${item.类型}）${item.标签?.length ? `｜标签：${item.标签.join('、')}` : ''}`).join('\n');
-    return `请暂停角色扮演，进行「刻度事件来源溯源」。这是第 ${batchNo}/${batchTotal} 批原始剧情楼；每个 AI 楼正文前的 FxxS/FxxE 是系统可信来源令牌，只能从本批正文中选择，不能自行编造楼号、日期或令牌。\n\n【待溯源事项】\n${list || '（无）'}\n\n请只输出本批正文中能明确找到最早发生/确认依据的事项；同一事项若已有更早批次来源，不要重复输出。每条使用 9 字段格式：候选ID｜事由｜类型｜牵扯｜标签｜现状｜到期｜周期｜来源锚。候选ID 必须原样抄写（只能是清单给出的 C1、C2…）；来源锚只能填本批实际存在且支撑该事项的 FxxS/FxxE；若本批没有依据就不要输出。不要输出 SET，不要解释。`;
+    return `请暂停角色扮演，进行「刻度事件来源溯源」。这是第 ${batchNo}/${batchTotal} 批原始剧情楼；每个 AI 楼正文前的 FxxS/FxxE 是系统可信来源令牌，只能从本批正文中选择，不能自行编造楼号、日期或令牌。\n\n【待溯源事项】\n${list || '（无）'}\n\n请只输出本批正文中能明确找到最早发生/确认依据的事项；同一事项若已有更早批次来源，不要重复输出。每条使用 9 字段格式：候选ID｜事由｜类型｜牵扯｜标签｜现状｜到期｜周期｜来源锚；其中「现状」必须是以合适终止标点结束的完整句，句末有闭合引号时标点写在引号内。候选ID 必须原样抄写（只能是清单给出的 C1、C2…）；来源锚只能填本批实际存在且支撑该事项的 FxxS/FxxE；若本批没有依据就不要输出。不要输出 SET，不要解释。`;
 }
 export function createLedgerCaptureController(options = {}) {
     env = { ...env, ...options };
@@ -189,16 +189,21 @@ export function createLedgerCaptureController(options = {}) {
         return true;
     };
     const run = async (manual = false, travel = null) => {
-        if (busy) return { status: 'skipped' };
+        if (busy) return { status: 'busy', reason: 'busy' };
         const ctx = env.context();
         const fixedTarget = env.target?.();
         const charKey = env.charKey?.(ctx);
-        if (!charKey) { if (manual) env.toast?.('当前没有角色卡，无法标注', null, true); return { status: 'skipped' }; }
+        if (!charKey) { if (manual) env.toast?.('当前没有角色卡，无法标注', null, true); return { status: 'skipped', reason: 'no-character', feedbackShown: manual }; }
         const cfg = env.config?.();
-        if (!cfg?.url || !cfg?.key) { if (manual) env.toast?.('请先在设置中填写 API', null, true); return { status: 'failed', error: new Error('未配置 API') }; }
+        if (!cfg?.url || !cfg?.key) { if (manual) env.toast?.('请先在设置中填写 API', null, true); return { status: 'failed', reason: 'no-api', error: Object.assign(new Error('未配置 API'), { diagnosticCode: 'config-missing' }), feedbackShown: manual }; }
         const chatId = ctx.chatId;
         const ownerSnapshot = ledgerOwnerIdentity(ctx);
         const ctrl = new AbortController(); abortController = ctrl; busy = true;
+        const cancellation = (reason = 'cancelled') => {
+            const ownerCurrent = sameLedgerOwner(ownerSnapshot, ledgerOwnerIdentity(env.context()));
+            const stale = abortController !== ctrl || !ownerCurrent;
+            return { status: 'cancelled', reason: stale ? 'source-stale-chat' : reason, ...(stale ? { stale: true } : {}) };
+        };
         const removeBridge = env.bridge?.(travel?.signal, ctrl) || (() => {});
         try {
             const userName = ctx.name1 || '用户', charName = ctx.name2 || '角色';
@@ -216,17 +221,19 @@ export function createLedgerCaptureController(options = {}) {
             const historical = isFirst && aiFloorCount > CAPTURE_FLOORS;
             const provenanceBatches = historical ? ledgerSourceBatches(allRecords) : [];
             if (historical) {
-                if (!manual) { clear(ctrl); env.toast?.(`历史较长（${aiFloorCount} 个 AI 楼），自动捕获不会静默启动多批溯源；请点「立即标注」并确认。`); return { status: 'needs-confirmation' }; }
+                if (!manual) { clear(ctrl); env.toast?.(`历史较长（${aiFloorCount} 个 AI 楼），自动捕获不会静默启动多批溯源；请点「立即标注」并确认。`); return { status: 'needs-confirmation', reason: 'historical-confirmation', feedbackShown: true }; }
                 const ok = await env.confirm?.({ title: '确认完整溯源刻度', body: `当前 ledger 为空，共 ${aiFloorCount} 个 AI 楼。将先提取清单，再按每批最多 ${CAPTURE_FLOORS} 个 AI 回复溯源，最多调用 ${1 + provenanceBatches.length} 次（1 次清单 + ${provenanceBatches.length} 批）。找到全部来源后会提前结束；过程会增加 API 消耗和等待时间，可随时中止；确认后统一落库。`, note: '取消不会发起请求，也不会写入任何刻度。', confirmText: '开始溯源', cancelText: '取消' });
-                if (!ok) { clear(ctrl); return { status: 'cancelled' }; }
-                if (!isCurrent(ctrl, chatId, travel)) return { status: 'cancelled' };
+                if (!ok) { clear(ctrl); return { status: 'cancelled', reason: 'confirmation-cancelled' }; }
+                if (!isCurrent(ctrl, chatId, travel)) return cancellation(ctrl.signal.aborted || travel?.signal?.aborted ? 'aborted' : 'cancelled');
             }
             const captureOpts = { ...(travel || {}), noAlmanac: true };
             if (recentRecords.length) captureOpts.ledgerSourceFloors = recentRecords;
-            const raw = await env.callApi(ctx, prompt, cfg, userName, charName, ctrl.signal, CAPTURE_FLOORS, captureOpts);
-            if (!isCurrent(ctrl, chatId, travel)) return { status: 'cancelled' };
+            let raw;
+            try { raw = await env.callApi(ctx, prompt, cfg, userName, charName, ctrl.signal, CAPTURE_FLOORS, captureOpts); }
+            catch (error) { markLedgerError(error, { phase: 'capture-request' }); throw error; }
+            if (!isCurrent(ctrl, chatId, travel)) return cancellation(ctrl.signal.aborted || travel?.signal?.aborted ? 'aborted' : 'cancelled');
             let picked = env.parseCapture?.(raw) || [];
-            if (!picked.length) { if (manual) env.toast?.('未发现可登记的新事件'); return { status: 'unchanged' }; }
+            if (!picked.length) { if (manual) env.toast?.('未发现可登记的新事件'); return { status: 'unchanged', reason: 'no-new-event', feedbackShown: manual }; }
             picked.forEach((item, index) => { item._candidateId = `C${index + 1}`; });
             let sourceList = recentSources, sourceMap = recentSourceMap, recordsForCommit = recentRecords;
             if (historical) {
@@ -235,12 +242,14 @@ export function createLedgerCaptureController(options = {}) {
                 candidates.forEach(item => { item._sourceToken = ''; });
                 progress = { done: 0, total: provenanceBatches.length }; env.setProgress?.(0, provenanceBatches.length, ctrl);
                 for (let i = 0; i < provenanceBatches.length; i++) {
-                    if (!isCurrent(ctrl, chatId, travel)) return { status: 'cancelled' };
+                    if (!isCurrent(ctrl, chatId, travel)) return cancellation(ctrl.signal.aborted || travel?.signal?.aborted ? 'aborted' : 'cancelled');
                     const unresolved = candidates.filter(item => !String(item._sourceToken || '').trim());
                     if (!unresolved.length) break;
                     const batch = provenanceBatches[i];
-                    const result = await env.callApi(ctx, buildProvenancePrompt(unresolved, i + 1, provenanceBatches.length), cfg, userName, charName, ctrl.signal, 0, { ...(travel || {}), noAlmanac: true, ledgerSourceFloors: batch });
-                    if (!isCurrent(ctrl, chatId, travel)) return { status: 'cancelled' };
+                    let result;
+                    try { result = await env.callApi(ctx, buildProvenancePrompt(unresolved, i + 1, provenanceBatches.length), cfg, userName, charName, ctrl.signal, 0, { ...(travel || {}), noAlmanac: true, ledgerSourceFloors: batch }); }
+                    catch (error) { markLedgerError(error, { phase: 'source-provenance', batchNo: i + 1, batchTotal: provenanceBatches.length }); throw error; }
+                    if (!isCurrent(ctrl, chatId, travel)) return cancellation(ctrl.signal.aborted || travel?.signal?.aborted ? 'aborted' : 'cancelled');
                     const found = env.parseCapture?.(result) || [], batchMap = ledgerSourceMap(batch.flatMap(record => record.sources)), hits = [];
                     for (const item of found) {
                         const candidate = candidates.find(x => x._candidateId === item._candidateId && !String(x._sourceToken || '').trim());
@@ -255,28 +264,37 @@ export function createLedgerCaptureController(options = {}) {
             const entries = env.listEntries?.({ includeClosed: true }) || [];
             const candidates = picked.map(item => ({ ...item, 起始锚: resolveLedgerStartAnchor(item, sourceMap, sourceList) }));
             const capturePlan = planLedgerCapture({ entries, candidates, sourceMap, captureFloor, captureDate, norm: env.normGist || (value => String(value || '').replace(/\s+/g, '')) });
-            if (!capturePlan.additions.length && !capturePlan.patches.length) { if (manual) env.toast?.('没有新事件（都已在刻度上）'); return { status: 'unchanged' }; }
-            if (!isCurrent(ctrl, chatId, travel) || !ledgerRecordsStable(recordsForCommit, chatId)) { env.toast?.('原始剧情楼在溯源期间发生变化，已取消本轮刻度落库', null, true); return { status: 'cancelled' }; }
+            if (!capturePlan.additions.length && !capturePlan.patches.length) { if (manual) env.toast?.('没有新事件（都已在刻度上）'); return { status: 'unchanged', reason: 'duplicate', feedbackShown: manual }; }
+            if (!isCurrent(ctrl, chatId, travel)) return cancellation(ctrl.signal.aborted || travel?.signal?.aborted ? 'aborted' : 'cancelled');
+            if (!ledgerRecordsStable(recordsForCommit, chatId)) return { status: 'cancelled', reason: 'source-stale-chat', stale: true };
             const cleanAdditions = capturePlan.additions.map(plan => { const clean = { ...plan }; delete clean._sourceToken; delete clean._candidateId; return clean; });
             const owner = { chatId, target: fixedTarget, guard: () => isCurrent(ctrl, chatId, travel) && ledgerRecordsStable(recordsForCommit, chatId) && sameLedgerOwner(ownerSnapshot, ledgerOwnerIdentity(env.context())) };
             const result = env.applyAtomic ? await env.applyAtomic({ additions: cleanAdditions, patches: capturePlan.patches }, owner) : { added: await env.addAtomic?.(cleanAdditions) || [], patched: [] };
             const added = result?.added || [];
-            if (!isCurrent(ctrl, chatId, travel)) return { status: 'cancelled', stale: true };
-            if (!added.length && !(result?.patched || []).length) { if (manual) env.toast?.('没有新事件（都已在刻度上）'); return { status: 'unchanged' }; }
+            if (!isCurrent(ctrl, chatId, travel)) return cancellation(ctrl.signal.aborted || travel?.signal?.aborted ? 'aborted' : 'cancelled');
+            if (!added.length && !(result?.patched || []).length) { if (manual) env.toast?.('没有新事件（都已在刻度上）'); return { status: 'unchanged', reason: 'duplicate', feedbackShown: manual }; }
             if (manual || env.settings?.()?.notifyMode === 'full') env.toast?.(`刻度标注 ${added.length} 条、更新 ${(result?.patched || []).length} 条${added.length ? `：${added.map(e => e.事由).join('、')}` : ''} · 请注意查看`);
             env.refresh?.(); env.refreshInline?.(true); env.render?.();
-            return { status: 'updated' };
+            return { status: 'updated', added: added.length, patched: (result?.patched || []).length, feedbackShown: manual || env.settings?.()?.notifyMode === 'full' };
         } catch (err) {
-            if (err?.phase === 'rollback-save-failed') { env.toast?.('刻度保存后状态已过期，且回滚失败，请检查当前聊天数据', null, true); return { status: 'failed', error: err }; }
-            if (abortController !== ctrl) return { status: 'cancelled', stale: true };
-            if (err?.name === 'AbortError' || travel?.signal?.aborted) return { status: 'cancelled' };
+            const ownerCurrent = sameLedgerOwner(ownerSnapshot, ledgerOwnerIdentity(env.context()));
+            if (err?.ledgerPhase === 'rollback-save-failed' || err?.phase === 'rollback-save-failed') {
+                logLedgerFailure(err, { ledgerPhase: 'rollback-save-failed' });
+                if (ownerCurrent) env.toast?.('刻度保存后状态已过期，且回滚失败，请检查当前聊天数据', null, true);
+                return { status: 'failed', reason: 'rollback-save-failed', error: err, feedbackShown: ownerCurrent };
+            }
             if (String(err?.phase || '').startsWith('capture-stale-chat')) return { status: 'cancelled', stale: true };
-            if (err?.phase === 'capture-state-invalid') { env.toast?.('标注保存后状态不一致，已撤销', null, true); return { status: 'failed', error: err }; }
-            if (err?.phase === 'persistence-not-committed') { env.toast?.('保存未提交，已恢复本地状态', null, true); return { status: 'failed', error: err }; }
-            if (err?.phase === 'persistence-unknown') { env.toast?.('刻度持久状态无法确认，已恢复本地状态', null, true); return { status: 'failed', error: err }; }
-            if (err?.spDisabled) return { status: 'skipped' };
-            if (env.context().chatId !== chatId) return { status: 'cancelled' };
-            env.toast?.('刻度标注失败，请检查 API 或网络', null, true); return { status: 'failed', error: err };
+            if (abortController !== ctrl || !ownerCurrent) return { status: 'cancelled', reason: 'source-stale-chat', stale: true, error: err };
+            if (err?.name === 'AbortError' || travel?.signal?.aborted) return { status: 'cancelled', reason: 'aborted', error: err };
+            if (err?.phase === 'capture-state-invalid') { env.toast?.('标注保存后状态不一致，已撤销', null, true); return { status: 'failed', reason: 'capture-state-invalid', error: err, feedbackShown: true }; }
+            if (err?.phase === 'persistence-not-committed') { env.toast?.('保存未提交，已恢复本地状态', null, true); return { status: 'failed', reason: 'persistence-not-committed', error: err, feedbackShown: true }; }
+            if (err?.phase === 'persistence-unknown') { env.toast?.('刻度持久状态无法确认，已恢复本地状态', null, true); return { status: 'failed', reason: 'persistence-unknown', error: err, feedbackShown: true }; }
+            if (err?.spDisabled) return { status: 'skipped', reason: 'spDisabled' };
+            markLedgerError(err, { phase: err?.ledgerPhase || 'capture-request' });
+            logLedgerFailure(err, { phase: err?.ledgerPhase || 'capture-request', batchNo: err?.ledgerBatchNo, batchTotal: err?.ledgerBatchTotal });
+            const manualFailure = manual || env.settings?.()?.notifyMode === 'full';
+            if (manualFailure) env.toast?.(ledgerFailureText('刻度标注失败', err, { phase: err?.ledgerPhase || 'capture-request', batchNo: err?.ledgerBatchNo, batchTotal: err?.ledgerBatchTotal }), null, true);
+            return { status: 'failed', reason: err?.ledgerPhase || err?.phase || 'api-failed', error: err, feedbackShown: manualFailure };
         } finally { clear(ctrl); removeBridge(); }
     };
     return {
@@ -286,3 +304,4 @@ export function createLedgerCaptureController(options = {}) {
         get isBusy() { return busy; }, get progress() { return progress; }, get abortController() { return abortController; },
     };
 }
+import { ledgerFailureText, logLedgerFailure, markLedgerError } from './diagnostics.js';

@@ -5,26 +5,32 @@ import * as scriptCore from '../../../../script.js';
 import { eventSource, event_types, substituteParams, saveSettingsDebounced, saveSettings as stSaveSettings, system_message_types } from '../../../../script.js';
 import {
     buildCreativeChatSystemPrompt,
-    buildSpaceChatSystemPrompt,
     getCreativeChatPlaceholder,
-    getSpaceChatPlaceholder,
-    buildTheaterDraftKey,
 } from './state.js';
 import * as memory from './memory.js';
-import * as theater from './theater.js';
-import * as anchor from './anchor.js';
+import { createTheaterRuntime } from './business/theater/runtime.js';
+import { createCoordinateRuntime } from './business/coordinate/runtime.js';
+import { enterCoordinateSidebar } from './business/coordinate/ui.js';
+import { captureSnapshotElement } from './business/coordinate/capture.js';
 import * as store from './store.js';
 import { bindStoreViewFallback, keyDesc, readStore, writeStore, removeStore } from './store.js';
 import * as ledger from './business/ledger/repository.js';
-import { createTargetMetadataSaver } from './runtime/target-metadata-save.js';
+import { createBestEffortMetadataSaver, createTargetMetadataSaver, dispatchTargetMetadataWithRefresh } from './runtime/target-metadata-save.js';
+import * as theaterDeviceCache from './runtime/theater-device-cache.js';
+import { createTheaterHostPorts } from './runtime/theater-host-ports.js';
 import * as snapshot from './snapshot.js';
 import { createDialogManager } from './modal.js';
 import { createAutomationGate } from './automation-gate.js';
 import { createDateCoordinator } from './date-coordinator.js';
 import {
+    TIME_TRAVEL_DIRECTION_OPTIONS,
+    buildTravelDirectionPrompt,
     buildTravelStoryPrompt,
+    collectTravelAnniversaries,
     createTimeTravelController,
     didStepComplete,
+    formatTravelDate,
+    parseTravelDirections,
     snapshotLastAssistant,
     removeTimeTravelBlocks,
     sameMonthDay,
@@ -35,6 +41,7 @@ import { weatherGlyph, weatherChipHtml, fmtAnchorTs, maskKey } from './utils/for
 import { getSettings, parseExcludeParams, loadCfg, loadUtilityCfg, saveCfg, loadApiPresets, genPresetId, upsertApiPreset, deleteApiPreset, renameApiPreset, fabEnabled, pluginEnabled, injectEnabled, getLinesInterval, saveLinesInterval, getLinesMode, saveLinesMode } from './runtime/settings.js';
 import { postChatCompletion, callCustomApi, callMemoryApi, callTheaterApi, bindApiClient, GEN_TEMPERATURE } from './api/client.js';
 import { normalizeApiUrl } from './api/sse.js';
+import { safeDiagnosticLog, diagnosticMessage, makeDiagnosticError, shouldNotifyGeneration, classifyGenerationError } from './api/diagnostics.js';
 import { normalizeTagNames } from './utils/tag-names.js';
 import { axisState } from './business/axis/state.js';
 import {
@@ -92,6 +99,7 @@ import {
 import {
     calendarSummary,
     calendarConflicts,
+    formatStoryClockHeadParts,
 } from './business/axis/ui.js';
 // 轴锚点/周几/距今/将至排序已抽出到 business/axis/anchor.js；index.js 内部跨域读取器经 bindAxisAnchor 注入。
 import {
@@ -111,11 +119,14 @@ import { createAxisItemUi } from './business/axis/item-ui.js';
 import { createAxisActions } from './business/axis/actions.js';
 import { createAxisDateActions } from './business/axis/date-actions.js';
 import { createAxisCalendarActions } from './business/axis/calendar-actions.js';
-import { createAxisGenerationController } from './business/axis/generation.js';
+import { createAxisGenerationController, validateAlmanacResponse } from './business/axis/generation.js';
+import { createAxisInlineRenderer } from './business/axis/inline.js';
+import { createAxisWidgetActions } from './business/axis/widget.js';
 import { createAxisTransactionController } from './business/axis/transaction.js';
 import { createAxisPromptBuilder } from './business/axis/prompts.js';
 import { createAxisDateContext } from './business/axis/date-context.js';
-import { bindStoryClock, parseStoryClock as parseStoryClockPure, parseJudgedDate as parseJudgedDatePure, latestStoryClock as latestStoryClockPure, storyClockDate as storyClockDatePure, storyWeekdayRef as storyWeekdayRefPure, completeStoryClock as completeStoryClockPure, DEFAULT_STORY_CLOCK_PROMPT, STORY_CLOCK_KEY, createStoryClockController } from './business/axis/story-clock.js';
+import { resolveAlmanacContextText, sanitizeGenerationContextText } from './runtime/generation-context.js';
+import { bindStoryClock, parseStoryClock as parseStoryClockPure, parseJudgedDate as parseJudgedDatePure, latestStoryClock as latestStoryClockPure, storyClockDate as storyClockDatePure, storyWeekdayRef as storyWeekdayRefPure, completeStoryClock as completeStoryClockPure, storyClockNarrativeBody, DEFAULT_STORY_CLOCK_PROMPT, STORY_CLOCK_KEY, createStoryClockController } from './business/axis/story-clock.js';
 import { createWeekdayConsumerContext, weekdayContextForPoint } from './business/axis/weekday-coordinator.js';
 import { buildDateJudgePrompt as buildDateJudgePromptPure } from './business/axis/date-detection.js';
 import { createDateDetectionController } from './business/axis/date-detection.js';
@@ -149,20 +160,31 @@ import { createLedgerSnapshotBridge } from './business/ledger/snapshot.js';
 import { createLedgerActions } from './business/ledger/actions.js';
 import { bindLedgerEvents, createLedgerDeletedHandler } from './business/ledger/events.js';
 import { buildLedgerSources } from './business/ledger/reconcile.js';
-import { ledgerOwnerIdentity } from './business/ledger/owner.js';
+import { ledgerOwnerIdentity, sameLedgerOwner } from './business/ledger/owner.js';
 import { bindLedgerCapture, createLedgerCaptureController, ledgerNarrativeMessage, ledgerFloorDateContext, ledgerAiFloorRecords, LEDGER_EVENT_TYPES, LEDGER_FIELD_SPEC } from './business/ledger/capture.js';
-import { mergeRecallTags, isDatabaseMemoEntry, filterRerollItems, pickWithoutPrevious, shouldRunPendingPointFollowup, nonEmptyTemplates, snapshotTheaterSource } from './runtime/refactor-adapters.js';
+import { filterRerollItems, shouldRunPendingPointFollowup } from './runtime/refactor-adapters.js';
+import {
+    createDatabaseMemoryAccess,
+    databaseMemoryDiagnostic,
+    databaseMemoryUiIdentity,
+    normalizeDatabaseWorldbookName,
+    renderDatabaseWorldbookOptions,
+    sameDatabaseMemoryUiIdentity,
+} from './business/memory/database.js';
 import { createTaskOwnerManager } from './runtime/task-owner.js';
 import { evaluateTaskLifecycle } from './runtime/task-orchestration.js';
 import { parseLines as parseCanonicalLines, TERMINAL_LINE_STAGES } from './business/lines/schema.js';
 import { buildLinesPrompt as buildCanonicalLinesPrompt } from './business/lines/prompt.js';
-import { linesViewModel } from './business/lines/render.js';
-import { inlineState } from './business/lines/inline.js';
 import { createAdvanceStrategy } from './business/lines/strategy.js';
 import { createLinesFeature } from './business/lines/feature.js';
 import { syncVectorGlyphTheme } from './business/lines/vectors/glyph.js';
-import { createOutlineRepository } from './business/outline/repository.js';
+import { createOutlineFeature } from './business/outline/feature.js';
+import { createSpaceFeature } from './business/space/feature.js';
+import { getSpaceChatPlaceholder } from './business/space/prompts.js';
 import { makeChatAnchor, normalizeChatAnchor, createChatAnchorRepository, DATE_ANCHOR_STORE_KEY } from './runtime/chat-date-anchor.js';
+
+// 坐标唯一 runtime；旧 anchor facade 继续保留兼容导出。
+let coordinateRuntime = null;
 // ledger 暗账页渲染/编辑/批量（Option B）已抽出到 business/ledger/render.js；index.js 宿主经 bindLedgerRender 注入。
 import {
     bindLedgerRender,
@@ -172,32 +194,47 @@ import {
     ledgerTypeClass, fmtLedgerAnchorDate, ledgerRowHtml,
     openLedgerEditor, closeLedgerEditor, ledgerMdToInput, renderLedgerEditor,
     ledgerReadMd, saveLedgerEditor,
-    batchBarHtml, BATCH_SCOPES, batchScopeIds, execBatch, renderLedgerSheet,
+    batchBarHtml, BATCH_SCOPES, batchScopeIds, execBatch, renderLedgerSheet, renderLedgerControls,
 } from './business/ledger/render.js';
 import { formatLedgerList } from './business/ledger/inline.js';
 
 // Ledger 正式事务只走固定聊天目标的 integrity/commitState saver；初始化失败时保持不可用，禁止回退到吞错 saveMetadata。
-const ledgerMetadataSaverReady = createTargetMetadataSaver({ coreModule: scriptCore });
+const ledgerMetadataSaverReady = (() => {
+    const advanced = createTargetMetadataSaver({ coreModule: scriptCore });
+    return advanced?.supported ? advanced : createBestEffortMetadataSaver({ context: getContext });
+})();
+const getLedgerTarget = () => {
+    try { return typeof scriptCore.resolveChatStateTarget === 'function' ? scriptCore.resolveChatStateTarget() : null; }
+    catch { return null; }
+};
 ledger.bindLedgerMetadataPersistence({
     async commit(ctx, options = {}) {
         const saver = await ledgerMetadataSaverReady;
         if (!saver?.supported) return { ok: false, reason: saver?.reason || 'metadata-saver-unavailable', commitState: 'not-dispatched' };
         const current = ctx || getContext?.();
-        const target = options.target || scriptCore.resolveChatStateTarget();
+        const target = options.target || getLedgerTarget();
+        if (typeof saver.commit === 'function') return saver.commit(current, { ...options, target, ownerGuard: options.compensate ? () => true : (options.ownerGuard || (() => true)) });
         const after = { ...(current?.chatMetadata || {}) };
         if (current?.chatMetadata?.['sp-ledger']) after['sp-ledger'] = current.chatMetadata['sp-ledger'];
-        let captured = saver.capture(target, after); let saveReason = captured ? 'snapshot-current' : 'snapshot-empty';
-        if (!captured && typeof scriptCore.refreshChatWriteSnapshotsFromServer === 'function') {
-            try { await scriptCore.refreshChatWriteSnapshotsFromServer(target); captured = saver.capture(target, after); saveReason = captured ? 'snapshot-refreshed' : 'snapshot-refresh-empty'; }
-            catch { saveReason = 'snapshot-refresh-failed'; }
-        }
-        if (!captured) return { ok: false, reason: 'metadata-capture-failed', saveReason, dispatched: false, commitState: 'not-dispatched' };
-        const result = await saver.dispatch(captured, { isCurrent: options.compensate ? () => true : (options.ownerGuard || (() => true)) });
-        return { ...result, saveReason: result.saveReason || saveReason, dispatched: result.dispatched ?? false, confirm: () => saver.confirm?.(captured) };
+        return dispatchTargetMetadataWithRefresh({ saver, target, afterMetadata: after, refresh: scriptCore.refreshChatWriteSnapshotsFromServer, isCurrent: options.compensate ? () => true : (options.ownerGuard || (() => true)) });
     },
 });
 
 const pointTaskOwners = createTaskOwnerManager();
+let theaterFeature;
+let memoryPauseNoticeShown = false;
+function createTheaterHostFeature() {
+    const runtime = createTheaterRuntime({
+        storage: globalThis.localStorage, coreModule: scriptCore, getContext, callTheaterApi,
+        buildWorldInfoContext: ctx => buildWorldInfoContext(ctx), readCardExtras: ctx => readCardExtras(ctx), getMemText: () => getMemText(),
+        names: () => ({ userName: getContext().name1 || '用户', charName: getContext().name2 || '角色' }),
+        settings: () => { const s = getSettings(); return { theaterStylePrompt: typeof s.theaterStylePrompt === 'string' ? s.theaterStylePrompt : '', theaterBeautifyPrompt: typeof s.theaterBeautifyPrompt === 'string' ? s.theaterBeautifyPrompt : '' }; },
+        onDiagnostic: diagnostic => { console.warn('[SP theater]', diagnostic); if (getSettings().notifyMode === 'full') showToast('小剧场美化失败，已保留原稿', null, true); },
+        stage: text => { if (theaterMode) setTheaterBody(loadingHtml(`正在${text}`, 'sp-abort-theater')); }, renderAiMessageHtml,
+        ports: createTheaterHostPorts({ $, $in, inEl, documentRef: globalThis.document, getContext, captureTarget: chatId => runtime?.captureTarget?.(chatId), theaterMode: () => theaterMode, modalId: () => MODAL_ID, setBody: html => setTheaterBody(html), loading: loadingHtml, escapeHtml, escapeAttr, settings: getSettings, saveSettingsDebounced, showToast, showPanel, spConfirm, scriptCore }),
+    });
+    return runtime.feature;
+}
 
 // Shadow-DOM accessors are dependencies of the top-level DI wiring below.
 // Declare them before any bind/create call can evaluate the dependency.
@@ -249,6 +286,7 @@ const axisDateActions = createAxisDateActions({
     swipe: () => latestStoryOwnerIdentity().swipe,
     confirm: spConfirm,
     aftermath: () => runAnchorAftermath(),
+    monthName: (cal, month) => calMonthName(cal, month),
     toast: showToast,
 });
 
@@ -334,6 +372,7 @@ const pointController = createPointController({
     setCached: html => { pointState.cachedSchedule = html; },
     notify: () => getSettings().notifyMode,
     canCommit: (owner, travel) => evaluateTaskLifecycle({ manager: pointTaskOwners, owner, chatId: getContext().chatId, chatRevision: pointTaskOwners.currentChatRevision(), signal: travel?.signal, pluginEnabled: pluginEnabled() }).canCommit,
+    logDiagnostic: diagnostic => console.warn('[SP point failure]', diagnostic),
     canCallback: owner => evaluateTaskLifecycle({ manager: pointTaskOwners, owner, chatId: getContext().chatId, chatRevision: pointTaskOwners.currentChatRevision(), pluginEnabled: pluginEnabled(), phase: 'callback' }).canCallback,
     setView,
     showEmpty: showEmptyGenerate,
@@ -383,7 +422,7 @@ bindLedgerCapture({
 });
 const ledgerCaptureController = createLedgerCaptureController({
     context: getContext,
-    target: () => scriptCore.resolveChatStateTarget(),
+    target: getLedgerTarget,
     charKey: charStableKey,
     config: loadCfg,
     calendar: loadCalDesc,
@@ -430,7 +469,7 @@ const ledgerInjectionController = createLedgerInjectionController({
 const refreshLedgerInjection = () => ledgerInjectionController.refresh();
 const ledgerJudgeController = createLedgerJudgeController({
     context: getContext,
-    target: () => scriptCore.resolveChatStateTarget(),
+    target: getLedgerTarget,
     charKey: charStableKey,
     listJudgeable: () => listJudgeableLedger(),
     fmtLedger: fmtLedgerForJudge,
@@ -451,6 +490,7 @@ const ledgerJudgeController = createLedgerJudgeController({
     dayOfYear: almDayOfYear,
     monthDayFromDoy: almMonthDayFromDoy,
     bridge: bridgeAbortSignal,
+    settings: getSettings,
     toast: showToast,
     refreshInject: refreshLedgerInjection,
     refreshInline: refreshInlineWindow,
@@ -462,6 +502,7 @@ const ledgerInlineRenderer = createLedgerInlineRenderer({
     calendar: loadCalDesc,
     entries: () => ledger.listEntries(),
     echo: () => ledgerInjectionController.echo,
+    capturing: () => ledgerCaptureController.isBusy,
     judging: () => ledgerJudgeController.isBusy,
     typeClass: ledgerTypeClass,
 });
@@ -517,6 +558,7 @@ bindLedgerRender({
     getLedgerCaptureProgress: () => ledgerCaptureController.progress,
     isCapturingLedger: () => ledgerCaptureController.isBusy,
     isJudgingLedger: () => ledgerJudgeController.isBusy,
+    renderLedgerControls,
 });
 
 const MODAL_ID   = 'sp-modal-root';
@@ -570,7 +612,7 @@ const axisCalendarManager = createCalendarManager({
     commit: cal => axisTransactionController.commit(cal),
     applyCalendar: (template) => axisTransactionController.commit(template),
     writeBindings: bindings => { getSettings().calendarTemplateBindings = bindings; },
-    onApplyError: error => { console.error('[SP calendar] 角色默认历法应用失败', error); showToast('角色绑定已更新，但默认历法没有应用成功，请稍后重试', null, true); },
+    onApplyError: error => { console.error('[SP calendar] 角色默认历法应用失败', safeDiagnosticLog('axis', 'save', error)); showToast('角色绑定已更新，但默认历法没有应用成功，请稍后重试', null, true); },
     limits: { ...CALENDAR_LIMITS, monthNameLength: CALENDAR_LIMITS.monthNameLength, eraNameLength: CALENDAR_LIMITS.eraNameLength },
     root: () => $in('#sp-almanac-wrap'),
     $,
@@ -607,7 +649,6 @@ const axisCalendarActions = createAxisCalendarActions({
 const axisPromptBuilder = createAxisPromptBuilder({ loadCalDesc, calMonthCount, calYearLen, isGregorianCalendar, getCalDescInjectText });
 const buildAlmanacPrompt = axisPromptBuilder.buildAlmanacPrompt;
 const buildAnniversarySupplementPrompt = axisPromptBuilder.buildAnniversarySupplementPrompt;
-const validateAlmanacResponse = raw => /<almanac_widget\b[^>]*>[\s\S]*<\/almanac_widget\s*>/i.test(String(raw || ''));
 const axisGenerationController = createAxisGenerationController({
     context: getContext, config: loadCfg, callApi: callCustomApi,
     prompt: (user, char) => buildAlmanacPrompt(user, char),
@@ -616,7 +657,7 @@ const axisGenerationController = createAxisGenerationController({
     loadItems: loadAlmanac, saveItems: saveAlmanacItems, dedupKey: almDedupKey, dateLabel: almDateLabel,
     sync: syncLatestAlmanacBlock, render: () => { if (axisState.almanacMode) renderAlmanacPanel(); },
     notify: (message, generated) => { if (generated) { if (axisState.almanacMode) { if (getSettings().notifyMode !== 'off') showToast(message); } else showToast(message, () => { $in('.sp-view-btn[data-view="almanac"]').trigger('click'); showPanel(); }); } else if (getSettings().notifyMode !== 'off') showToast(message); },
-    error: (error, supplement) => { if (axisState.almanacMode) showToast(`${supplement ? '补录失败：' : '生成失败：'}${escapeHtml(error.message || '未知错误')}`, null, true); else showToast(supplement ? '补录纪念日失败，请重试' : '轴生成失败，请重试', null, true); },
+    error: (error, supplement) => { if (axisState.almanacMode) showToast(`${supplement ? '补录失败：' : '生成失败：'}${escapeHtml(diagnosticMessage(error))}`, null, true); else showToast(supplement ? '补录纪念日失败，请重试' : '轴生成失败，请重试', null, true); },
     missingApi: () => { if (!settingsOpen) toggleSettings(); showToast('请先在设置中填写自定义 API', null, true); },
     missingChat: () => showToast('请先打开一个聊天', null, true),
     confirm: () => spConfirm({ title: '重新生成节日', body: '将按当前世界观重新铺一整年的既定日期。已锁定的条目和你手动添加的日期会保留，未锁定的 AI 条目会被替换。', confirmText: '生成', cancelText: '取消' }),
@@ -645,6 +686,7 @@ const renderAlmanacPanel = createAxisPanel({
     renderAlmanacEditor,
     renderLedgerEditor,
     renderLedgerSheet,
+    renderLedgerControls,
     renderAlmanacCalendar,
     renderAlmanacUpcoming,
     almToolbarHtml,
@@ -710,6 +752,7 @@ const dateDetectionController = createDateDetectionController({
     settings: getSettings,
     monthName: month => calMonthName(loadCalDesc(), month),
     toast: showToast,
+    logDiagnostic: diagnostic => console.warn('[SP axis failure]', diagnostic),
     aftermath: () => runAnchorAftermath(),
 });
 const applyDetectedDate = (charKey, md, { notify = true } = {}) => dateDetectionController.apply(charKey, md, notify);
@@ -723,6 +766,7 @@ const timeTravel = createTimeTravelController({
         const cal = loadCalDesc();
         const target = almValidMonthDay(selectedTargetDate, cal);
         if (!target) throw new Error('无法读取时光旅行选择的目标日期');
+        if (chatId !== getContext().chatId || signal?.aborted) throw Object.assign(new Error('时光旅行会话已失效'), { name: 'AbortError' });
         const chat = getContext().chat || [];
         const floor = chat[Number(messageId)];
         const clock = parseStoryClockPure(floor?.mes || '');
@@ -740,23 +784,43 @@ const timeTravel = createTimeTravelController({
             dateCoordinator.recordResult(key, { ...applied, date: target });
             return target;
         }
-        const result = await dateCoordinator.runOnce(key, () => runJudgeDateStep({ messageId, signal }));
+        const result = await dateCoordinator.ensureResolved(key, {
+            signal,
+            // 时旅是普通日期监听的下游消费者：同一版正文只要已有一次判定终态，
+            // 无论有日期、未知或失败，都直接复用；只有完全没有记录时才补跑一次。
+            // 这是调用方窄策略，不改变 coordinator 其他调用方默认的“只接受有日期结果”。
+            acceptPrevious: previous => previous != null && typeof previous === 'object',
+            resolve: ({ signal: coordinatorSignal }) => runJudgeDateStep({ messageId, signal: coordinatorSignal }),
+        });
         if (signal?.aborted || result?.status === 'cancelled') throw Object.assign(new Error('日期确认已取消'), { name: 'AbortError' });
         const judged = almValidMonthDay(result?.date, cal);
         if (judged) return judged;
+        const currentKey = buildDateRenderKey(messageId);
+        const sameRender = currentKey.chatId === key.chatId
+            && currentKey.messageId === key.messageId
+            && currentKey.swipeId === key.swipeId
+            && currentKey.contentSignature === key.contentSignature;
+        if (!sameRender || chatId !== getContext().chatId || signal?.aborted) throw Object.assign(new Error('正文版本已变化'), { name: 'AbortError' });
         const applied = applyDetectedDate(charStableKey(getContext()), target, { notify: false });
         if (applied.status === 'failed') throw new Error('日期锚点保存失败');
         dateCoordinator.recordResult(key, { ...applied, date: target });
+        showToast('未能从正文确认日期，已采用你选择的时旅目标日');
         return target;
     },
     onStateChange: ({ state }) => {
         axisState.timeTravelState = state;
-        if (axisState.almanacMode) renderAlmanacPanel();
+        const calendarVisible = axisState.almanacMode
+            && axisState._almanacSheet === 'calendar'
+            && !axisState._almanacManager
+            && !axisState._almanacEditor
+            && !getLedgerEditor()
+            && !axisState.isGeneratingAlmanac;
+        if (calendarVisible) renderAlmanacPanel({ preserveBodyScroll: true });
     },
     onStepResult: ({ key, result, destinationDate }) => {
         if (!didStepComplete(result)) return;
         if (key === AUTOMATION_MODULES.LINES) { if (getLinesMode() !== 'manual') linesFeature.resetCounter(); }
-        if (key === AUTOMATION_MODULES.OUTLINE) outlineJudgeMsgCounter = 0;
+        if (key === AUTOMATION_MODULES.OUTLINE) outlineFeature.resetJudgeCounter();
         if (key === AUTOMATION_MODULES.LEDGER_CAPTURE) ledgerCaptureCounter = 0;
         if (key === AUTOMATION_MODULES.LEDGER_JUDGE) ledgerJudgeCounter = 0;
         if (key === AUTOMATION_MODULES.LINES && getLinesMode() === 'days') {
@@ -765,9 +829,14 @@ const timeTravel = createTimeTravelController({
         }
     },
     onSequenceEnd: ({ sessionId }) => releaseTimeTravelClaim(sessionId),
+    onError: error => {
+        console.error('[SP 时光旅行] 同步流程失败', safeDiagnosticLog('time-travel', 'request', error));
+        showToast('时光旅行同步未完整完成，请手动检查各模块', null, true);
+    },
     steps: [
-        { key: AUTOMATION_MODULES.LINES, canRun: () => getSettings().linesEnabled !== false, run: async ({ messageId, destinationDate, promptAddon, signal }) => (await linesFeature.generation.run(false, { mesId: Number(messageId), forceReroll: true }, { targetDate: destinationDate, promptAddon, feedback: 'time-travel', signal }) || { status: 'updated' }) },
-        { key: AUTOMATION_MODULES.OUTLINE, canRun: () => { const saved = readStore(getOutlineCacheKey()); return !!(saved?.raw && parseOutline(saved.raw).length && getOutlineCursor() >= 1); }, run: ({ promptAddon, signal }) => runRelocateOutlineCursor(promptAddon, signal) },
+        // 线不再被时旅步骤直生；若时旅确实落地正常新 AI 楼，由 MESSAGE_RECEIVED→CMR 统一入口处理。
+        { key: AUTOMATION_MODULES.LINES, canRun: () => false, run: async () => ({ status: 'skipped' }) },
+        { key: AUTOMATION_MODULES.OUTLINE, canRun: () => outlineFeature.canRelocate(), run: ({ promptAddon, signal }) => outlineFeature.relocate(promptAddon, signal) },
         { key: AUTOMATION_MODULES.POINT, canRun: () => !!readStore(getCacheKey(currentView, charViewName))?.raw, run: ({ destinationDate, promptAddon, signal }) => syncPointToToday(false, { targetDate: destinationDate, promptAddon, feedback: 'time-travel', signal, allowPendingFollowup: false }) },
         { key: AUTOMATION_MODULES.LEDGER_CAPTURE, canRun: () => getSettings().ledgerCaptureEnabled === true, run: ({ destinationDate, promptAddon, signal }) => runLedgerCaptureStep(true, { targetDate: destinationDate, promptAddon, feedback: 'time-travel', signal }) },
         { key: AUTOMATION_MODULES.LEDGER_JUDGE, canRun: () => getSettings().ledgerCaptureEnabled === true, run: ({ destinationDate, promptAddon, signal }) => runLedgerJudgeStep(true, { targetDate: destinationDate, promptAddon, feedback: 'time-travel', signal }) },
@@ -802,31 +871,222 @@ function buildDateRenderKey(messageId) {
     };
 }
 
-function startTimeTravel(targetDate) {
-    const sourceDate = almTodayAnchor();
-    if (!targetDate || sameMonthDay(sourceDate, targetDate)) return false;
-    const prompt = buildTravelStoryPrompt({ sourceDate, targetDate, calendar: loadCalDesc() });
-    if (!injectToST(prompt)) return false;
-    const started = timeTravel.begin({ chatId: getContext().chatId, sourceDate, selectedTargetDate: targetDate });
-    return started;
+let _timeTravelSelectionSeq = 0;
+let _activeTimeTravelSelection = null;
+
+function travelAnniversaryCoverage(item, targetDate, calendar) {
+    const targetDoy = almDayOfYear(targetDate?.month, targetDate?.day, calendar);
+    if (!Number.isFinite(targetDoy) || !almItemCoversDoy(item, targetDoy, calendar)) return null;
+    const total = calYearLen(calendar);
+    const startDoy = almDayOfYear(item.month, item.day, calendar);
+    const days = almClampInt(item.days, 1, total, 1);
+    const dayIndex = ((targetDoy - startDoy) % total + total) % total + 1;
+    return {
+        startDate: { month: item.month, day: item.day },
+        endDate: almEndMonthDay(item, calendar),
+        days,
+        dayIndex,
+    };
 }
 
-function cancelTimeTravel() {
-    const active = timeTravel.getState();
-    timeTravel.clear();
+function collectTimeTravelContext(sourceDate, targetDate) {
+    const calendar = loadCalDesc();
+    const anniversaries = collectTravelAnniversaries(
+        loadAlmanac(),
+        targetDate,
+        calendar,
+        travelAnniversaryCoverage,
+        type => almTypeMeta(type).label,
+    );
+    const weekday = axisDateContext.weekdayFor(targetDate.month, targetDate.day, axisDateContext.weekdayRef(calendar), calendar);
+    const targetWeekday = Number.isInteger(weekday) ? (ALM_WEEKDAYS[weekday] || '') : '';
+    const outlineSnapshot = outlineFeature.readSnapshot();
+    const outline = outlineSnapshot.beats;
+    const outlineCursor = outlineSnapshot.cursor;
+    const lines = parseCanonicalLines(readStore(getLinesCacheKey())?.raw || '')
+        .filter(line => !TERMINAL_LINE_STAGES.has(line.stage));
+    const settings = getSettings();
+    const injectionOn = injectEnabled();
+    const injectionState = {
+        linesInjected: injectionOn && settings.linesEnabled !== false && settings.linesInject === true && lines.length > 0,
+        outlineInjected: injectionOn && settings.outlineInject === true && outline.length > 0 && outlineCursor >= 1,
+        ledgerInjected: injectionOn && settings.ledgerInject === true && ledgerInjectionController.echo.length > 0,
+    };
+    return { sourceDate, targetDate, calendar, anniversaries, targetWeekday, outline, outlineCursor, lines, injectionState };
+}
+
+function isTimeTravelSelectionCurrent(run) {
+    if (!run || _activeTimeTravelSelection !== run) return false;
+    if (!pluginEnabled() || getContext().chatId !== run.chatId || timeTravel.getState()) return false;
+    const validTarget = almValidMonthDay(run.targetDate, loadCalDesc());
+    return !!validTarget && sameMonthDay(validTarget, run.targetDate);
+}
+
+function directionValue(result) {
+    if (!result) return '';
+    if (result.value === 'custom') return String(result.customValue || '').trim();
+    return TIME_TRAVEL_DIRECTION_OPTIONS.find(option => option.value === result.value)?.prompt || '';
+}
+
+async function startTimeTravel(targetDate) {
+    const sourceDate = almTodayAnchor();
+    const validTarget = almValidMonthDay(targetDate, loadCalDesc());
+    if (!validTarget || sameMonthDay(sourceDate, validTarget)) return false;
+    const initialChatId = getContext().chatId;
+    const existing = timeTravel.getState();
+    if (existing?.phase === 'syncing') {
+        showToast('时光旅行正在同步，完成或中断后才能开始新的时旅');
+        return false;
+    }
+    if (existing?.phase === 'waiting') {
+        const confirmed = await customDialog.confirm({
+            title: '先中断旧的时光旅行？',
+            body: '输入框里还有一段尚未发送的时旅指令。开始新的时旅会移除旧指令。',
+            confirmText: '中断并继续',
+            cancelText: '保留旧时旅',
+        });
+        const current = timeTravel.getState();
+        if (!current || current.sessionId !== existing.sessionId || current.phase !== existing.phase || getContext().chatId !== initialChatId) {
+            showToast('时旅状态已经变化，本次没有覆盖当前会话');
+            return false;
+        }
+        if (!confirmed) return false;
+        clearTimeTravelSession(existing, { removeWaitingBlock: true, reason: 'replaced' });
+    }
+
+    const run = {
+        id: ++_timeTravelSelectionSeq,
+        chatId: initialChatId,
+        sourceDate: { month: sourceDate.month, day: sourceDate.day },
+        targetDate: { month: validTarget.month, day: validTarget.day },
+    };
+    _activeTimeTravelSelection = run;
+    let selectedValue = 'none';
+    let customValue = '';
+    let excluded = [];
+    let exclusionPreference = null;
+    try {
+        while (isTimeTravelSelectionCurrent(run)) {
+            const context = collectTimeTravelContext(run.sourceDate, run.targetDate);
+            const selection = await customDialog.selectOne({
+                title: `跳到 ${formatTravelDate(run.targetDate, context.calendar)}`,
+                body: '选择这次时间变化后的剧情方向。直接采用不会调用 API；AI 推演会先给出三个候选方向。',
+                choices: TIME_TRAVEL_DIRECTION_OPTIONS,
+                initialValue: selectedValue,
+                custom: { value: 'custom', initialValue: customValue, placeholder: '写下希望发生的剧情方向…', maxLength: 300, rows: 3 },
+                actions: [
+                    { value: 'direct', label: '直接采用' },
+                    { value: 'ai', label: 'AI 推演', primary: true },
+                ],
+                validate: value => value.value === 'custom' && !String(value.customValue || '').trim() ? '请先填写自定义剧情方向' : '',
+            });
+            if (!isTimeTravelSelectionCurrent(run) || !selection) return false;
+            selectedValue = selection.value;
+            customValue = selection.customValue;
+            const preference = directionValue(selection);
+            if (selection.action === 'direct') {
+                const finalContext = collectTimeTravelContext(run.sourceDate, run.targetDate);
+                const prompt = buildTravelStoryPrompt({ ...finalContext, direction: preference });
+                if (!injectToST(prompt)) return false;
+                if (!isTimeTravelSelectionCurrent(run)) return false;
+                return timeTravel.begin({ chatId: run.chatId, sourceDate: run.sourceDate, selectedTargetDate: run.targetDate, direction: preference });
+            }
+            if (selection.action !== 'ai') continue;
+            if (exclusionPreference !== preference) {
+                excluded = [];
+                exclusionPreference = preference;
+            }
+            const picked = await customDialog.selectOneAsync({
+                title: '选择 AI 推演方向',
+                body: '选择一条作为本次时旅方向；刷新会中止上一轮，并避开本次已经展示过的结果。',
+                refreshable: true,
+                refreshText: '换一批',
+                confirmText: '采用方向',
+                cancelText: '返回',
+                cancelValue: '__back__',
+                loadingText: '正在推演三个方向…',
+                emptyText: '没有得到可用方向，请刷新重试',
+                loadChoices: async ({ signal }) => {
+                    if (!isTimeTravelSelectionCurrent(run)) throw Object.assign(new Error('时旅选择已结束'), { name: 'AbortError' });
+                    const cfg = loadCfg();
+                    if (!cfg.url || !cfg.key) throw new Error('请先在设置中填写自定义 API 的 URL 和 Key；也可以返回后直接采用');
+                    const live = collectTimeTravelContext(run.sourceDate, run.targetDate);
+                    const prompt = buildTravelDirectionPrompt({ ...live, preference, excluded });
+                    const ctx = getContext();
+                    const raw = await callCustomApi(ctx, prompt, cfg, ctx.name1 || '用户', ctx.name2 || '角色', signal, 10, { temperature: GEN_TEMPERATURE });
+                    if (signal?.aborted || !isTimeTravelSelectionCurrent(run)) throw Object.assign(new Error('时旅选择已结束'), { name: 'AbortError' });
+                    const directions = parseTravelDirections(raw, excluded);
+                    if (directions.length !== 3) throw new Error('AI 没有返回三个可用方向，请刷新重试');
+                    excluded.push(...directions);
+                    return directions.map(value => ({ value, label: value }));
+                },
+            });
+            if (!isTimeTravelSelectionCurrent(run) || picked == null) return false;
+            if (picked === '__back__') continue;
+            const finalContext = collectTimeTravelContext(run.sourceDate, run.targetDate);
+            const prompt = buildTravelStoryPrompt({ ...finalContext, direction: picked });
+            if (!injectToST(prompt)) return false;
+            if (!isTimeTravelSelectionCurrent(run)) return false;
+            return timeTravel.begin({ chatId: run.chatId, sourceDate: run.sourceDate, selectedTargetDate: run.targetDate, direction: picked });
+        }
+        return false;
+    } finally {
+        if (_activeTimeTravelSelection === run) _activeTimeTravelSelection = null;
+    }
+}
+
+function clearTimeTravelSession(active = timeTravel.getState(), { removeWaitingBlock = false, reason = 'cleared' } = {}) {
+    if (!active) return false;
+    timeTravel.clear(reason);
     // clear() 不触发 onSequenceEnd（controller 只在 handleRendered 收尾时发），闸/协调器须随取消显式释放，
     // 否则 token 滞留 → 后续正常自动化被误抑制（同 chatId+messageId 复活场景）或协调器内存滞留。
     clearAutomationClaims();
     dateCoordinator.clear();
     dateDetectionController.abort();
-    abortOutlineJudge();
+    linesFeature.abortGeneration();
+    outlineFeature.judge.abort();
     _autoRegenSchedAbort?.abort();
     ledgerCaptureController.abort();
     ledgerJudgeController.abort();
-    if (active?.phase === 'waiting') {
+    if (removeWaitingBlock && active.phase === 'waiting') {
         const input = $('#send_textarea');
         if (input.length) input.val(removeTimeTravelBlocks(String(input.val() || ''))).trigger('input');
     }
+    return true;
+}
+
+async function cancelTimeTravel() {
+    const active = timeTravel.getState();
+    if (!active) return false;
+    const waiting = active.phase === 'waiting';
+    const confirmed = await customDialog.confirm({
+        title: waiting ? '取消这次时光旅行？' : '中止时光旅行同步？',
+        body: waiting
+            ? '确认后会移除输入框中尚未发送的时旅指令。'
+            : '确认后会停止当前及后续同步；已经完成的模块更新会保留。',
+        confirmText: waiting ? '取消时旅' : '中止同步',
+        cancelText: '继续当前时旅',
+    });
+    const current = timeTravel.getState();
+    if (!current || current.sessionId !== active.sessionId || current.phase !== active.phase) {
+        showToast('时旅状态已经变化，本次没有中断当前会话');
+        return false;
+    }
+    if (!confirmed) return false;
+    clearTimeTravelSession(active, { removeWaitingBlock: waiting, reason: 'cancelled' });
+    showToast(waiting ? '已取消时光旅行' : '已中止时光旅行同步；已完成的更新会保留');
+    return true;
+}
+
+function cancelTimeTravelForDeletion() {
+    const active = timeTravel.getState();
+    if (!active) return false;
+    const waiting = active.phase === 'waiting';
+    clearTimeTravelSession(active, { removeWaitingBlock: waiting, reason: 'message-deleted' });
+    showToast(waiting
+        ? '楼层已删除，未发送的时旅指令也已移除'
+        : '楼层已删除，时旅同步已中止；已完成的更新会保留');
+    return true;
 }
 
 function appendTravelPromptContext(prompt, travelContext = null) {
@@ -979,10 +1239,6 @@ let currentView        = 'user';  // 'user' | 'char'
 let _lastMainView      = 'schedule';  // 记住上次打开的模块视图（点/历/线/面/间/棱/坐标），同 chat 内跨开关面板保留；切 chat 复位成 schedule（第一页），见 CHAT_CHANGED
 let charViewName       = null;    // confirmed char name; preserved when switching to user view
 let outlineMode         = false;
-let isGeneratingOutline = false;
-let cachedOutline       = null;
-let outlineChatHistory  = [];
-let isOutlineChatting   = false;
 let linesMode           = false;
 // 线·swipe 重算：楼层单调递增闸（区分真·新楼层 vs swipe/历史重渲染），及"待重算 swipe"标记。
 const linesFeature = createLinesFeature({
@@ -1030,6 +1286,7 @@ const linesFeature = createLinesFeature({
         callApi: (...args) => callCustomApi(...args), filterRerollItems, dialog: customDialog,
         uuid: () => globalThis.crypto?.randomUUID?.(), now: () => Date.now(), random: () => Math.random(),
         toast: (message, error) => showToast(message, null, error), escapeHtml, escapeAttr,
+        logDiagnostic: diagnostic => console.warn('[SP dashed failure]', diagnostic),
         refreshPanel: () => {}, refreshInline: () => {},
     },
     dashedEnabled: () => getSettings().dashedEnabled === true,
@@ -1042,7 +1299,7 @@ const linesFeature = createLinesFeature({
         missingApi: ({ silent }) => { if (!silent && !settingsOpen) toggleSettings(); },
         onStart: () => {},
         commit: () => {},
-        fail: () => { if (getContext().chatId) showToast('线生成失败，请重试', null, true); }, cleanup: () => {},
+        fail: (error, { silent = false } = {}) => { const code = classifyGenerationError(error, { phase: error?.phase || 'request' }); const manual = !silent; const notify = shouldNotifyGeneration({ manual, notifyMode: getSettings().notifyMode, code }); const diagnostic = safeDiagnosticLog('lines', error?.phase || 'request', error, { background: !manual }); console.warn('[SP lines failure]', diagnostic); if (notify && getContext().chatId) showToast(`线生成失败：${diagnosticMessage(error)}`, null, true); }, cleanup: () => {},
     },
     actionsEnv: {
         isBusy: () => false, readSaved: () => readStore(getLinesCacheKey()), readRaw: () => readStore(getLinesCacheKey())?.raw || '',
@@ -1052,23 +1309,115 @@ const linesFeature = createLinesFeature({
     },
 });
 const linesRuntime = linesFeature.runtime;
-const outlineRepository = createOutlineRepository({ keyDesc, readStore, writeStore, chatId: () => getContext()?.chatId });
-let spaceMode           = false;
-let spaceChatHistory    = [];
-let isSpaceChatting     = false;
-let spaceChatAbortController = null;
-let outlineAbortController  = null;
-let outlineGenerationOwner  = null;
+const outlineFeature = createOutlineFeature({
+    context: getContext,
+    keyDesc,
+    readStore,
+    writeStore,
+    removeStore,
+    settings: getSettings,
+    pluginEnabled,
+    injectEnabled,
+    loadConfig: loadCfg,
+    loadUtilityConfig: loadUtilityCfg,
+    callApi: ({ ctx, prompt, config, userName, charName, signal, historyLimit, options }) =>
+        callCustomApi(ctx, prompt, config, userName, charName, signal, historyLimit, options),
+    precheck: memoryPreCheckConfirm,
+    isAutomationSuppressed,
+    automationModule: AUTOMATION_MODULES.OUTLINE,
+    bridgeAbortSignal,
+    buildChatMessages: args => composeCreativeChatMessages(args),
+    postCompletion: ({ config, ...options }) => postChatCompletion({ cfg: config, ...options }),
+    temperature: GEN_TEMPERATURE,
+    chatPlaceholder: getCreativeChatPlaceholder,
+    cleanText,
+    escapeHtml,
+    confirm: spConfirm,
+    openSettings: () => { if (!settingsOpen) toggleSettings(); },
+    ui: {
+        $,
+        query: $in,
+        element: inEl,
+        escapeHtml,
+        autoGrow: autoGrowTextarea,
+        formatAi: renderAiMessageHtml,
+        confirm: spConfirm,
+        copyText: copyPlainText,
+        injectToInput: injectToST,
+        setOutline: html => setOutlineBody(html),
+        loading: loadingHtml,
+        isOutlineMode: () => outlineMode,
+        isPanelVisible: () => $(`#${MODAL_ID}`).is(':visible'),
+        toast: (message, error) => showToast(message, null, error),
+        closedSuccess: () => showToast('面已生成，点击查看', () => {
+            if (!outlineMode) $in('.sp-view-btn[data-view="outline"]').trigger('click');
+            showPanel();
+        }),
+    },
+    logDiagnostic: diagnostic => console.warn('[SP outline failure]', diagnostic),
+});
+let spaceMode = false;
+const spaceFeature = createSpaceFeature({
+    context: getContext,
+    keyDesc,
+    readStore,
+    writeStore,
+    loadConfig: loadCfg,
+    postCompletion: ({ config, ...options }) => postChatCompletion({ cfg: config, ...options }),
+    temperature: GEN_TEMPERATURE,
+    placeholder: getSpaceChatPlaceholder,
+    openSettings: () => { if (!settingsOpen) toggleSettings(); },
+    isOpen: () => spaceMode,
+    contextEnv: {
+        context: getContext,
+        settings: getSettings,
+        readOutline: () => outlineFeature.readRaw(),
+        readPointRaw: () => readCacheRaw(getCacheKey('user', '')),
+        numberedPoints: numberedPointList,
+        readLineRaw: () => readStore(getLinesCacheKey())?.raw || '',
+        parseLines: parseCanonicalLines,
+        readLedgerText: () => {
+            try {
+                const items = ledger.listEntries() || [];
+                return items.length ? formatLedgerList(items, { daysSince: ledgerDaysSince, dueInfo: ledgerDueInfo }) : '';
+            } catch { return ''; }
+        },
+        readWorldInfo: ctx => buildWorldInfoContext(ctx),
+        readMemory: () => getMemText(),
+        readRecent: ctx => buildRecentChatContext(ctx),
+        readCardExtras,
+        readAlmanacText: () => getAlmanacInjectText(),
+        readCalendarText: () => getCalDescInjectText(),
+    },
+    renderEnv: {
+        escapeHtml,
+        formatAi: renderAiMessageHtml,
+        parseAlmanac: parseAlmanacWidget,
+        parseEra: parseEraWidget,
+        loadCalendar: loadCalDesc,
+        calendarMonthName: calMonthName,
+        calendarMonthCount: calMonthCount,
+        calendarYearLength: calYearLen,
+    },
+    ui: {
+        $,
+        query: $in,
+        element: inEl,
+        escapeHtml,
+        autoGrow: autoGrowTextarea,
+        copyText: copyPlainText,
+        confirm: spConfirm,
+        toast: (message, error) => showToast(message, null, error),
+        // 轴动作在本 facade 之后初始化；只在真实点击时读取，严禁顶层提前解引用造成 TDZ。
+        widgetActions: () => ({
+            point: (body, $button, editIdx) => applyPointWidget(body, $button, editIdx),
+            lines: (body, editIdx, $button) => linesFeature.widget.apply(body, editIdx, $button),
+            almanac: (body, $button, index) => axisWidgetActions.applyAlmanacWidget(body, $button, index),
+            era: (body, $button) => axisWidgetActions.applyEraWidget(body, $button),
+        }),
+    },
+});
 let theaterMode          = false;
-let isGeneratingTheater  = false;
-let theaterAbortController = null;
-let theaterCurrentPiece  = null;   // 当前渲染中的 piece（重生成/升永久用）
-let _theaterFsEsc        = null;   // 小剧场全屏时的 Esc 退出监听（一次性绑定，全局复用）
-let anchorMode           = false;  // 锚（收藏楼层）视图是否激活
-let _anchorSavedKeys     = new Set();   // 已收藏楼层键 `${chatId}::${mesid}`（内存缓存，供按钮同步态）
-let _anchorView          = { level: 'chars', charName: null, chatId: null, itemId: null };  // 四层抽屉：角色→聊天→收藏→全文
-let _anchorCurrentItem   = null;   // 当前全文视图的 item（跳转/删除/导出用）
-let _anchorFullTagEdit   = false;  // 全文视图「编辑标签」是否内联展开（避免 body 浮层被面板盖住）
 // 暗历内联编辑态/归档折叠态/批量模式已随 ledger 渲染层迁入 business/ledger/render.js
 // （经 getLedgerEditor/isLedgerArchiveOpen/getBatchScope 等访问器 + resetLedgerRenderState 复位）。
 const _injectTexts      = {};
@@ -1137,6 +1486,9 @@ jQuery(async () => {
     // 界面字体：按持久化的 uiFontUrl/uiFontFamily 挂 <link> + 写 --sp-font-user（早于注入 UI，防字体闪切）
     applyUiFont();
     injectExtButton();
+    // 重新挂载主 Shadow root 前先销毁旧棱实例，清理 Esc、图片监听、owner 与 UI 委托。
+    theaterFeature?.destroy?.();
+    theaterFeature = createTheaterHostFeature();
     injectModal();
     injectFab();
     injectToastContainer();
@@ -1147,7 +1499,10 @@ jQuery(async () => {
         getSettings: () => {
             const s = getSettings();
             return {
-                useBaiBaiBook  : !!s.useBaiBaiBook || !!s.useAnima,   // Anima 用户同样跳过内置采集/注入（memory.js 只认这一个旗标）
+                pluginEnabled  : s.pluginEnabled !== false,
+                useBaiBaiBook  : !!s.useBaiBaiBook,
+                useAnima       : !!s.useAnima,
+                useDatabase    : !!s.useDatabase,
                 memoryEnabled  : s.memoryEnabled !== false,
                 memoryL0Group  : Number.isFinite(+s.memoryL0Group) ? +s.memoryL0Group : 5,
                 memoryL1Group  : Number.isFinite(+s.memoryL1Group) ? +s.memoryL1Group : 10,
@@ -1157,33 +1512,35 @@ jQuery(async () => {
             };
         },
         callApi: callMemoryApi,
-    });
-    // Initialize theater (棱/小剧场) — storage + two-stage generation pipeline
-    theater.initTheater({
-        getSettings: () => {
-            const s = getSettings();
-            return {
-                theaterStylePrompt   : typeof s.theaterStylePrompt === 'string' ? s.theaterStylePrompt : '',
-                theaterBeautifyPrompt: typeof s.theaterBeautifyPrompt === 'string' ? s.theaterBeautifyPrompt : '',
-            };
-        },
-        callWriteApi   : callTheaterApi,
-        callBeautifyApi: callTheaterApi,
-        getStoryContext: getTheaterStoryContext,
-        fallbackRender : renderAiMessageHtml,
-    });
-    // Initialize anchor (坐标/收藏楼层) — /api/files 存储层；预热索引 + 载入已收藏楼层键
-    anchor.initAnchor({
-        getSettings: () => {
-            const s = getSettings();
-            return {
-                anchorSizeWarnBytes: Number.isFinite(+s.anchorSizeWarnBytes) ? +s.anchorSizeWarnBytes : 8 * 1024 * 1024,
-            };
+        onPause: log => {
+            console.warn('[SP memory pause]', log);
+            if (getSettings().notifyMode === 'full' && !memoryPauseNoticeShown) { memoryPauseNoticeShown = true; showToast('记忆系统因连续失败已暂停：请检查 API 后点击补齐或重构', null, true); }
         },
     });
-    refreshAnchorSavedKeys();
-    setTimeout(scanAnchorButtons, 900);
-    initAnchorObserver();
+    coordinateRuntime = createCoordinateRuntime({
+        forceNew: true,
+        root: $in('#sp-anchor-body')?.[0] || null,
+        warnBytes: Number(getSettings().anchorSizeWarnBytes) || 8 * 1024 * 1024,
+        hostPorts: { settings: () => getSettings(), dom: () => document, context: () => getContext() },
+        host: {
+            document, context: () => getContext(), settings: () => getSettings(), enabled: () => pluginEnabled(),
+            sheet: () => _spShadow?.querySelector?.('.sp-sheet') || document.querySelector('.sp-sheet'),
+            chatName: () => { const el = document.querySelector('#selected_chat_pole, #chat_name_pole, .current_chat_name'); return el?.value || el?.textContent?.trim() || getContext().chatId || '当前聊天'; },
+            capture: el => { const ctx = getContext?.() || {}; return captureSnapshotElement(el, { documentRef: document, DOMPurify: globalThis.DOMPurify, messageFormatting: ctx.messageFormatting }); },
+            toast: (message, action, error) => showToast(message, action, error),
+            warn: (message, error) => console.warn(message, error),
+            confirm: message => spConfirm({ title: String(message).includes('收藏') ? '删除收藏' : '删除标签', body: message }),
+            svg: cls => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3.5 L6 18 L20.5 18"/><circle cx="14" cy="9.4" r="1.9" fill="currentColor" stroke="none"/></svg>`,
+        },
+    });
+    coordinateRuntime.feature.init({ chatId: getContext()?.chatId ?? null });
+    coordinateRuntime.feature.bindInteractionCapture($in('#sp-anchor-wrap')?.[0] || null);
+    coordinateRuntime.feature.bindUi($in('#sp-anchor-wrap')?.[0] || null);
+    coordinateRuntime.feature.bindDelete($in('#sp-anchor-wrap')?.[0] || null);
+    coordinateRuntime.feature.bindGestures($in('#sp-anchor-wrap')?.[0] || null);
+    coordinateRuntime.feature.refreshSavedKeys();
+    setTimeout(() => coordinateRuntime.feature.scanButtons(), 900);
+    initChatObserver();
     // 首屏补挂：backfill 内部 refreshLinesInjection()（潜伏注入）+ refreshInlineWindow(true)
     // 统一挂线/历/点三段。历/点无独立首屏副作用，全汇流到同一防抖窗口刷新，一次即可。
     setTimeout(backfillLinesInlineBlocks, 800);
@@ -1212,33 +1569,21 @@ jQuery(async () => {
         dateDetectionController.abort();
         // 插件总关：迁移照做（幂等·防老用户数据漂移），其余全屏隐藏/后台相关一律不跑。
         // 即使插件当前关闭，切 chat 也必须先失效两路聊天任务，避免旧任务继续占用忙碌状态。
-        outlineChatAbortController?.abort();
-        outlineChatAbortController = null;
-        isOutlineChatting = false;
-        spaceChatAbortController?.abort();
-        spaceChatAbortController = null;
-        isSpaceChatting = false;
+        outlineFeature.onChatChanged({ lastSeen: (getContext().chat?.length ?? 0) - 1 });
+        spaceFeature.onChatChanged({ enabled: pluginEnabled() });
         linesFeature.dashed.abort();
-        if (!pluginEnabled()) return;
+        theaterFeature.onChatChanged();
+        coordinateRuntime?.feature?.onChatChanged({ chatId: getContext()?.chatId ?? null, chatMetadataRef: getContext()?.chatMetadata ?? null, enabled: pluginEnabled() });
+        if (!pluginEnabled()) { coordinateRuntime?.feature?.close?.(); return; }
         currentView  = 'user';
         charViewName = null;
         outlineMode  = false;
-        cachedOutline = null;
-        outlineChatHistory = [];
         linesMode    = false;
         linesRuntime.reset();
         linesFeature.setSheet('events');
         linesFeature.dashed.resetError();
         // 线·swipe：切 chat 复位单调闸到当前末楼（历史楼不误判为新楼），清待重算标记 + 所有临时层。
         linesFeature.clearAllSwipe(getContext().chatId);
-        // 大纲自动注入：切 chat 复位判定追踪。起点设成当前末楼→载入历史楼不回判；
-        // 中断进行中的判定、清计数，避免旧 chat 的判定落到新 chat。
-        outlineLastJudgedMsgId = (getContext().chat?.length ?? 0) - 1;
-        outlineJudgeMsgCounter = 0;
-        outlineJudgeAbort?.abort();
-        outlineJudgeAbort = null;
-        outlineJudgeOwner = null;
-        isJudgingOutline = false;
         // 历·自动确认日期：同理切 chat 复位单调闸到末楼、清计数、中断进行中的判定。
         almanacLastJudgedMsgId = (getContext().chat?.length ?? 0) - 1;
         almanacJudgeCounter = 0;
@@ -1253,18 +1598,11 @@ jQuery(async () => {
         ledgerJudgeController.reset();
         _autoRegenSchedAbort?.abort(); _autoRegenSchedAbort = null;   // 中断进行中的「同步到点」后台生成
         spaceMode = false;
-        spaceChatHistory = [];
         theaterMode = false;
-        isGeneratingTheater = false;
-        theaterCurrentPiece = null;
-        theaterAbortController?.abort();
-        theaterAbortController = null;
-        anchorMode = false;
-        _anchorView = { level: 'chars', charName: null, chatId: null, itemId: null };
+        // theater 已在插件关闭早退前统一 reset，避免旧 owner 占住 busy。
+        coordinateRuntime?.feature?.close?.();
         axisState.almanacMode = false;
-        axisState.isGeneratingAlmanac = false;
-        axisState.almanacAbortController?.abort();
-        axisState.almanacAbortController = null;
+        axisGenerationController.reset();
         axisState._almanacSheet = 'upcoming';
         axisState._almanacCalMonth = null;
         axisState._almanacCalDay = null;
@@ -1301,30 +1639,18 @@ jQuery(async () => {
         // Back-fill inline blocks for newly loaded chat（backfill 内部已含线注入 + 统一窗口刷新）
         setTimeout(backfillLinesInlineBlocks, 300);
         // 锚：换 chat → 重载已收藏键（按钮态跟着新 chat 走）+ 补齐每楼收藏入口
-        refreshAnchorSavedKeys();
-        setTimeout(scanAnchorButtons, 300);
-        // 锚自愈：按 chat_id_hash（改名不变的稳定键）兜住 CHAT_RENAMED 漏网的收藏
-        //（改名那刻插件没在听 → 旧 chatId 残留、跳转失效）。命中则静默迁到当前 chat 并刷新按钮态。
-        const _healHash = getContext()?.chatMetadata?.chat_id_hash;
-        const _healChatId = getContext()?.chatId;
-        if (_healChatId) {
-            (async () => {
-                let n = 0;
-                if (_healHash) n += await anchor.healChatByHash(_healChatId, getChatDisplayName(), _healHash).catch(() => 0);
-                n += await adoptOrphanAnchors(_healChatId, _healHash).catch(() => 0);
-                if (n > 0) { refreshAnchorSavedKeys(); if (anchorMode) renderAnchorPanel(); }
-            })().catch(err => console.warn('[SP anchor] 自愈失败:', err));
-        }
+        coordinateRuntime?.feature?.refreshSavedKeys();
+        setTimeout(() => coordinateRuntime?.feature?.scanButtons(), 300);
         // Surface memory schema-migration notice, if any (once per upgraded chat)
         setTimeout(checkMemoryMigrationNotice, 500);
         // 跨设备冲突：本机和云端各有一份不同的点线面间 → 弹窗二选一（延后到面板/主题就绪）
         if (_mig.status === 'conflict') setTimeout(() => showStoreConflictDialog(_mig), 700);
         maybeApplyBoundCalendarTemplate().catch(error => {
-            console.error('[SP calendar] 角色默认历法自动应用失败', error);
+            console.error('[SP calendar] 角色默认历法自动应用失败', safeDiagnosticLog('axis', 'save', error));
             if (getSettings().notifyMode === 'full') showToast('角色默认历法没有自动应用成功', null, true);
         });
         // 切进来立即按新 chat 的大纲+游标重设注入（关着或无大纲时内部自清）。
-        refreshOutlineInjection();
+        outlineFeature.injection.refresh();
         // 线注入同步一并重设：楼内块靠上面 300ms 的 backfill 补挂（要等 DOM），但注入不能等——
         // 否则这 300ms 窗口内若触发生成，上一个 chat 的线注入会残留污染新 chat 首楼。
         // refreshLinesInjection 幂等（关/无活跃线时内部自清），与 backfill 内那次重复无副作用。
@@ -1339,10 +1665,10 @@ jQuery(async () => {
         const _mig0 = store.migrateChatFromLocalStorage(getContext().chatId);
         if (_mig0.status === 'conflict') setTimeout(() => showStoreConflictDialog(_mig0), 900);
         if (pluginEnabled()) maybeApplyBoundCalendarTemplate().catch(error => {
-            console.error('[SP calendar] 首屏角色默认历法自动应用失败', error);
+            console.error('[SP calendar] 首屏角色默认历法自动应用失败', safeDiagnosticLog('axis', 'save', error));
             if (getSettings().notifyMode === 'full') showToast('角色默认历法没有自动应用成功', null, true);
         });
-    } catch (err) { console.warn('[SP store] 首屏迁移失败:', err); }
+    } catch (err) { console.warn('[SP store] 首屏迁移失败', safeDiagnosticLog('storage', 'save', err)); }
     // Auto-advance storylines, then append inline block to every AI message.
     // NOTE: shouldAdvance triggers generation BEFORE appending the current block,
     // so the current (newest, still-unstable) message is NOT included in the LLM
@@ -1360,16 +1686,22 @@ jQuery(async () => {
         const token = automationGate.claim({
             scopeId: getContext().chatId,
             messageId: Number(messageId),
-            modules: Object.values(AUTOMATION_MODULES),
+            modules: Object.values(AUTOMATION_MODULES).filter(module => module !== AUTOMATION_MODULES.LINES),
         });
         if (token) _timeTravelClaimTokens.set(session.sessionId, token);
     };
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.timeTravelPreflight);
+    if (_stListeners.received) eventSource.removeListener?.(event_types.MESSAGE_RECEIVED, _stListeners.received);
+    _stListeners.received = (messageId, type) => {
+        linesFeature.onMessageReceived({ messageId: Number(messageId), type });
+    };
+    eventSource.on(event_types.MESSAGE_RECEIVED, _stListeners.received);
     if (_stListeners.char) eventSource.removeListener?.(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.char);
     _stListeners.char = async (messageId, type) => {
         if (!pluginEnabled()) return;   // 插件总关：不补锚点 / 不挂楼内块 / 不推进 / 不生成
+        coordinateRuntime?.feature?.onCharacterRendered({ messageId: Number(messageId), type });
         // 锚收藏入口独立于线：不受 linesEnabled 影响，新楼渲染后补按钮
-        setTimeout(scanAnchorButtons, 150);
+        setTimeout(() => coordinateRuntime?.feature?.scanButtons(), 150);
         // 历·七天条：独立于线主开关，每次楼层渲染都把七天条补挂到最新 AI 楼（只读，无生成）
         syncLatestAlmanacBlock();
         syncLatestScheduleBlock();   // 点·日程条：同上，随新楼补挂（只读）
@@ -1378,63 +1710,6 @@ jQuery(async () => {
         const mid = Number(messageId);
         await linesFeature.onCharacterRendered({ messageId: mid, type, autoSuppressed: isAutomationSuppressed(mid, AUTOMATION_MODULES.LINES) });
         return;
-        /* legacy decision body retained temporarily for diff context; feature owns this path now.
-        // 时旅首楼：自动化线被显式步骤接管——本楼只阻止重复请求，不推进、不提前消费累计进度。
-        // （预检占闸先于本监听注册，同一 tick 生效，故此时闸必然已占住。）
-        const autoSuppressed = isAutomationSuppressed(mid, AUTOMATION_MODULES.LINES);
-        // 🔄重生成握手消费：读一次即清，防陈旧标记泄漏到后续事件。放在 isNewFloor 判定前，但下方分支
-        // 顺序保证 isNewFloor 优先——真·新楼即便撞上残留标记也走推进、不会误判成重 roll。
-        const wasPendingReroll = linesFeature.lifecycle.consumePendingReroll();
-        // 单调递增闸：mid 递增 = 真·新楼层；同 mid 重渲染 = swipe/刷新/历史回渲。
-        // counter++ 与自动推进只在真·新楼层做（修掉 swipe/重渲染误触 counter 的老 bug）；
-        // 但内联块要在**每次**渲染时补回最新楼——重渲染会清掉旧 DOM，不补则硬刷后主楼线块消失。
-        // 重 roll 判定（type/latch 两路 + 内容签名兜底）：
-        //   ① type==='swipe'：滑到末尾生成新 swipe，未降级、直接认。
-        //   ② type==='regenerate' / wasPendingReroll：重生成按钮🔄 的理想信号，但**实测不可靠**——
-        //      流式下这条 CMR 的 type 竟是 undefined 且 GENERATION_STARTED 没 latch 到 'regenerate'（pRr=false），
-        //      非流式又被 saveReply 降级成 'normal'。单靠 type/latch → 「点🔄线不重算·必现·毫无动静」。
-        //   ③ contentChanged（真·兜底，最稳）：**最新楼**的主文本变了 = 就在原楼重生成 = 重roll。版本无关。
-        //      只认最新楼（mid===_lastSeenMaxMesId）：历史楼改文本不该动当前线（生成器写的是全局当前线缓存）。
-        //      滑到已生成 swipe 属既有 MESSAGE_SWIPED 处理，那里已盖章签名，不会在此误判。
-        const _curSig  = _floorSig(mid);
-        const _curText = String(getContext().chat?.[mid]?.mes ?? '');
-        const contentChanged = (mid === linesFeature.lifecycle.lastSeenMaxMesId && linesFeature.lifecycle.floorTextSig[mid] !== undefined && _curSig !== linesFeature.lifecycle.floorTextSig[mid] && _curText.trim() !== '');
-        linesFeature.lifecycle.floorTextSig[mid] = _curSig;
-        const floorDecision = classifyRenderedFloor({ messageId: mid, lastSeen: linesFeature.lifecycle.lastSeenMaxMesId, type, pendingReroll: wasPendingReroll, contentChanged, pendingSwipe: linesFeature.lifecycle.pendingSwipeGen?.mesId === mid });
-        const isNewFloor = floorDecision.isNewFloor;
-        const isReroll = floorDecision.isReroll;
-        let shouldAdvance = false;
-        if (isNewFloor) {
-            linesFeature.lifecycle.lastSeenMaxMesId = mid;
-            const mode = getLinesMode();
-            if (autoSuppressed) {
-                // 时旅流程进行中：显式流程尚未返回结果，本楼只阻止重复请求，不提前消费已有累计进度。
-            } else if (mode === 'days') {
-                shouldAdvance = linesFeature.detectInGameDayChange();
-            } else if (mode === 'turns') {
-                const interval = getLinesInterval();
-                // 先自增后比较：interval=1 时每个新楼都推进。原来"先比较(>=)、末尾再 ++"，counter 从 0 起，
-                // 首个新楼 0>=1 不成立 → 第一楼不推进、整体相位晚一拍（切 chat / 删线归零后每次重犯），
-                // 表现为"这一楼和上一楼线相同"。对齐「面·大纲判定」的 ++counter 写法即可。
-                const advance = linesFeature.lifecycle.advanceCounter({ mode: 'turns', interval });
-                shouldAdvance = advance.shouldAdvance;
-            }
-            // mode === 'manual': never auto-advance, only inline block append
-        } else if (isReroll || (linesFeature.lifecycle.pendingSwipeGen && linesFeature.lifecycle.pendingSwipeGen.mesId === mid)) {
-            // 重 roll（🔄 重生成按钮）刚渲染完 → 先贴当前线（避免重算期间主楼空白），再从楼层基线 B0 重算。
-            // 纯 swipe 生成新变体（_pendingSwipeGen 命中）不再自动重算——只本地重挂，用户想更新线自己点刷新键。
-            // 借此避开「swipe 撞后台/改写插件请求」的并发；🔄 重 roll 仍保留自动重算（用户明确要留）。
-            // 区分靠 _pendingSwipeGen：只在 MESSAGE_SWIPED 带 pendingGeneration 时置位，重 roll 走 GENERATION_STARTED 不置。
-            const wasSwipeGen = linesFeature.lifecycle.consumePendingSwipe(mid);
-            linesFeature.appendInlineBlock(mid, false);
-            // 非推进楼没有 B0 基线，feature 内部会早退、线保持原样（与既有重 roll 语义一致，防止凭空推进）。
-            if (!wasSwipeGen) linesFeature.rerunSwipe({ mesId: mid, forceRegen: true });
-            return;
-        }
-        // 新楼层按 shouldAdvance 推进并贴块；刷新/历史/swipe 回退重渲染 shouldAdvance=false，仅把内联块补回最新楼。
-        linesFeature.appendInlineBlock(mid, shouldAdvance);
-        // 全量通知：线随剧情真推进了才弹（不推进不响，对应「变了才提示」）
-        if (shouldAdvance && getSettings().notifyMode === 'full') showToast('线已随剧情自动推进 · 请注意查看'); */
     };
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.char);
     if (_stListeners.timeTravel) eventSource.removeListener?.(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.timeTravel);
@@ -1442,12 +1717,12 @@ jQuery(async () => {
         if (!pluginEnabled()) return;
         // 闸由预检 preflight 抢占（先于 char 注册，同一 tick 生效）；这里只负责执行流程，
         // 占闸/释放全部走 preflight ↔ onSequenceEnd / cancel，杜绝「闸占在 char 之后」的死区。
-        if (!timeTravel.isInitialFloor(messageId)) return;
+        // 非匹配的最新 AI 楼也必须交给 controller，才能取消仍在 waiting 的旧会话。
         await timeTravel.handleRendered(messageId);
     };
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.timeTravel);
     if (_stListeners.timeTravelDeleted) eventSource.removeListener?.(event_types.MESSAGE_DELETED, _stListeners.timeTravelDeleted);
-    _stListeners.timeTravelDeleted = createLedgerDeletedHandler({ cancel: cancelTimeTravel, reconcile: reconcileLedgerSources, toast: showToast, refreshInject: refreshLedgerInjection, refreshInline: () => refreshInlineWindow(true), refreshPanel: () => { if (axisState.almanacMode && axisState._almanacSheet === 'ledger') renderAlmanacPanel(); } });
+    _stListeners.timeTravelDeleted = createLedgerDeletedHandler({ cancel: cancelTimeTravelForDeletion, reconcile: reconcileLedgerSources, toast: showToast, refreshInject: refreshLedgerInjection, refreshInline: () => refreshInlineWindow(true), refreshPanel: () => { if (axisState.almanacMode && axisState._almanacSheet === 'ledger') renderAlmanacPanel(); } });
     eventSource.on(event_types.MESSAGE_DELETED, _stListeners.timeTravelDeleted);
     // 线·swipe：滑到新 swipe 时线跟着重算（临时存 localStorage，发下条消息即固定）。
     // pendingGeneration=true → 该 swipe 会触发新生成，此刻新回复还没好，先记标记，等它的
@@ -1463,19 +1738,6 @@ jQuery(async () => {
         syncLatestScheduleBlock();   // 点·日程条：swipe 后一并重挂（点本身不随 swipe 变，纯补块）
         await linesFeature.onSwiped({ mesId, info });
         return;
-        /* feature-owned swipe decision; legacy bridge body below is unreachable.
-        if (getSettings().linesEnabled === false) return;
-        const mid = Number(mesId);
-            const swipeDecision = chooseSwipeLayer({ pendingGeneration: !!info?.pendingGeneration, swipeId: Number(info?.nextSwipeId ?? getContext().chat?.[mid]?.swipe_id ?? 0), stored: linesFeature.readSwipe(getContext().chatId, mid), baseline: '' });
-        if (swipeDecision.action === 'wait') { linesFeature.lifecycle.markPendingSwipe(mid); return; }
-        linesFeature.lifecycle.floorTextSig[mid] = _floorSig(mid);
-        linesFeature.applyStoredSwipe({
-            chatId: getContext().chatId, mesId: mid,
-            swipeId: Number(info?.nextSwipeId ?? getContext().chat?.[mid]?.swipe_id ?? 0),
-            key: getLinesCacheKey(), writeStore,
-            render: hit => { if (linesMode) linesFeature.renderBody(linesRuntime.html || linesFeature.renderLines(hit)); },
-            syncInline: syncLatestInlineBlock,
-        }); */
     };
     eventSource.on(event_types.MESSAGE_SWIPED, _stListeners.swiped);
     // 线·编辑盖章：用户小铅笔改正文 → 只把该楼签名基线刷成编辑后正文，绝不重算/生成。
@@ -1519,22 +1781,7 @@ jQuery(async () => {
     // 面·大纲自动注入：独立监听，跟线彻底解耦（绝不复用 _stListeners.char——它 linesEnabled=false
     // 会 early-return，连坐大纲）。每隔 N 楼独立判定一次剧情是否推进到下一节点，推进则游标 +1。
     if (_stListeners.outlineJudge) eventSource.removeListener?.(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.outlineJudge);
-    _stListeners.outlineJudge = async (messageId) => {
-        if (!pluginEnabled()) return;   // 插件总关：停后台大纲推进判定
-        if (getSettings().outlineInject !== true) return;
-        const chat = getContext().chat;
-        if (!Array.isArray(chat)) return;
-        // 只判「真·末楼」：backfill/历史重渲染会重放旧楼，靠 messageId===末楼 + 单调递增双闸挡掉
-        if (messageId !== chat.length - 1) return;
-        if (messageId <= outlineLastJudgedMsgId) return;
-        outlineLastJudgedMsgId = messageId;
-        // 时旅首楼：面推进由显式步骤接管（OUTLINE step），跳过自动判定，防重复 API
-        if (isAutomationSuppressed(messageId, AUTOMATION_MODULES.OUTLINE)) return;
-        // 攒够 interval 条真·新回复才跑判定（省 token）。计数只被真末楼 bump，历史重放到不了这
-        if (++outlineJudgeMsgCounter < getOutlineJudgeInterval()) return;
-        outlineJudgeMsgCounter = 0;
-        runJudgeOutlineStep();   // fire-and-forget，自带守卫
-    };
+    _stListeners.outlineJudge = messageId => outlineFeature.onCharacterMessage(messageId);
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.outlineJudge);
     // 历·确认当前剧情日期。戳优先——戳开且本楼有可解析戳 → **每次**最新楼定型都直读落地、零 API、不进单调闸；
     // 读不到戳（漏打 / 「谷雨」无月日）才走单调闸 + almanacAutoDetect 决定是否攒够 N 楼调一次 API 兜底 → 写共享 dateAnchor。
@@ -1559,7 +1806,7 @@ jQuery(async () => {
         if (getSettings().almanacAutoDetect === false) return;
         if (++almanacJudgeCounter < getAlmanacJudgeInterval()) return;
         almanacJudgeCounter = 0;
-        dateCoordinator.runOnce(renderKey, () => runJudgeDateStep());   // fire-and-forget；runOnce 兼并发去重
+        dateCoordinator.runOnce(renderKey, ({ signal }) => runJudgeDateStep({ messageId, signal }));   // fire-and-forget；runOnce 兼并发去重
     };
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.almanacJudge);
     // 点不再独立判定日期、也无独立跟随开关：任何一处改「今天」锚点都经 runAnchorAftermath → 顺手把点重排到今天，点纯下游连带跟随。
@@ -1624,13 +1871,14 @@ jQuery(async () => {
         const stripExt = v => String(v ?? '').replace(/\.jsonl$/i, '');
         const oldId = stripExt(data?.oldFileName), newId = stripExt(data?.newFileName);
         if (!oldId || !newId) return;
+        coordinateRuntime?.feature?.onChatRenamed({ oldId, newId });
         try {
             // 改名后重载 chat，chat_id_hash 已随文件搬到新 chat 上；顺手传进去补到收藏上，
             // 让后续分桶/自愈有稳定键（改名多少次都并一个桶）。
             const hash = getContext()?.chatMetadata?.chat_id_hash ?? null;
-            const n = await anchor.renameChatId(oldId, newId, newId, hash);
-            if (n && anchorMode) renderAnchorPanel();
-        } catch (err) { console.warn('[7dayscal] 坐标改名同步失败:', err); }
+            const n = await coordinateRuntime?.feature?.renameChatId(oldId, newId, newId, hash);
+            if (n) coordinateRuntime?.feature?.open('chars');
+        } catch (err) { console.warn('[7dayscal] 坐标改名同步失败', safeDiagnosticLog('axis', 'save', err)); }
     };
     eventSource.on(event_types.CHAT_RENAMED, _stListeners.rename);
     // 柏宝书就绪事件：加载顺序不固定，早期同步检测可能扑空而误报"未就绪"。
@@ -1656,7 +1904,6 @@ jQuery(async () => {
     // 这里兜底把已挂的悬浮球藏掉、把注入清干净）。开启态无需动——上面各首屏路径已正常挂载。
     if (!pluginEnabled()) applyPluginEnabled(false);
 });
-
 // ─── Config helpers ───────────────────────────────────────────────────────────
 
 // ─── Plugin settings (persisted in ST's settings.json) ────────────────────────
@@ -1689,51 +1936,55 @@ jQuery(async () => {
 // 一键中断所有在飞的后台判定与生成（点/线/虚线/面/间/棱/历 + 三路日期判定 + 同步到点），并清 re-entry 闸，
 // 让重新开启后能干净重跑。照 CHAT_CHANGED 的中断序列集中一处。
 function _abortAllBackground() {
+    memory.abortAll();
+    const activeTravel = timeTravel.getState();
+    if (activeTravel) clearTimeTravelSession(activeTravel, { removeWaitingBlock: activeTravel.phase === 'waiting', reason: 'plugin-disabled' });
+    _timeTravelSelectionSeq++;
+    _activeTimeTravelSelection = null;
+    customDialog.cancelActive();
     linesFeature.abortGeneration();
     for (const c of [
-        linesFeature.runtime.controller, spaceChatAbortController,
-        pointState.scheduleAbortController, outlineAbortController, theaterAbortController,
-        axisState.almanacAbortController, outlineChatAbortController,
-        outlineJudgeAbort, dateDetectionController.abortController, _autoRegenSchedAbort,
+        linesFeature.runtime.controller,
+        pointState.scheduleAbortController,
+        dateDetectionController.abortController, _autoRegenSchedAbort,
         ledgerCaptureController.abortController, ledgerJudgeController.abortController,
     ]) { try { c?.abort(); } catch {} }
+    outlineFeature.abortAll();
+    spaceFeature.abortAll();
     linesFeature.dashed.abort();
-    pointState.scheduleAbortController = outlineAbortController = theaterAbortController = null;
-    axisState.almanacAbortController = outlineChatAbortController = null;
-    outlineJudgeAbort = _autoRegenSchedAbort = null;
+    pointState.scheduleAbortController = null;
+    theaterFeature.onPluginDisabled();
+    axisGenerationController.reset();
+    _autoRegenSchedAbort = null;
     ledgerJudgeController.reset();
-    isGeneratingOutline = false;
-    isGeneratingTheater = axisState.isGeneratingAlmanac = false;
-    isJudgingOutline = false;
     ledgerCaptureController.reset();
-    isOutlineChatting = false;
-    isSpaceChatting = false;
-    if (outlineMode) renderCreativeChatHistory();
-    if (spaceMode) renderSpaceChatHistory();
+    if (outlineMode) outlineFeature.chat.load();
 }
 
-// 插件总开关落地。关：藏悬浮球、清所有楼内块与锚点入口（由 refreshInlineWindow/scanAnchorButtons 内部闸兜底）、
+// 插件总开关落地。关：藏悬浮球、清所有楼内块与坐标入口（由各 feature 内部闸兜底）、
 // 断所有后台任务、撤两路潜伏注入。不关面板——用户往往正站在设置里切它，留着好即时切回。
 // 开：按各子开关恢复——显示悬浮球、重挂楼内块与两路注入、补锚点入口。事件监听不注销，靠各 listener 的 pluginEnabled() 闸空转。
 function applyPluginEnabled(on) {
     const ctx = getContext();
     if (on) {
+        if (theaterMode) theaterFeature.open();
         $(`#${FAB_ID}`).css('display', fabEnabled() ? '' : 'none');
         try { backfillLinesInlineBlocks(); } catch {}   // 重挂线/历/点楼内块 + 重设线潜伏注入
-        try { refreshOutlineInjection(); } catch {}       // 重设大纲潜伏注入
+        try { outlineFeature.injection.refresh(); } catch {}       // 重设大纲潜伏注入
         try { refreshStoryClockInjection(); } catch {}    // 重设时间戳注入
-        try { scanAnchorButtons(); } catch {}             // 补回锚点收藏入口
+        try { coordinateRuntime?.feature?.refreshSavedKeys(); coordinateRuntime?.feature?.scanButtons(); } catch {} // 补回锚点收藏入口
         try { refreshInlineWindow(true); } catch {}
         maybeApplyBoundCalendarTemplate().catch(error => {
-            console.error('[SP calendar] 重新启用后角色默认历法自动应用失败', error);
+            console.error('[SP calendar] 重新启用后角色默认历法自动应用失败', safeDiagnosticLog('axis', 'save', error));
             if (getSettings().notifyMode === 'full') showToast('角色默认历法没有自动应用成功', null, true);
         });
     } else {
+        try { coordinateRuntime?.feature?.close?.(); } catch {}
         $(`#${FAB_ID}`).css('display', 'none');
         try { _clearAllInlineBoxes(); } catch {}
         _abortAllBackground();
         try { ctx.setExtensionPrompt?.(LINES_INJECT_KEY, ''); } catch {}
-        try { ctx.setExtensionPrompt?.(OUTLINE_INJECT_KEY, ''); } catch {}
+        try { outlineFeature.injection.clear(); } catch {}
         try { ctx.setExtensionPrompt?.(STORY_CLOCK_KEY, ''); } catch {}
         try { ledgerInjectionController.clear(); } catch {}
     }
@@ -1763,25 +2014,6 @@ function applyPluginEnabled(on) {
 // 采集「当前最新」的点/线/历/锚点 → 一份快照对象。这是权威源（sp-store 缓存 + 锚点）的
 // 一次性抓拍；写进某层 AI 楼的 message.extra 后即成为那层楼的「死历史」。
 // 只读、无副作用：任何时候调都安全。
-// ─── Storylines inline block (appended to AI messages) ────────────────────────
-
-// 线注入正文时给 Next 加「下一步：/恢复条件：」前缀。模型有时已在 l.next 里
-// 自带前缀（甚至混用），会导致「下一步：下一步：xxx」；先剥掉任意已有前缀再统一加。
-function prefixNext(next, stall) {
-    let clean = String(next || '').trim();
-    // 循环剥掉开头任意层模型自带的「下一步/恢复条件」标签，再统一加前缀。
-    // 只在能确认是"标签"而非正文时才剥（避免误伤"下一步行动是…"这类正文）：
-    //   (a) 被成对强调符包裹：**下一步** / **下一步：** / *恢复条件*（模型有时不加冒号，只加粗）
-    //   (b) 裸标签＋冒号：下一步： / 恢复条件：（必须带冒号才算标签）
-    let prev;
-    do {
-        prev = clean;
-        clean = clean.replace(/^(\*\*|__|\*|_)\s*(下一步|恢复条件)\s*[:：]?\s*\1\s*[:：]?\s*/, '').trim();
-        clean = clean.replace(/^\s*(下一步|恢复条件)\s*[:：]\s*/, '').trim();
-    } while (clean !== prev);
-    return (stall ? '恢复条件：' : '下一步：') + clean;
-}
-
 // rawArg：null=读当前视角活缓存（最新楼，现状不变）；字符串=快照里的线 raw（历史楼）。
 // readOnly：true=历史楼，去掉逐条注入/删除按钮 + 标题条的「推进」按钮（旧楼不触发生成）。
 // 历史楼不并虚线子块（虚线是全局冷知识、非那层楼的历史态）。
@@ -1826,97 +2058,30 @@ function syncLatestInlineBlock(expectedChatId = null) {
 // 纯读 loadAlmanac()+锚点，不请求 API、不受 linesEnabled 影响，只受 almanacInlineEnabled 开关控制。
 // itemsArg：null=读当前活历 loadAlmanac()（最新楼）；数组=快照里的历条目（历史楼）。
 // anchorArg：null=读当前锚点 almTodayAnchor()；{month,day}=快照锚点。历本就只读，无按钮需 gate。
-function _buildAlmanacBlockHtml(itemsArg = null, anchorArg = null, calendarOverride = undefined, weekdayRefOverride = undefined) {
-    if (getSettings().almanacInlineEnabled === false) return null;
-    const items = Array.isArray(itemsArg) ? itemsArg : loadAlmanac();
-    if (!items.length) return null;   // 无任何历条目 → 不打扰聊天，不显示
-    const anchor  = (anchorArg && Number.isFinite(+anchorArg.month) && Number.isFinite(+anchorArg.day))
-        ? { month: +anchorArg.month, day: +anchorArg.day }
-        : almTodayAnchor();
-    const cal     = calendarOverride === undefined ? loadCalDesc() : calendarOverride;
-    const ref     = weekdayRefOverride !== undefined ? weekdayRefOverride : almWeekdayRef(cal);
-    const baseDoy = almDayOfYear(anchor.month, anchor.day, cal);
-    const baseWd  = almWeekdayFor(anchor.month, anchor.day, ref, cal);
-    const total   = calYearLen(cal);
-    let hasAny = false;
-    const coveredItems = new Set();   // 未来 7 天窗口内被覆盖到的历条目（多日节日只计一次）→ 标题「N个日程」
-    // 六格（非七格）：大头已经是「今天」，这里只排今天之后的 6 天（周X + M/D），
-    // 有种从大头往后延续的感觉、不重复今天。i 从 1（明天）起。
-    const cells = Array.from({ length: 6 }, (_, k) => {
-        const i   = k + 1;
-        const doy = ((baseDoy - 1 + i) % total) + 1;
-        const md  = almMonthDayFromDoy(doy, cal);
-        const wd  = baseWd == null ? '星期未记录' : ALM_WEEKDAYS[(baseWd + i) % 7];   // 线性偏移 → 周几连续（不受年尾接缝影响）
-        const cover = items.filter(it => almItemCoversDoy(it, doy, cal));
-        const has = cover.length > 0;
-        if (has) { hasAny = true; cover.forEach(it => coveredItems.add(it)); }
-        const cls = ['sp-alm-scell'];
-        if (has) cls.push('sp-alm-scell-has');
-        const dot = has ? `<span class="sp-alm-dot sp-alm-type-${almTypeMeta(cover[0].type).cls}"></span>` : '';
-        return `<div class="${cls.join(' ')}" data-doy="${doy}">
-            <span class="sp-alm-scell-wd">${wd}</span>
-            <span class="sp-alm-scell-md">${md.month}/${md.day}</span>
-            ${dot}
-        </div>`;
-    }).join('');
-    // 标题条仿线：收起态就是这条「历 · N个日程」，点整条展开（原生 <details>/<summary>）
-    const summary = `<summary class="sp-inline-summary"><span class="sp-inline-title">轴</span><span class="sp-inline-count">${coveredItems.size}个日程</span></summary>`;
-    const strip   = `<div class="sp-alm-strip">${cells}</div>`;
-    // 即将到来清单（仪表盘顶行·今头右侧的 ≡ 倒计时行）：全历条目按「还有几天」排，多日节假日
-    // 今天正落区间内记「进行中」(d=-1) 置顶。用本函数的 anchor/baseDoy，历史楼快照锚点也对。
-    // 取前 3 条免得刷屏；用户展开七天条 / 历面板看全量。
-    const upcoming = items
-        .map(it => {
-            const active = almClampInt(it.days, 1, calYearLen(cal), 1) > 1 && almItemCoversDoy(it, baseDoy, cal);
-            return { it, d: active ? -1 : almDaysUntil(it.month, it.day, anchor, cal) };
-        })
-        .sort((a, b) => a.d - b.d || a.it.month - b.it.month || a.it.day - b.it.day)
-        .slice(0, 3);
-    const upHtml = upcoming.map(({ it, d }) => {
-        const meta  = almTypeMeta(it.type);
-        const label = d === -1 ? '进行中' : d === 0 ? '今天' : `还有${d}天`;
-        return `<div class="sp-alm-up-row">
-            <span class="sp-alm-up-dot sp-alm-type-${meta.cls}"></span>
-            <span class="sp-alm-up-name">${escapeHtml(it.name)}</span>
-            <span class="sp-alm-up-when${d <= 0 ? ' sp-alm-up-soon' : ''}">${label}</span>
-        </div>`;
-    }).join('');
-    const upList = upHtml ? `<div class="sp-alm-up">${upHtml}</div>` : '';
-    // 六格条：单独打包成 stripHtml，由仪表盘组装时放到「顶行下方·满宽」（不再挤在今头右侧列里，
-    // 让右侧列只剩 summary+即将到来 ≈ 今头方形高，今头得以贴成正方形）。
-    // 无节日 → flat（不可点）；有节日 → live（可点、下方就地展开 .sp-alm-sday）。
-    const stripHtml = hasAny
-        ? `<div class="sp-alm-strip-wrap sp-alm-strip-live">${strip}<div class="sp-alm-sday" hidden></div></div>`
-        : `<div class="sp-alm-strip-wrap sp-alm-strip-flat">${strip}</div>`;
-    return { summary, upHtml: upList, stripHtml };
-}
+// 楼内轴渲染统一由 axisInlineRenderer 提供。
 
-// 七天条：某一天(doy) 的就地详情 HTML（点某格时填进该条的 .sp-alm-sday）。
-// 只读 loadAlmanac()、按覆盖该天筛选；空 → 「这天没有安排」。
-// itemsArg：null=读活历（最新楼）；数组=快照历条目（历史楼）。历只读，无按钮需 gate。
-function _almanacStripDayHtml(doy, itemsArg = null, calendarOverride = undefined, weekdayRefOverride = undefined) {
-    const cal   = calendarOverride === undefined ? loadCalDesc() : calendarOverride;
-    const ref   = weekdayRefOverride !== undefined ? weekdayRefOverride : almWeekdayRef(cal);
-    const md    = almMonthDayFromDoy(doy, cal);
-    const wdIndex = almWeekdayFor(md.month, md.day, ref, cal);
-    const wd    = wdIndex == null ? '星期未记录' : ALM_WEEKDAYS[wdIndex];
-    const head  = `<div class="sp-alm-sday-head">${calMonthName(cal, md.month)}${md.day}日 · ${wd}</div>`;
-    const src   = Array.isArray(itemsArg) ? itemsArg : loadAlmanac();
-    const day   = src.filter(it => almItemCoversDoy(it, doy, cal)).sort((a, b) => a.month - b.month || a.day - b.day);
-    if (!day.length) return `${head}<div class="sp-alm-sday-empty">这天没有安排</div>`;
-    const rows = day.map(it => {
-        const meta = almTypeMeta(it.type);
-        const days = almClampInt(it.days, 1, calYearLen(cal), 1);
-        const span = days > 1 ? `<span class="sp-alm-drawer-span">共${days}天</span>` : '';
-        return `<div class="sp-alm-drawer-item">
-            <i class="fa-solid ${meta.icon} sp-alm-drawer-icon sp-alm-type-${meta.cls}"></i>
-            <span class="sp-alm-drawer-name">${escapeHtml(it.name)}</span>
-            <span class="sp-alm-drawer-type">${meta.label}</span>${span}
-            ${it.note ? `<span class="sp-alm-drawer-note">${escapeHtml(cleanText(it.note))}</span>` : ''}
-        </div>`;
-    }).join('');
-    return `${head}<div class="sp-alm-sday-list">${rows}</div>`;
-}
+// 历楼内只读渲染由 axis inline seam 持有；宿主仅提供实时数据与纯历法 helper。
+const axisInlineRenderer = createAxisInlineRenderer({
+    settings: getSettings,
+    loadItems: loadAlmanac,
+    today: almTodayAnchor,
+    calendar: loadCalDesc,
+    weekdayRef: cal => almWeekdayRef(cal),
+    dayOfYear: almDayOfYear,
+    weekdayFor: almWeekdayFor,
+    yearLength: calYearLen,
+    monthDayFromDoy: almMonthDayFromDoy,
+    weekdays: ALM_WEEKDAYS,
+    itemCoversDoy: almItemCoversDoy,
+    typeMeta: almTypeMeta,
+    clamp: almClampInt,
+    daysUntil: almDaysUntil,
+    escapeHtml,
+    monthName: calMonthName,
+    cleanText,
+});
+const _buildAlmanacBlockHtml = (...args) => axisInlineRenderer.buildAlmanacBlock(...args);
+const _almanacStripDayHtml = (...args) => axisInlineRenderer.buildAlmanacDay(...args);
 
 // 七天条 per-day tap：点某格 → 下方就地展开当天安排（再点同格收起、点别格切换）。委托到 document、
 // 只注册一次——块会被 #chat observer 反复重建，不能绑在块自身上；只对 .sp-alm-strip-live 可交互条生效。
@@ -2086,8 +2251,8 @@ function parseStampDate(stamp) {
 // 组窄条「今 …」那截：{ todayHtml(含 .sp-dash-sum-today 壳), timeHtml(时刻尾巴，贴天气后) }。
 function storyClockHeadParts(isLatest, a, anchorWd, floorClock = null, calendarOverride = undefined) {
     const renderCalendar = calendarOverride === undefined ? loadCalDesc() : calendarOverride;
-    const today = (inner, tip) => `<span class="sp-dash-sum-today"${tip ? ` title="${tip}"` : ''}>${inner}</span>`;
-    const fallback = { todayHtml: today(`今 ${a.month}月${a.day}日 ${anchorWd || '星期未记录'}`), timeHtml: '' };
+    const format = options => formatStoryClockHeadParts({ anchor: a, anchorWeekday: anchorWd, calendar: renderCalendar, monthName: calMonthName, escapeHtml, ...options });
+    const fallback = format();
     if (!storyClockEnabled()) return fallback;
     let clk = floorClock;
     if (isLatest) {
@@ -2098,16 +2263,12 @@ function storyClockHeadParts(isLatest, a, anchorWd, floorClock = null, calendarO
     const tip = '时间戳·主楼 AI 每楼隐形打点读回';
     const clockMeta = clk?.endMeta?.valid ? clk.endMeta : (clk?.startMeta?.valid ? clk.startMeta : null);
     if (clockMeta) {
-        const swd = clockMeta.weekdayIndex == null ? (anchorWd || '星期未记录') : (ALM_WEEKDAYS[clockMeta.weekdayIndex] || '星期未记录');
-        const timeHtml = clockMeta.time ? `<span class="sp-dash-sum-time">${escapeHtml(clockMeta.time)}</span>` : '';
-        return { todayHtml: today(`今 ${clockMeta.month}月${clockMeta.day}日 ${swd}`, tip), timeHtml };
+        const weekdayText = clockMeta.weekdayIndex == null ? (anchorWd || '星期未记录') : (ALM_WEEKDAYS[clockMeta.weekdayIndex] || '星期未记录');
+        return format({ clockMeta: { ...clockMeta, weekdayText }, tip });
     }
     const p = parseStampDate(stamp);
-    if (!p) return { todayHtml: today(`今 ${escapeHtml(stamp)}`, tip), timeHtml: '' };   // 古风/无法解析 → 原样抬
-    const swd = '星期未记录';
-    const ymd = `${p.year ? p.year + '年' : ''}${p.month}月${p.day}日`;
-    const timeHtml = p.time ? `<span class="sp-dash-sum-time">${escapeHtml(p.time)}</span>` : '';
-    return { todayHtml: today(`今 ${ymd}${swd ? ' ' + swd : ''}`, tip), timeHtml };
+    if (!p) return format({ rawStamp: stamp, tip });   // 古风/无法解析 → 原样抬
+    return format({ stampDate: p, tip });
 }
 function _dashSummaryHtml(snap, hasDate, almOn, schOn, linesOn, flat = false, isLatest = false, floorClock = null, calendarOverride = undefined, weekdayRefOverride = undefined) {
     const renderCalendar = calendarOverride === undefined ? loadCalDesc() : calendarOverride;
@@ -2439,26 +2600,6 @@ function refreshLinesInjection() {
     return linesFeature.injection?.refresh?.();
 }
 
-// ─── 面·大纲自动注入（游标沿节点前进，隐形喂主楼 AI）──────────────────────────────
-// 大纲本就是线性节点串（parseOutline 出 beats）。开启后每隔 N 楼独立判定一次剧情演到哪个
-// 节点（游标只进不退、无信号不动），把「当前节点 + 下个方向」以 SYSTEM/IN_CHAT 注入主楼 AI，
-// 让叙事自然顺着大纲走。游标存进大纲对象 {raw,ts,cursor}（随视角/聊天走）。默认关（opt-in，
-// 每次判定多一次 API 调用）。跟线彻底解耦：独立监听、独立 abort、不受 linesEnabled 影响。
-const OUTLINE_INJECT_KEY   = 'sp_outline_step';
-const OUTLINE_INJECT_DEPTH = 4;
-let   isJudgingOutline       = false;
-let   outlineJudgeAbort      = null;
-let   outlineJudgeOwner      = null;
-let   outlineLastJudgedMsgId = -1;   // 防重放：只判「比上次判过的更新的末楼」，切 chat 时设成末楼
-let   outlineJudgeMsgCounter = 0;    // 攒够 interval 条真·新回复才跑一次判定（照 linesAiMsgCounter 套路）
-function abortOutlineJudge() {
-    const owner = outlineJudgeOwner;
-    outlineJudgeOwner = null;
-    outlineJudgeAbort = null;
-    if (owner) { try { owner.abort(); } catch {} }
-    isJudgingOutline = false;
-}
-
 // 历·自动确认日期的判定状态（抄 outline 那套三闸：防重入 + 单调 msgId + 攒够计数）。仅 API 兜底路用；戳优先路每楼直读不占这些。
 let   almanacLastJudgedMsgId = -1;
 let   almanacJudgeCounter    = 0;
@@ -2469,12 +2610,6 @@ let   ledgerCaptureCounter   = 0;
 // 暗账·判定（刷现状）的一套闸，独立于标注：判定车重算「距今多久」、只让 AI 回该变的那几条。
 let   ledgerLastJudgedMsgId  = -1;
 let   ledgerJudgeCounter     = 0;
-
-// 判定间隔（缺省/非法 → 3；≥1）。独立于线的 getLinesInterval。
-function getOutlineJudgeInterval() {
-    const n = Number(getSettings().outlineJudgeInterval);
-    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 3;
-}
 
 // 历·API 兜底判定的间隔（缺省/非法 → 3；≥1）。抄 getOutlineJudgeInterval。
 function getAlmanacJudgeInterval() {
@@ -2492,57 +2627,6 @@ function getLedgerCaptureInterval() {
 function getLedgerJudgeInterval() {
     const n = Number(getSettings().ledgerJudgeInterval);
     return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 4;
-}
-
-// 读当前视角大纲游标（1-based；无大纲 → 0 表示「无」；有大纲无 cursor 字段 → 默认停在第 1 节点）。
-function getOutlineCursor() {
-    const saved = readStore(getOutlineCacheKey());
-    if (!saved?.raw) return 0;
-    const n = Number(saved.cursor);
-    if (Number.isFinite(n) && n >= 0) return Math.floor(n);   // 含显式 0＝已取消狙击（无当前节点）
-    return 1;                                                  // cursor 字段缺失/非法 → 默认落在第 1 节点
-}
-// 写游标（读-改-写，保留 raw/ts/其它字段）。clamp 到 [0, 节点数]：0＝取消狙击（无当前节点）。
-function setOutlineCursor(cursor) {
-    const key = getOutlineCacheKey();
-    const saved = readStore(key);
-    if (!saved?.raw) return;
-    const total = parseOutline(saved.raw).length || 1;
-    const c = Math.max(0, Math.min(total, Math.floor(cursor)));
-    writeStore(key, { ...saved, cursor: c });
-}
-
-function buildOutlineInjectionText(beats, cursor) {
-    const cur = beats[cursor - 1];
-    const nxt = beats[cursor];   // 可能 undefined（已到最后一个节点）
-    const fmt = b => `${b.time ? b.time + '·' : ''}《${b.title}》${b.type ? '·' + b.type : ''}`;
-    const parts = [
-        '【剧情大纲·当前进度参考·仅供你把握走向，切勿直接引用或点破】',
-        '故事正沿一条大纲缓慢推进。请把下面的「当前节点」当作此刻所处的阶段，',
-        '自然、含蓄地顺着它叙事；把「下个节点」当作隐约的方向，不要生硬跳进、不要提前抖开。',
-        `当前节点：${fmt(cur)}` + (cur.scene ? `\n  ${cleanText(cur.scene)}` : ''),
-    ];
-    if (nxt) parts.push(`下个节点（方向，勿急）：${fmt(nxt)}` + (nxt.scene ? `\n  ${cleanText(nxt.scene)}` : ''));
-    else     parts.push('已是大纲最后一个节点，可从容收束。');
-    return parts.join('\n');
-}
-
-// 重设大纲注入。读当前视角大纲+游标；关闭或无大纲时清空。幂等，可随处多调。
-function refreshOutlineInjection() {
-    const ctx = getContext();
-    if (typeof ctx.setExtensionPrompt !== 'function') return;
-    const clear = () => ctx.setExtensionPrompt(OUTLINE_INJECT_KEY, '');
-    if (!injectEnabled()) { clear(); return; }   // 注入总闸（含插件总关）→ 一律不注入
-    if (getSettings().outlineInject !== true) { clear(); return; }
-    let beats = [], cursor = 0;
-    try {
-        const saved = readStore(getOutlineCacheKey());
-        if (saved?.raw) { beats = parseOutline(saved.raw); cursor = getOutlineCursor(); }
-    } catch { beats = []; cursor = 0; }
-    if (!beats.length || cursor < 1) { clear(); return; }
-    const pt = ctx.constants?.promptTypes?.IN_CHAT ?? 1;
-    const pr = ctx.constants?.promptRoles?.SYSTEM  ?? 0;
-    ctx.setExtensionPrompt(OUTLINE_INJECT_KEY, buildOutlineInjectionText(beats, cursor), pt, OUTLINE_INJECT_DEPTH, false, pr);
 }
 
 // ─── 时间戳·时间锚点体系（第一片：注入 + 回读 + 只读显示）─────────────────────────
@@ -2577,115 +2661,6 @@ const _DEFAULT_STORY_CLOCK_PROMPT = DEFAULT_STORY_CLOCK_PROMPT;
 // 从最近一楼的戳解析出结构化 {month,day}。end 优先(当前时间)、退 start。无戳/解析不出 → null（交回兜底）。
 // storyClockDate 已迁至 story-clock.js。
 
-const OUTLINE_JUDGE_PROMPT = (cur, nxt, curScene, nxtScene) =>
-`请暂停角色扮演，作为剧情分析助手，判断上面的最近对话是否已经把剧情推进到了「下一个节点」。
-当前节点：${cur}${curScene ? '（' + curScene + '）' : ''}
-下一个节点：${nxt}${nxtScene ? '（' + nxtScene + '）' : ''}
-只有当最近剧情已经明确进入或跨过「下一个节点」所描述的阶段时，才算推进。
-若剧情仍停留在当前节点、或在写与主线无关的日常/支线，都算「没推进」。
-只回答一个词：推进 或 未推进。不要解释。`;
-
-// 判定当前视角大纲是否该前进一个节点。fire-and-forget，照 runGenerateDashed 的 abort/chatId 守卫。
-async function runJudgeOutlineStep() {
-    if (isJudgingOutline && outlineJudgeOwner?.signal?.aborted) isJudgingOutline = false;
-    if (isJudgingOutline) return;
-    const chatIdSnap = getContext().chatId;
-    const saved = readStore(getOutlineCacheKey());
-    if (!saved?.raw) return;
-    const beats = parseOutline(saved.raw);
-    const cursor = getOutlineCursor();
-    const baseline = { raw: saved.raw, ts: saved.ts ?? null, cursor };
-    if (!beats.length || cursor < 1 || cursor >= beats.length) return;   // 已在最后节点 → 无「下一个」可判
-    const cur = beats[cursor - 1], nxt = beats[cursor];
-    // Invalidate the pointer before aborting: an abort is advisory and the
-    // provider may ignore it, so identity remains the authoritative guard.
-    const myCtrl = new AbortController();
-    outlineJudgeOwner = myCtrl;
-    outlineJudgeAbort = myCtrl;
-    isJudgingOutline = true;
-    try {
-        const ctx = getContext();
-        const userName = ctx.name1 || '用户', charName = ctx.name2 || '角色';
-        const cfg = loadUtilityCfg();   // 机械任务：大纲推进判定可分流到轻量预设，未设则=主 API
-        if (!cfg.url || !cfg.key) { isJudgingOutline = false; outlineJudgeOwner = null; outlineJudgeAbort = null; return; }
-        const fmt = b => `${b.time ? b.time + '·' : ''}《${b.title}》`;
-        const prompt = OUTLINE_JUDGE_PROMPT(fmt(cur), fmt(nxt), cleanText(cur.scene || ''), cleanText(nxt.scene || ''));
-        const raw = await callCustomApi(ctx, prompt, cfg, userName, charName, myCtrl.signal);
-        if (outlineJudgeAbort !== myCtrl || outlineJudgeOwner !== myCtrl || myCtrl.signal.aborted) return;
-        if (getContext().chatId !== chatIdSnap) { isJudgingOutline = false; if (outlineJudgeOwner === myCtrl) outlineJudgeOwner = null; outlineJudgeAbort = null; return; }
-        const latest = readStore(getOutlineCacheKey());
-        if (!latest || latest.raw !== baseline.raw || (latest.ts ?? null) !== baseline.ts || getOutlineCursor() !== baseline.cursor) {
-            isJudgingOutline = false; outlineJudgeOwner = null; outlineJudgeAbort = null; return;
-        }
-        isJudgingOutline = false; outlineJudgeOwner = null; outlineJudgeAbort = null;
-        // 只认明确「推进」；含「未/没/不/无 推进」一律不动（无信号不动的兜底）
-        const ans = String(raw || '').trim();
-        const advanced = /推进/.test(ans) && !/(未|没|不|无)\s*推进/.test(ans);
-        if (advanced) {
-            setOutlineCursor(cursor + 1);
-            // 全量通知：面游标真前进一节才弹
-            if (getSettings().notifyMode === 'full') showToast('面已自动推进到下一节点 · 请注意查看');
-            refreshOutlineInjection();
-            if (outlineMode) {   // 面板开着看大纲 → 重渲染让高亮跟着走
-                const s2 = readStore(getOutlineCacheKey());
-                if (s2?.raw) { cachedOutline = renderOutline(s2.raw, getOutlineCursor()); setOutlineBody(cachedOutline); }
-            }
-        }
-    } catch (err) {
-        if (outlineJudgeAbort !== myCtrl || outlineJudgeOwner !== myCtrl) return;
-        isJudgingOutline = false; outlineJudgeOwner = null; outlineJudgeAbort = null;
-        if (err?.name === 'AbortError') return;            // 中止 / 切档 → 不算失败
-        if (getContext().chatId !== chatIdSnap) return;    // 已切 chat → 作废，别弹
-        // 判定失败也弹（不动游标，纯提示）：同日期判定，每 N 楼跑一次、用户未必盯着，失败要让他知道。
-        // isError toast 不受通知三档静音；下一轮攒够计数会自动再判，无需手动重试。
-        showToast('面自动推进判定失败，请检查 API 或网络', null, true);
-    }
-}
-
-// 时旅专用：根据正文在全部既有节点中重新定位游标，允许前进或回退。
-async function runRelocateOutlineCursor(promptAddon = '', externalSignal = null) {
-    const cacheKey = getOutlineCacheKey();
-    const saved = readStore(cacheKey);
-    if (!saved?.raw) return { status: 'skipped' };
-    const beats = parseOutline(saved.raw);
-    const current = getOutlineCursor();
-    if (!beats.length || current < 1) return { status: 'skipped' };
-    const ctx = getContext();
-    const chatIdSnap = ctx.chatId;
-    const cfg = loadUtilityCfg();
-    if (!cfg.url || !cfg.key) return { status: 'failed', error: new Error('未配置 API') };
-    abortOutlineJudge();
-    const myCtrl = outlineJudgeAbort = new AbortController();
-    outlineJudgeOwner = myCtrl;
-    const removeAbortBridge = bridgeAbortSignal(externalSignal, myCtrl);
-    isJudgingOutline = true;
-    try {
-        const nodes = beats.map((beat, index) => `${index + 1}. ${beat.time ? beat.time + '·' : ''}《${beat.title}》${beat.scene ? `：${cleanText(beat.scene)}` : ''}`).join('\n');
-        const prompt = `请暂停角色扮演，作为剧情分析助手，根据最近正文判断故事在以下既有大纲节点中最符合哪一个。\n\n【既有节点】\n${nodes}\n\n当前游标：${current}\n\n只能回答一个已有节点编号。允许选择当前节点、之前节点或之后节点；不得新增、改写、合并或删除节点。证据不足时回答当前游标编号。\n\n${promptAddon}`;
-        const raw = await callCustomApi(ctx, prompt, cfg, ctx.name1 || '用户', ctx.name2 || '角色', myCtrl.signal);
-        if (outlineJudgeAbort !== myCtrl || myCtrl.signal.aborted || externalSignal?.aborted || getContext().chatId !== chatIdSnap) return { status: 'cancelled' };
-        const latest = readStore(cacheKey);
-        if (!latest?.raw || latest.raw !== saved.raw) return { status: 'cancelled' };
-        const match = String(raw || '').trim().match(/^\s*(\d+)\s*[。.！!?]?\s*$/);
-        const next = match ? Number(match[1]) : NaN;
-        if (!Number.isInteger(next) || next < 1 || next > beats.length) throw new Error('AI 未返回有效节点编号');
-        if (next === current) return { status: 'unchanged' };
-        if (myCtrl.signal.aborted || externalSignal?.aborted || getContext().chatId !== chatIdSnap || outlineJudgeAbort !== myCtrl) return { status: 'cancelled' };
-        setOutlineCursor(next);
-        refreshOutlineInjection();
-        cachedOutline = renderOutline(saved.raw, next);
-        if (outlineMode) setOutlineBody(cachedOutline);
-        return { status: 'updated' };
-    } catch (error) {
-        if (outlineJudgeAbort !== myCtrl || error?.name === 'AbortError' || myCtrl.signal.aborted || getContext().chatId !== chatIdSnap) return { status: 'cancelled' };
-        return { status: 'failed', error };
-    } finally {
-        removeAbortBridge();
-        if (outlineJudgeAbort === myCtrl) { outlineJudgeAbort = null; outlineJudgeOwner = null; }
-        isJudgingOutline = false;
-    }
-}
-
 // 自定义历法下，正文用的是自定义月名（如「霜月」），公历式发问会答非所问。带上历法描述、
 // 并允许 AI 用「第M月D日」或月名作答；内置公历返回上面的原版 prompt（零行为变化）。
 
@@ -2714,6 +2689,9 @@ async function runRelocateOutlineCursor(promptAddon = '', externalSignal = null)
 function runAnchorAftermath() {
     syncLatestAlmanacBlock();
     syncLatestScheduleBlock();
+    const _linesFloorId = (getContext().chat?.length ?? 0) - 1;
+    const _linesDay = almTodayAnchor();
+    void linesFeature.onDateAftermath({ messageId: _linesFloorId, chatId: getContext().chatId, day: _linesDay ? `${+_linesDay.month}-${+_linesDay.day}` : null });
     if (axisState.almanacMode) renderAlmanacPanel();
     // 点·后台自动跟随「今天」：仅在开关开时才自动重排点（每次一 API）；关（默认）时点原地不动，
     // 用户想对齐今天时去点面板手动刷新即可。syncPointToToday 内部还有「点从未生成过就 no-op」守卫，双保险。
@@ -2747,253 +2725,7 @@ function schedulePointNeedsSync() {
 // 绝不占用 pointState.isGenerating（前台 UI 锁，sidebar 切换靠它挡）——后台占了会把整个面板卡死；防 race 靠自带 abort + 落地前重查。
 let _autoRegenSchedAbort = null;
 async function syncPointToToday(auto = false, travelContext = null) { return pointController.syncPointToToday(auto, travelContext); }
-// 楼层头部（char 名旁）挂一枚「坐标」按钮，点一下 = 抓 live .mes_text.innerHTML 快照存服务器。
-// 已收藏则点按跳锚面板定位。按钮态靠内存里的 _anchorSavedKeys（`chatId::mesid`）同步。
-// 扫描幂等：已有按钮的楼跳过；靠 CHAR_MSG_RENDERED / CHAT_CHANGED / MutationObserver 三路补齐。
-
-const ANCHOR_SVG_INNER = '<path d="M6 3.5 L6 18 L20.5 18"/><circle cx="14" cy="9.4" r="1.9" fill="currentColor" stroke="none"/>';
-function anchorSvg(cls) {
-    return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ANCHOR_SVG_INNER}</svg>`;
-}
-
-const anchorFloorKey = (chatId, mesid) => `${chatId ?? ''}::${mesid ?? ''}`;
-
-function getChatDisplayName() {
-    const el = document.querySelector('#selected_chat_pole, #chat_name_pole, .current_chat_name');
-    const v = el?.value || el?.textContent?.trim();
-    if (v) return v;
-    return getContext().chatId || '当前聊天';
-}
-
-// 重载「已收藏楼层键」缓存（异步读坐标索引），并把当前 DOM 里的按钮态刷成一致。
-async function refreshAnchorSavedKeys() {
-    try {
-        const items = await anchor.getAllItems();
-        _anchorSavedKeys = new Set(items.map(it => anchorFloorKey(it.chatId, it.messageId)));
-    } catch (err) { console.warn('[SP anchor] 读取已收藏键失败:', err); return; }
-    const chatId = getContext().chatId;
-    document.querySelectorAll('#chat .mes .sp-anchor-btn').forEach(btn => {
-        const mid = btn.closest('.mes')?.getAttribute('mesid');
-        const saved = _anchorSavedKeys.has(anchorFloorKey(chatId, mid));
-        btn.classList.toggle('sp-anchor-saved', saved);
-        btn.title = saved ? '已收藏 · 点击取消' : '收藏此楼';
-    });
-}
-
-// 给每条 AI 楼补「收藏此楼」按钮（幂等）。关掉入口开关则清干净。
-function scanAnchorButtons() {
-    if (!pluginEnabled()) {   // 插件总关：清掉并不再补锚点入口（兜住 _anchorObserver 的突变回调）
-        document.querySelectorAll('#chat .sp-anchor-btn').forEach(el => el.remove());
-        return;
-    }
-    if (getSettings().anchorInlineBtn === false) {
-        document.querySelectorAll('#chat .sp-anchor-btn').forEach(el => el.remove());
-        return;
-    }
-    const chatId = getContext().chatId;
-    document.querySelectorAll('#chat .mes[is_user="false"]').forEach(mes => {
-        if (mes.querySelector('.sp-anchor-btn')) return;
-        const target = mes.querySelector('.mes_buttons, .extraMesButtons, .name_text')
-            || mes.querySelector('.mes_block') || mes;
-        const mid   = mes.getAttribute('mesid');
-        const saved = _anchorSavedKeys.has(anchorFloorKey(chatId, mid));
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'sp-anchor-btn' + (saved ? ' sp-anchor-saved' : '');
-        btn.title = saved ? '已收藏 · 点击取消' : '收藏此楼';
-        btn.innerHTML = anchorSvg('sp-anchor-btn-svg');
-        btn.addEventListener('click', (e) => {
-            e.preventDefault(); e.stopPropagation();
-            onAnchorButtonClick(mes);
-        });
-        target.appendChild(btn);
-    });
-}
-
-// 用 ST 自己的 messageFormatting 把这楼的原始文本重新渲染一遍，从结果里抠出 <style> 块。
-// 这是美化 CSS 最可靠的来源：正则替换出的 <style> 经 ST 管线会得到 .mes_text .custom-* 选择器，
-// 但落进 DOM 后常被页面优化机制（酒馆助手等）挪走去重，收藏时楼内已经没有了；而 messageFormatting
-// 是纯字符串函数，随时能重放出完整带样式的 HTML，不依赖页面此刻的样式放在哪。
-function collectMessageStyles(messageId) {
-    try {
-        const ctx = getContext();
-        const msg = ctx?.chat?.[messageId];
-        if (!msg || typeof ctx?.messageFormatting !== 'function') return '';
-        const html = ctx.messageFormatting(String(msg.mes ?? ''), msg.name, !!msg.is_system, !!msg.is_user, messageId);
-        return [...String(html).matchAll(/<style>([\s\S]*?)<\/style>/gi)].map(m => m[1]).join('\n');
-    } catch { return ''; }
-}
-
-// 收集页面里作用于消息美化的 CSS 规则（选择器含 .custom- 或 .mes_text 的），冻进快照。
-// 背景：正则美化输出的 <style> 经 ST 管线（encodeStyleTags→DOMPurify 改名 class→decodeStyleTags 加
-// .mes_text 前缀）后会被酒馆助手等从楼层里挪走去重，收藏时楼内已无 style，只剩 custom-* 结构（中间态）。
-// 快照渲染在 :host{all:initial} 的 Shadow DOM 里，页面样式够不着，必须在收藏时把这些规则一并带走。
-// 注意：不能用 `if (r.cssRules) 递归` 判断分组规则——支持 CSS nesting 的浏览器里普通样式规则
-// 也带（空的）cssRules，会把所有规则都当成分组跳过；这里以 selectorText 有无区分。
-function collectCustomCss() {
-    const seen = new Set();
-    const walk = (rules, sink) => {
-        for (const r of rules) {
-            try {
-                const sel = r.selectorText;
-                if (sel) {
-                    // 只收 .custom-* 或 .mes_text 的**后代**规则；裸 .mes_text{} 是容器级主题规则，
-                    // 冻进快照会反过来命中快照容器本身（它也挂着 mes_text class），顶掉容器内边距
-                    const ok = sel.includes('.custom-') || /\.mes_text\s+\S/.test(sel);
-                    if (ok && !seen.has(r.cssText)) {
-                        seen.add(r.cssText);
-                        sink.push(r.cssText);
-                    }
-                } else if (r.cssRules && r.cssRules.length) {
-                    // @media/@supports/@layer 等分组：保留条件头，只收里面命中的规则
-                    const inner = [];
-                    walk(r.cssRules, inner);
-                    if (inner.length) {
-                        const head = String(r.cssText || '').split('{', 1)[0].trim();
-                        sink.push(head ? `${head} {\n${inner.join('\n')}\n}` : inner.join('\n'));
-                    }
-                }
-            } catch { }
-        }
-    };
-    const out = [];
-    for (const sheet of document.styleSheets) {
-        try { if (sheet.cssRules) walk(sheet.cssRules, out); } catch { }   // 跨域表读不了，跳过
-    }
-    return out.join('\n');
-}
-
-// 收藏前把楼层里"活的"渲染冻成静态 HTML，再交给 saveSnapshot 序列化。
-// 关键：酒馆助手(TavernHelper/JS-Slash-Runner)把角色卡状态栏渲染成 <div class="TH-render"><iframe srcdoc>，
-// 真正的状态栏 DOM 活在 iframe.contentDocument 里；直接取 .mes_text.innerHTML 只拿到空的 <iframe> 壳，
-// 序列化后状态栏就没了（且 stripRenderBoxes 还会把 .TH-render 整块删掉）。这里在克隆体上就地把每个
-// same-origin iframe 的 contentDocument 正文 + <style> 一并搬进一个静态容器，替换掉 iframe，状态栏遂被冻存。
-// 跨域/取不到 doc 的 iframe 保持原样（后续 stripRenderBoxes 兜底删除），不至于报错。
-function captureFloorHtml(textEl, messageId = null) {
-    if (!textEl) return '';
-    let clone;
-    try { clone = textEl.cloneNode(true); }
-    catch { return textEl.innerHTML; }
-    // 克隆体里的 iframe 是空壳，得按顺序对应回源 DOM 里那些"活"的 iframe 去读 contentDocument。
-    const liveFrames  = textEl.querySelectorAll('.TH-render iframe, iframe');
-    const cloneFrames = clone.querySelectorAll('.TH-render iframe, iframe');
-    cloneFrames.forEach((cf, i) => {
-        const live = liveFrames[i];
-        let inner = '';
-        try {
-            const doc = live && (live.contentDocument || live.contentWindow?.document);
-            if (doc && doc.body) {
-                const styles = [...doc.querySelectorAll('style')].map(st => st.outerHTML).join('');
-                inner = styles + doc.body.innerHTML;
-            }
-        } catch { inner = ''; }   // 跨域读不到 → 留空，交给下游按 .TH-render 删除
-        if (!inner) return;
-        const frozen = document.createElement('div');
-        frozen.className = 'sp-anchor-frozen-render';
-        frozen.innerHTML = inner;
-        // 连同外层 .TH-render 一起换掉，避免 stripRenderBoxes 把冻好的内容再删一遍
-        const box = cf.closest('.TH-render') || cf;
-        box.replaceWith(frozen);
-    });
-    let css = '';
-    try { css = collectCustomCss(); } catch { css = ''; }
-    let msgCss = '';
-    try { msgCss = collectMessageStyles(messageId); } catch { msgCss = ''; }
-    // data-sp-cap 是捕获代码版本标记（DOMPurify 会保留 data- 属性），排查"改了没生效"时看它
-    return '<div hidden data-sp-cap="3"></div>'
-        + (msgCss ? `<style>${msgCss}</style>` : '')
-        + (css ? `<style>${css}</style>` : '')
-        + clone.innerHTML;
-}
-
-// 孤儿收藏收养（hash 链断掉的旧数据）：拉当前角色现存聊天文件清单，
-// 仅当"该角色只有当前这一个聊天"时，把挂在已消失旧名下、charName 相同的收藏认领进来。
-// 详见 anchor.adoptOrphans 的判据说明。群聊跳过（无 avatar 概念）。
-async function adoptOrphanAnchors(currentChatId, chatIdHash) {
-    const ctx = getContext();
-    if (!currentChatId || ctx.groupId) return 0;
-    const avatar = ctx.characters?.[ctx.characterId]?.avatar;
-    const charName = ctx.name2;
-    if (!avatar || !charName) return 0;
-    let list;
-    try {
-        const res = await fetch('/api/characters/chats', {
-            method : 'POST',
-            headers: ctx.getRequestHeaders(),
-            body   : JSON.stringify({ avatar_url: avatar, simple: true }),
-        });
-        if (!res.ok) return 0;
-        list = await res.json();
-    } catch { return 0; }
-    const rows = Array.isArray(list) ? list : Object.values(list || {});
-    const existing = new Set(
-        rows.map(c => String(c?.file_name || '').replace(/\.jsonl$/i, '')).filter(Boolean)
-    );
-    // 该角色不止一个聊天 → 孤儿归属有歧义，不动
-    if (existing.size !== 1 || !existing.has(String(currentChatId))) return 0;
-    return anchor.adoptOrphans(charName, existing, currentChatId, getChatDisplayName(), chatIdHash ?? null);
-}
-
-async function onAnchorButtonClick(mes) {
-    const ctx    = getContext();
-    const chatId = ctx.chatId ?? null;
-    const mid    = mes.getAttribute('mesid');
-    const key    = anchorFloorKey(chatId, mid);
-    const btn    = mes.querySelector('.sp-anchor-btn');
-    if (_anchorSavedKeys.has(key)) {                                        // 已收藏 → 再点即取消
-        if (btn) btn.classList.add('sp-anchor-busy');
-        try {
-            const ids = await anchor.findItemIdsByFloor(chatId, +mid);      // 同楼可能多条，全删
-            for (const id of ids) await anchor.deleteItem(id);
-            _anchorSavedKeys.delete(key);
-            if (btn) { btn.classList.remove('sp-anchor-saved'); btn.title = '收藏此楼'; }
-            showToast('已取消收藏');
-            if (anchorMode) renderAnchorPanel();
-        } catch (err) {
-            console.error('[SP anchor] 取消收藏失败', err);
-            showToast('取消收藏失败：' + (err?.message || '未知错误'), null, true);
-        } finally {
-            if (btn) btn.classList.remove('sp-anchor-busy');
-        }
-        return;
-    }
-    const textEl = mes.querySelector('.mes_text');
-    if (!textEl) { showToast('找不到楼层内容', null, true); return; }
-    if (btn) btn.classList.add('sp-anchor-busy');
-    try {
-        const savedItem = await anchor.saveSnapshot({
-            chatId,
-            chatIdHash: ctx?.chatMetadata?.chat_id_hash ?? null,   // 改名不变的稳定键，落到每条上，供分桶/自愈用
-            chatName  : getChatDisplayName(),
-            charName  : mes.getAttribute('ch_name') || ctx.name2 || '角色',
-            messageId : mid,
-            floorIndex: Number.isFinite(+mid) ? +mid : null,
-        }, captureFloorHtml(textEl, Number.isFinite(+mid) ? +mid : null));
-        _anchorSavedKeys.add(key);
-        if (btn) { btn.classList.add('sp-anchor-saved'); btn.title = '已收藏 · 点击取消'; }
-        showToast('已收藏此楼', () => openAnchorAtChat(chatId));
-        if (anchorMode) renderAnchorPanel();
-        anchor.checkSize()
-            .then(r => { if (r.over) showToast(`收藏已占 ${anchor.formatBytes(r.bytes)}，可在坐标面板清理`, null, true); })
-            .catch(() => {});
-    } catch (err) {
-        console.error('[SP anchor] 收藏失败', err);
-        showToast('收藏失败：' + (err?.message || '未知错误'), null, true);
-    } finally {
-        if (btn) btn.classList.remove('sp-anchor-busy');
-    }
-}
-
-// 打开锚面板并定位到某 chat 的收藏列表（第三层抽屉；charName 由 renderAnchorItems 回填）
-function openAnchorAtChat(chatId) {
-    _anchorTagFilter = null;   // 直达某聊天层：清筛，免得刚存的楼被旧筛选藏掉
-    _anchorView = { level: 'items', charName: null, chatId, itemId: null };
-    showPanel();
-    if (anchorMode) renderAnchorPanel();
-    else $in('.sp-view-btn[data-view="anchor"]').trigger('click');
-}
-
-// 跨模块跳转只复用现有侧栏切换，并在目标 DOM 就绪后做可选预填；它不发送消息，也不建立第二套路由状态。
+// 跨模块跳转只复用现有侧栏切换，并在目标 DOM 就绪后做可选预填。
 function openPluginViewWithPrefill(view, inputSelector = '', prefill = '') {
     showPanel();
     const $tab = $in(`.sp-side-tab.sp-view-btn[data-view="${view}"]`);
@@ -3011,30 +2743,18 @@ function openPluginViewWithPrefill(view, inputSelector = '', prefill = '') {
     }, 0));
 }
 
-// #chat 变动（swipe/编辑/重渲染会抹掉注入的按钮）→ 防抖补齐
-let _anchorObserver  = null;
-let _anchorScanTimer = null;
-// 盯 #chat 的共用 observer：既给每楼补「收藏」按钮，也在楼层结构变动时重算渲染窗口
-// （新楼进窗要 observe、删楼/swipe 要重定最新楼）。块的挂/卸本身交给渲染窗口的 IntersectionObserver，
-// 这里只负责「结构变了 → 重算窗口」，不再逐块打地鼠。
-function initAnchorObserver() {
+function initChatObserver() {
     const chat = document.querySelector('#chat');
-    if (!chat) { setTimeout(initAnchorObserver, 600); return; }
-    _anchorObserver?.disconnect();
-    _anchorObserver = new MutationObserver(() => {
-        clearTimeout(_anchorScanTimer);
-        _anchorScanTimer = setTimeout(() => {
-            scanAnchorButtons();
-            // 流式中不重算窗口：ST 每 token 重写 .mes_text，此时算了也会被冲；等流式结束
-            // （token 停 1.5s／GENERATION_ENDED／CHARACTER_MESSAGE_RENDERED）统一刷。按钮扫描不受此限（按钮在 .mes 头部）。
-            if (linesFeature.isStreaming()) return;
-            refreshInlineWindow();   // 结构变 → 防抖重算深度窗 + 观察新楼（幂等，已挂的框不动）
+    if (!chat) { setTimeout(initChatObserver, 600); return; }
+    let timer = null;
+    new MutationObserver(() => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+            coordinateRuntime?.feature?.onChatDomChanged();
+            if (!linesFeature.isStreaming()) refreshInlineWindow();
         }, 400);
-    });
-    _anchorObserver.observe(chat, { childList: true, subtree: true });
+    }).observe(chat, { childList: true, subtree: true });
 }
-
-// ─── Extensions panel ─────────────────────────────────────────────────────────
 
 function injectExtButton() {
     // No drawer content — panel opened via magic wand or FAB
@@ -3422,6 +3142,12 @@ function injectModal() {
                                         <input type="checkbox" id="sp-mem-source-database">
                                         <span>使用数据库作为记忆源</span>
                                     </label>
+                                    <div id="sp-mem-database-worldbook-options" class="sp-mode-opt" style="display:none">
+                                        <span>数据库纪要所在世界书</span>
+                                        <select id="sp-mem-database-worldbook" class="sp-input">
+                                            <option value="">跟随角色主世界书（默认）</option>
+                                        </select>
+                                    </div>
                                     <div id="sp-mem-database-status" class="sp-cfg-hint" style="display:none"></div>
 
                                     <hr class="sp-mem-divider">
@@ -3697,7 +3423,7 @@ function injectModal() {
                                     <label class="sp-cfg-group">判定节奏</label>
                                     <label class="sp-mode-opt">
                                         <span>每</span>
-                                        <input id="sp-outline-judge-interval" class="sp-input sp-interval-input" type="number" min="1" value="${escapeAttr(String(getOutlineJudgeInterval()))}">
+                                        <input id="sp-outline-judge-interval" class="sp-input sp-interval-input" type="number" min="1" value="${escapeAttr(String(outlineFeature.judge.getInterval()))}">
                                         <span>条 AI 回复判定一次推进</span>
                                     </label>
                                     <p class="sp-cfg-hint" style="margin-top:2px">楼数越大越省 token、越迟钝；越小越灵敏、开销越高（<b>每次判定 = 一次额外 API</b>）。默认 3。</p>
@@ -3885,6 +3611,12 @@ function injectModal() {
     $in('.sp-close-btn').on('click',    closePanel);
     $in('.sp-settings-btn').on('click', toggleSettings);
     $in('.sp-settings-close-btn').on('click', toggleSettings);
+    $in('#sp-settings-overlay')
+        .off('change.spLinesMode', 'input[name="sp-lines-mode"]')
+        .on('change.spLinesMode', 'input[name="sp-lines-mode"]', function () {
+            saveLinesMode(this.value);
+            linesFeature.resetCounter();
+        });
     $in('.sp-fab-toggle-btn').on('click', function () {
         const nowEnabled = !fabEnabled();
         getSettings().fabShow = nowEnabled;
@@ -3924,119 +3656,9 @@ function injectModal() {
             .catch(() => {});
     });
 
-    // Outline chat
-    function doSendChat() {
-        const msg = $in('#sp-chat-input').val().trim();
-        if (msg && !isOutlineChatting) { const $i = $in('#sp-chat-input'); $i.val(''); autoGrowTextarea($i[0]); sendOutlineChat(msg); }
-    }
-    $in('#sp-chat-send').on('click', doSendChat);
-    // 回车换行、只用按钮发送（用户偏好）——不再拦 Enter；自动长高保留。
-    $in('#sp-chat-input').on('input', function () { autoGrowTextarea(this); });
+    outlineFeature.bindUi();
 
-    // Delete a single message (leaves the rest alone — user chose "just this one")
-    $in('#sp-chat-msgs').on('click', '.sp-chat-msg-delete', function () {
-        if (isOutlineChatting) return;
-        const idx = Number($(this).closest('.sp-chat-msg-wrap').attr('data-idx'));
-        if (!Number.isInteger(idx) || idx < 0 || idx >= outlineChatHistory.length) return;
-        outlineChatHistory.splice(idx, 1);
-        saveCreativeChatHistory();
-        renderCreativeChatHistory();
-    });
-
-    // Edit user message → inline editor
-    $in('#sp-chat-msgs').on('click', '.sp-chat-msg-edit', function () {
-        if (isOutlineChatting) return;
-        const $msg = $(this).closest('.sp-chat-msg-wrap');
-        const idx  = Number($msg.attr('data-idx'));
-        if (!Number.isInteger(idx) || idx < 0 || idx >= outlineChatHistory.length) return;
-        startInlineEdit($msg, idx);
-    });
-
-    $in('#sp-chat-clear').on('click', async () => {
-        if (isOutlineChatting) return;
-        if (!outlineChatHistory.length) return;
-        const ok = await spConfirm({
-            title: '清空对话',
-            body : '将清空这个面的讨论历史，不影响已生成的面本身。',
-            confirmText: '清空',
-            cancelText : '取消',
-        });
-        if (!ok) return;
-        outlineChatHistory = [];
-        saveCreativeChatHistory();
-        $in('#sp-chat-msgs').empty();
-    });
-
-    // Space chat (间)
-    function doSendSpaceChat() {
-        const msg = $in('#sp-space-input').val().trim();
-        if (msg && !isSpaceChatting) { const $i = $in('#sp-space-input'); $i.val(''); autoGrowTextarea($i[0]); sendSpaceChat(msg); }
-    }
-    $in('#sp-space-send').on('click', doSendSpaceChat);
-    // 回车换行、只用按钮发送（用户偏好）——不再拦 Enter；自动长高保留。
-    $in('#sp-space-input').on('input', function () { autoGrowTextarea(this); });
-
-    $in('#sp-space-msgs').on('click', '.sp-chat-msg-delete', function () {
-        if (isSpaceChatting) return;
-        const idx = Number($(this).closest('.sp-chat-msg-wrap').attr('data-idx'));
-        if (!Number.isInteger(idx) || idx < 0 || idx >= spaceChatHistory.length) return;
-        spaceChatHistory.splice(idx, 1);
-        saveSpaceChatHistory();
-        renderSpaceChatHistory();
-    });
-
-    // 逐条复制：取该条干净文本（AI 剥 widget 标签）写剪贴板，图标闪一下 ✓ 反馈。不受生成中态限制（只读操作）。
-    $in('#sp-space-msgs').on('click', '.sp-chat-msg-copy', async function () {
-        const idx = Number($(this).closest('.sp-chat-msg-wrap').attr('data-idx'));
-        if (!Number.isInteger(idx) || idx < 0 || idx >= spaceChatHistory.length) return;
-        const text = spaceMsgPlainText(spaceChatHistory[idx]);
-        const $btn = $(this);
-        if ($btn.data('sp-copy-reset')) { clearTimeout($btn.data('sp-copy-reset')); }
-        const ok = await copyPlainText(text);
-        $btn.html(ok ? '<i class="fa-solid fa-check"></i>' : '<i class="fa-solid fa-xmark"></i>')
-            .attr('title', ok ? '已复制' : '复制失败');
-        const t = setTimeout(() => {
-            $btn.html('<i class="fa-solid fa-copy"></i>').attr('title', '复制').removeData('sp-copy-reset');
-        }, 1200);
-        $btn.data('sp-copy-reset', t);
-    });
-
-    $in('#sp-space-msgs').on('click', '.sp-chat-msg-edit', function () {
-        if (isSpaceChatting) return;
-        const $msg = $(this).closest('.sp-chat-msg-wrap');
-        const idx  = Number($msg.attr('data-idx'));
-        if (!Number.isInteger(idx) || idx < 0 || idx >= spaceChatHistory.length) return;
-        startSpaceInlineEdit($msg, idx);
-    });
-
-    // Widget apply: attach the AI-generated Event/Line to current chat's cache
-    $in('#sp-space-msgs').on('click', '.sp-space-widget-apply', function () {
-        const $btn = $(this);
-        if ($btn.prop('disabled')) return;
-        const wid = $btn.attr('data-wid');
-        const stored = _spaceWidgetStore.get(wid);
-        if (!stored) { showToast('这张卡片已过期，请再让 AI 生成一次', null, true); return; }
-        if (stored.kind === 'schedule_widget') applyScheduleWidget(stored.body, $btn, stored.editIdx);
-        else if (stored.kind === 'line_widget') linesFeature.widget.apply(stored.body, stored.editIdx, $btn);
-        else if (stored.kind === 'almanac_widget') applyAlmanacWidget(stored.body, $btn, $btn.attr('data-idx'));
-        else if (stored.kind === 'era_widget') applyEraWidget(stored.body, $btn);
-    });
-
-    $in('#sp-space-clear').on('click', async () => {
-        if (isSpaceChatting) return;
-        if (!spaceChatHistory.length) return;
-        const ok = await spConfirm({
-            title: '清空对话',
-            body : '将清空"间"的局外聊天记录。',
-            confirmText: '清空',
-            cancelText : '取消',
-        });
-        if (!ok) return;
-        spaceChatHistory = [];
-        saveSpaceChatHistory();
-        $in('#sp-space-msgs').empty();
-    });
-    $in('#sp-outline-beats').on('click', '#sp-gen-outline-now', triggerGenerateOutline);
+    spaceFeature.bindUi();
     const $linesWrap = $in('#sp-lines-wrap');
     $linesWrap.on('click', '#sp-gen-lines-now', triggerGenerateLines);
     $linesWrap.on('click', '.sp-lines-sheet-btn', function () {
@@ -4068,36 +3690,6 @@ function injectModal() {
     $in('#sp-ta-drawer').on('click', '.sp-ta-add', function () {
         closeTaDrawer();
         switchToCharView();
-    });
-    $in('#sp-outline-beats').on('click', '.sp-refresh-outline', triggerGenerateOutline);
-    $in('#sp-outline-beats').on('click', '.sp-beat-delete', function () {
-        const idx = Number($(this).attr('data-idx'));
-        if (Number.isInteger(idx)) triggerDeleteOutlineBeat(idx);
-    });
-    // 手选当前剧情点：写游标 → 重渲染（高亮跟着走）→ 刷注入（开着自动注入才真注入，否则只清）。
-    // 再点已选中的节点 = 取消狙击（游标→0：清高亮、清注入、停自动推进判定，直到再次手选）。
-    $in('#sp-outline-beats').on('click', '.sp-beat-setcur', function () {
-        const idx = Number($(this).attr('data-idx'));
-        if (!Number.isFinite(idx) || idx < 1) return;
-        const next = (getOutlineCursor() === idx) ? 0 : idx;
-        setOutlineCursor(next);
-        const saved = readStore(getOutlineCacheKey());
-        if (saved?.raw) { cachedOutline = renderOutline(saved.raw, getOutlineCursor()); setOutlineBody(cachedOutline); }
-        refreshOutlineInjection();
-    });
-    // 面·逐 step 复制：取该节点干净文本写剪贴板，图标闪 ✓ 反馈（只读操作，不受生成态限制；照抄间的 .sp-chat-msg-copy）。
-    $in('#sp-outline-beats').on('click', '.sp-beat-copy', async function () {
-        const text = _copyTexts[$(this).data('cid')];
-        if (text == null) return;
-        const $btn = $(this);
-        if ($btn.data('sp-copy-reset')) { clearTimeout($btn.data('sp-copy-reset')); }
-        const ok = await copyPlainText(text);
-        $btn.html(ok ? '<i class="fa-solid fa-check"></i>' : '<i class="fa-solid fa-xmark"></i>')
-            .attr('title', ok ? '已复制' : '复制失败');
-        const t = setTimeout(() => {
-            $btn.html('<i class="fa-solid fa-copy"></i>').attr('title', '复制这一步').removeData('sp-copy-reset');
-        }, 1200);
-        $btn.data('sp-copy-reset', t);
     });
     // Refresh lines — button appears in both panel toolbar and inline block
     // 双绑拆分：面板行在 shadow 内走 $in；楼内行在 light DOM #chat 保持原查询。
@@ -4171,9 +3763,8 @@ function injectModal() {
         triggerDeletePointEvent(day === 'future' ? 'future' : Number(day), idx, { view: 'user', charName: '' });
     });
 
-    // Inject buttons (event delegation)——双绑拆分：面板三区在 shadow 内走 $inAll；楼内注入钮在 light DOM #chat 保持原查询。
-    // 逗号选择器必须 $inAll：$in=querySelector 只取首个容器(#sp-body)，outline/lines 两区的注入钮会静默失效。
-    $inAll('#sp-body, #sp-outline-wrap, #sp-lines-wrap').on('click', '.sp-inject-btn', function () {
+    // Inject buttons (event delegation)——点/线宿主桥保留；面由 outline feature 的唯一 UI 入口负责。
+    $inAll('#sp-body, #sp-lines-wrap').on('click', '.sp-inject-btn', function () {
         const text = _injectTexts[$(this).data('iid')];
         if (text) injectToST(text);
     });
@@ -4188,307 +3779,11 @@ function injectModal() {
 
     // Abort buttons (event delegation) — 即时撤下 UI，见 abort*Gen
     $in('#sp-body').on('click', '#sp-abort-generate', abortScheduleGen);
-    $in('#sp-outline-beats').on('click', '#sp-abort-outline', abortOutlineGen);
     $linesWrap.on('click', '#sp-abort-lines', abortLinesGen);
 
-    // ── 棱（小剧场）事件（全部委托到 #sp-theater-wrap，内容动态重渲染）──
+    // ── 棱（小剧场）事件（全部委托到注入式 ui；旧委托仅作为无 UI 兼容路径）──
     const $theater = $in('#sp-theater-wrap');
-    // 模板点选（内联列表）→ 内容填入输入框（可二次编辑），并收起选择器
-    $theater.on('click', '.sp-theater-tpl-pick', function () {
-        const uid = $(this).data('uid');
-        const tpl = _theaterTemplateCache.find(t => String(t.uid) === String(uid));
-        if (tpl) {
-            $in('#sp-theater-input').val(tpl.text);
-            _theaterTemplateSource = { uid: tpl.uid, title: tpl.title, input: tpl.text };
-            $in('#sp-theater-tpl-picker').removeAttr('open');
-            $in('#sp-theater-input').trigger('focus');
-        }
-    });
-    // 生成 / 重新生成
-    $theater.on('click', '.sp-theater-generate', function () {
-        if (isGeneratingTheater) return;
-        const input = String($in('#sp-theater-input').val() || '').trim();
-        if (!input) { showToast('请先填写小剧场需求', null, true); return; }
-        runGenerateTheater(input);
-    });
-    // 随机起草：从模板库随机抽一个直接生成（模板 text 即需求）。缓存空则临时拉一次，仍空则友好提示。
-    $theater.on('click', '.sp-theater-random', async function () {
-        if (isGeneratingTheater) return;
-        let pool = _theaterTemplateCache;
-        if (!pool || !pool.length) {
-            try { await refreshTheaterTemplates(); } catch { /* 读取失败按空库处理 */ }
-            pool = _theaterTemplateCache;
-        }
-        if (!pool || !pool.length) { showToast('模板库为空，先去设置 · 棱新增模板', null, true); return; }
-        const nonEmptyPool = nonEmptyTemplates(pool);
-        if (!nonEmptyPool.length) { showToast('模板库里没有可用的非空模板', null, true); return; }
-        const pick = pickWithoutPrevious(nonEmptyPool, _lastRandomTheaterTemplateUid);
-        const text = String(pick?.text || '').trim();
-        if (!text) { showToast('随机到的模板内容为空，去设置补一下内容', null, true); return; }
-        $in('#sp-theater-input').val(text);               // 让用户看到抽中了什么，也便于中止后二次编辑
-        $in('#sp-theater-tpl-picker').removeAttr('open'); // 收起模板选择器
-        _theaterTemplateSource = { uid: pick.uid, title: pick.title, input: text };
-        _lastRandomTheaterTemplateUid = pick.uid;
-        showToast('已随机填入模板，请确认后再生成');
-    });
-    $theater.on('click', '.sp-theater-regen', function () {
-        if (isGeneratingTheater) return;
-        const piece = theaterCurrentPiece;
-        const regen = theater.resolveTheaterRegen(piece, $in('#sp-theater-input').val());
-        const input = regen.input;
-        if (!input) { showToast('旧草稿未记录原主题，请先填写输入', null, true); $in('#sp-theater-input').trigger('focus'); return; }
-        // 即使当前 piece 没来源，也要显式清空旧的全局选择，防止来源串线。
-        _theaterTemplateSource = regen.templateSource;
-        $in('#sp-theater-input').val(input);
-        runGenerateTheater(input);
-    });
-    $theater.on('click', '.sp-theater-source-toggle', function () {
-        const $detail = $in('#sp-theater-source-detail'); const open = !$detail.is(':visible');
-        $detail.toggle(open); $(this).attr('aria-expanded', String(open));
-        $(this).find('.sp-theater-source-chevron').attr('class', `fa-solid fa-chevron-${open ? 'up' : 'down'} sp-theater-source-chevron`);
-    });
-    $theater.on('click', '#sp-abort-theater', abortTheaterGen);
-    $theater.on('click', '.sp-theater-back', renderTheaterPanel);
-    // 预览框展开 / 收起
-    $theater.on('click', '.sp-theater-fullscreen-btn', function () {
-        const el = inEl('#sp-theater-result');
-        if (!el) return;
-        const on = el.classList.toggle('sp-theater-fullscreen');
-        // 桌面去掉 .sp-sheet 的 transform，全屏 fixed 才能逃出面板锚到视口（否则被 sheet 的 transform
-        // 包含块困在面板内、只满面板）。.sp-fs-flat 在 CSS 里 desktop-only：手机保留 sheet 的居中
-        // translateX(-50%)、不位移，全屏铺满面板（≈手机整屏）即可。
-        inEl('.sp-sheet')?.classList.toggle('sp-fs-flat', on);
-        // 全屏时强制展开（去折叠），退出时按原逻辑重新判定是否需要折叠
-        if (on) el.classList.remove('sp-theater-result-collapsed');
-        const $i = $(this).find('i');
-        $i.attr('class', on ? 'fa-solid fa-compress' : 'fa-solid fa-expand');
-        $(this).attr('title', on ? '退出全屏' : '全屏浏览小剧场');
-        document.body.classList.toggle('sp-theater-fs-lock', on);   // 锁背景滚动
-        if (on) {
-            if (!_theaterFsEsc) {
-                _theaterFsEsc = (ev) => {
-                    if (ev.key === 'Escape') {
-                        const r = inEl('#sp-theater-result');
-                        if (r && r.classList.contains('sp-theater-fullscreen')) {
-                            $in('.sp-theater-fullscreen-btn').trigger('click');
-                        }
-                    }
-                };
-                document.addEventListener('keydown', _theaterFsEsc);
-            }
-        } else {
-            applyTheaterFold();   // 退出全屏后按实际高度重判折叠
-        }
-    });
-
-    $theater.on('click', '.sp-theater-fold-toggle', function () {
-        const el = inEl('#sp-theater-result');
-        if (!el) return;
-        const collapsed = el.classList.toggle('sp-theater-result-collapsed');
-        const $btn = $(this);
-        $btn.find('.sp-theater-fold-label').text(collapsed ? '展开全文' : '收起');
-        $btn.find('i').attr('class', collapsed ? 'fa-solid fa-chevron-down' : 'fa-solid fa-chevron-up');
-        // 收起时把视口带回按钮所在的预览顶部，避免停在半空
-        if (collapsed) $btn.closest('.sp-theater-result-wrap')[0]?.scrollIntoView({ block: 'start' });
-    });
-    // 永久保存当前结果（带标题）
-    $theater.on('click', '.sp-theater-save', function () {
-        if (!theaterCurrentPiece) return;
-        theaterCurrentPiece.title = String($in('#sp-theater-title').val() || '').trim();
-        // 同步更新草稿里的同 id 条目（标题），再升永久
-        syncDraftMeta(theaterCurrentPiece);
-        theater.promoteToSaved(theaterCurrentPiece);
-        showToast('已永久保存到本对话');
-        renderTheaterPanel();
-    });
-    // 列表：查看 / 升永久 / 删草稿 / 删已保存
-    $theater.on('click', '.sp-theater-view', function () {
-        const id = $(this).data('id');
-        const piece = findPieceById(id);
-        if (piece) {
-            theaterCurrentPiece = piece;
-            renderTheaterPanel();
-            // 结果区在顶部、列表在底部——查看后把滚动条拉回顶部，否则像"没反应"
-            $in('#sp-theater-body').scrollTop(0);
-        }
-    });
-    $theater.on('click', '.sp-theater-promote', function () {
-        const id = $(this).data('id');
-        const piece = theater.loadDrafts().find(p => p.id === id);
-        if (piece) { theater.promoteToSaved(piece); showToast('已永久保存'); renderTheaterPanel(); }
-    });
-    $theater.on('click', '.sp-theater-del-draft', async function () {
-        const id = $(this).data('id');
-        if (!await spConfirm({ title: '删除草稿', body: '确定删除这条小剧场草稿吗？' })) return;
-        theater.deleteDraft(id);
-        renderTheaterPanel();
-    });
-    $theater.on('click', '.sp-theater-del-saved', async function () {
-        const id = $(this).data('id');
-        if (!await spConfirm({ title: '删除永久保存', body: '确定从本对话删除这条已永久保存的小剧场吗？删除后无法恢复。' })) return;
-        theater.deleteSaved(id);
-        renderTheaterPanel();
-    });
-
-    // ── 锚（收藏楼层）事件（委托到 #sp-anchor-wrap，三层抽屉动态重渲染）──
-    const $anchor = $in('#sp-anchor-wrap');
-    $anchor.on('click', '.sp-anchor-char-card', function () {
-        _anchorView = { level: 'chats', charName: $(this).attr('data-char'), chatId: null, itemId: null };
-        renderAnchorPanel();
-    });
-    $anchor.on('click', '.sp-anchor-chat-card', function () {
-        _anchorView = { level: 'items', charName: _anchorView.charName, chatId: $(this).attr('data-chatid'), itemId: null };
-        renderAnchorPanel();
-    });
-    $anchor.on('click', '.sp-anchor-item-card', function () {
-        _anchorFullTagEdit = false;   // 每次新进全文都从只读态开始
-        _anchorView = { level: 'full', charName: _anchorView.charName, chatId: _anchorView.chatId, itemId: $(this).attr('data-id') };
-        renderAnchorPanel();
-    });
-    $anchor.on('click', '.sp-anchor-back', function () {
-        const to = $(this).attr('data-to');
-        if (to === 'items')      _anchorView = { level: 'items', charName: _anchorView.charName, chatId: $(this).attr('data-chatid'), itemId: null };
-        else if (to === 'chats') _anchorView = { level: 'chats', charName: $(this).attr('data-char'), chatId: null, itemId: null };
-        else                     _anchorView = { level: 'chars', charName: null, chatId: null, itemId: null };
-        renderAnchorPanel();
-    });
-    $anchor.on('click', '.sp-anchor-fullscreen', function () { toggleAnchorFullscreen(this); });
-    // 全屏浮卡拖拽（PC 专属）：拖右下角标缩放；拖头部空白处移动（排除头部按钮，避免和返回/退出/删除冲突）。
-    $anchor.on('mousedown', '.sp-anchor-fs-resize', function (e) { _anchorFsGestureStart('resize', e); });
-    $anchor.on('mousedown', '.sp-anchor-fs-on .sp-anchor-head', function (e) {
-        if ($(e.target).closest('button, .sp-icon-btn, .sp-anchor-back').length) return;
-        _anchorFsGestureStart('move', e);
-    });
-    $anchor.on('click', '.sp-anchor-tag-edit', function () {
-        if (!_anchorCurrentItem) return;
-        _anchorFullTagEdit = true;
-        renderAnchorFull(_anchorCurrentItem.id);
-    });
-    // 全文内联标签编辑：chip 点选即写库（就地改 it.tags，连点不丢）、新建即选中、完成收起。
-    $anchor.on('click', '.sp-anchor-ftag-chip', async function () {
-        const it = _anchorCurrentItem;
-        if (!it) return;
-        const id = $(this).attr('data-id');
-        const cur = new Set(Array.isArray(it.tags) ? it.tags : []);
-        if (cur.has(id)) cur.delete(id); else cur.add(id);
-        it.tags = [...cur];
-        $(this).toggleClass('sp-tp-chip-on');   // 就地反馈，不整体重渲（避免网络往返闪烁）
-        try { await anchor.setItemTags(it.id, [...cur]); }
-        catch (err) { showToast('保存标签失败：' + (err?.message || ''), null, true); }
-    });
-    $anchor.on('click', '.sp-anchor-ftag-swatch', function () {
-        const scope = $(this).closest('.sp-anchor-ftag-new');
-        scope.find('.sp-anchor-ftag-swatch').removeClass('sp-tp-swatch-on');
-        $(this).addClass('sp-tp-swatch-on');
-    });
-    $anchor.on('click', '.sp-anchor-ftag-add', async function () {
-        const it = _anchorCurrentItem;
-        if (!it) return;
-        const scope = $(this).closest('.sp-anchor-ftag-new');
-        const nm = String(scope.find('.sp-anchor-ftag-name').val() || '').trim();
-        if (!nm) { scope.find('.sp-anchor-ftag-name').trigger('focus'); return; }
-        const color = scope.find('.sp-anchor-ftag-swatch.sp-tp-swatch-on').attr('data-color') || ANCHOR_TAG_PALETTE[0];
-        try {
-            const tag = await anchor.addTag(nm, color);   // 同名去重：返回既有
-            const cur = new Set(Array.isArray(it.tags) ? it.tags : []);
-            if (tag) cur.add(tag.id);
-            it.tags = [...cur];
-            await anchor.setItemTags(it.id, [...cur]);
-            renderAnchorFull(it.id);   // 重渲以显示新 chip（已选中）
-        } catch (err) { showToast('新建标签失败：' + (err?.message || ''), null, true); }
-    });
-    $anchor.on('keydown', '.sp-anchor-ftag-name', function (ev) {
-        if (ev.key === 'Enter') { ev.preventDefault(); $(this).closest('.sp-anchor-ftag-new').find('.sp-anchor-ftag-add').trigger('click'); }
-    });
-    $anchor.on('click', '.sp-anchor-ftag-done', function () {
-        _anchorFullTagEdit = false;
-        if (_anchorCurrentItem) renderAnchorFull(_anchorCurrentItem.id);
-    });
-    $anchor.on('click', '.sp-anchor-del', async function () {
-        const it = _anchorCurrentItem;
-        if (!it) return;
-        if (!await spConfirm({ title: '删除收藏', body: '确定删除这条收藏吗？原楼层不受影响。' })) return;
-        await anchor.deleteItem(it.id);
-        _anchorSavedKeys.delete(anchorFloorKey(it.chatId, it.messageId));
-        // 若删的是当前 chat 的楼，同步该楼收藏按钮态
-        if (String(getContext().chatId) === String(it.chatId)) {
-            document.querySelectorAll('#chat .mes .sp-anchor-btn').forEach(btn => {
-                const mid = btn.closest('.mes')?.getAttribute('mesid');
-                if (String(mid) === String(it.messageId)) { btn.classList.remove('sp-anchor-saved'); btn.title = '收藏此楼'; }
-            });
-        }
-        showToast('已删除收藏');
-        _anchorView = { level: 'items', charName: _anchorView.charName, chatId: it.chatId, itemId: null };
-        renderAnchorPanel();
-    });
-
-    // ── 标签筛选栏（三层通用）：点标签筛、点「全部」清 ──
-    $anchor.on('click', '.sp-anchor-filter-chip', function () {
-        const id = $(this).attr('data-id') || null;
-        _anchorTagFilter = (id && id === _anchorTagFilter) ? null : id;   // 再点已选=清除
-        renderAnchorPanel();
-    });
-
-    // ── 标签管理面：入口 + 建/改名/改色/删 ──
-    $anchor.on('click', '.sp-anchor-tagmgr-btn', function () {
-        _tagMgrEditId = null; _tagMgrDelId = null;
-        _anchorView = { level: 'tags', charName: null, chatId: null, itemId: null };
-        renderAnchorPanel();
-    });
-    // 色板选色：仅在所属行内高亮（新建行 / 某编辑行各自独立），保存时现读高亮项，无需额外状态
-    $anchor.on('click', '.sp-tagmgr-swatch', function () {
-        const scope = $(this).closest('.sp-anchor-tagmgr-new, .sp-anchor-tagmgr-row');
-        scope.find('.sp-tagmgr-swatch').removeClass('sp-tp-swatch-on');
-        $(this).addClass('sp-tp-swatch-on');
-    });
-    const _tagMgrPickedColor = (scopeEl) => scopeEl.find('.sp-tagmgr-swatch.sp-tp-swatch-on').attr('data-color') || ANCHOR_TAG_PALETTE[0];
-    $anchor.on('click', '.sp-tagmgr-new-add', async function () {
-        const scope = $(this).closest('.sp-anchor-tagmgr-new');
-        const nm = String(scope.find('.sp-tagmgr-new-name').val() || '').trim();
-        if (!nm) { scope.find('.sp-tagmgr-new-name').trigger('focus'); return; }
-        try { await anchor.addTag(nm, _tagMgrPickedColor(scope)); renderAnchorTagManager(); }
-        catch (err) { showToast('新建标签失败：' + (err?.message || ''), null, true); }
-    });
-    $anchor.on('keydown', '.sp-tagmgr-new-name', function (ev) {
-        if (ev.key === 'Enter') { ev.preventDefault(); $(this).closest('.sp-anchor-tagmgr-new').find('.sp-tagmgr-new-add').trigger('click'); }
-    });
-    $anchor.on('click', '.sp-tagmgr-edit', function () {
-        _tagMgrEditId = $(this).closest('.sp-anchor-tagmgr-row').attr('data-id');
-        _tagMgrDelId = null;
-        renderAnchorTagManager();
-    });
-    $anchor.on('click', '.sp-tagmgr-cancel', function () { _tagMgrEditId = null; renderAnchorTagManager(); });
-    $anchor.on('keydown', '.sp-tagmgr-name-input', function (ev) {
-        if (ev.key === 'Enter') { ev.preventDefault(); $(this).closest('.sp-anchor-tagmgr-row').find('.sp-tagmgr-save').trigger('click'); }
-    });
-    $anchor.on('click', '.sp-tagmgr-save', async function () {
-        const row = $(this).closest('.sp-anchor-tagmgr-row');
-        const id  = row.attr('data-id');
-        const nm  = String(row.find('.sp-tagmgr-name-input').val() || '').trim();
-        const color = _tagMgrPickedColor(row);
-        try {
-            if (nm) await anchor.renameTag(id, nm);
-            await anchor.recolorTag(id, color);
-            _tagMgrEditId = null;
-            renderAnchorTagManager();
-        } catch (err) { showToast('保存标签失败：' + (err?.message || ''), null, true); }
-    });
-    $anchor.on('click', '.sp-tagmgr-del', function () {
-        _tagMgrDelId = $(this).closest('.sp-anchor-tagmgr-row').attr('data-id');
-        _tagMgrEditId = null;
-        renderAnchorTagManager();
-    });
-    $anchor.on('click', '.sp-tagmgr-del-no', function () { _tagMgrDelId = null; renderAnchorTagManager(); });
-    $anchor.on('click', '.sp-tagmgr-del-yes', async function () {
-        const id = $(this).closest('.sp-anchor-tagmgr-row').attr('data-id');
-        try {
-            const n = await anchor.deleteTag(id);
-            if (_anchorTagFilter === id) _anchorTagFilter = null;   // 正筛的标签被删 → 清筛
-            _tagMgrDelId = null;
-            showToast(`已删除标签${n ? `（从 ${n} 条收藏移除）` : ''}`);
-            renderAnchorTagManager();
-        } catch (err) { showToast('删除标签失败：' + (err?.message || ''), null, true); }
-    });
+    theaterFeature.bindUi($theater);
 
     // ── 历（日历）事件（委托到 #sp-almanac-wrap，两个 sheet 动态重渲染）──
     const $almanac = $in('#sp-almanac-wrap');
@@ -4496,8 +3791,11 @@ function injectModal() {
     bindLedgerEvents({
         almanac: $almanac, chat: $('#chat'), $, settings: getSettings, saveSettings: saveSettingsDebounced,
         capture: { run: runLedgerCaptureStep, abort: () => ledgerCaptureController.abort() },
-        judge: { run: runLedgerJudgeStep }, captureState: () => ({ busy: ledgerCaptureController.isBusy }), actions: ledgerActions,
+        judge: { run: runLedgerJudgeStep }, captureState: () => ({ busy: ledgerCaptureController.isBusy, controller: ledgerCaptureController.abortController }), actions: ledgerActions,
         render: renderAlmanacPanel,
+        refreshInline: () => refreshInlineWindow(true),
+        identity: () => ledgerOwnerIdentity(getContext() || {}),
+        isCurrentIdentity: owner => sameLedgerOwner(owner, ledgerOwnerIdentity(getContext() || {})),
         editor: { open: openLedgerEditor, save: saveLedgerEditor, close: closeLedgerEditor, get: getLedgerEditor },
         archive: { toggle: toggleLedgerArchiveOpen },
         batch: { scopes: BATCH_SCOPES, scope: getBatchScope, setScope: setBatchScope, selected: getBatchSelected, reset: batchReset, ids: batchScopeIds, exec: execBatch },
@@ -4535,9 +3833,9 @@ function injectModal() {
     $almanac.on('click', '.sp-alm-cal-next', function () { almNavMonth(1); });
     $almanac.on('click', '.sp-alm-time-travel', function () {
         const day = Number($(this).attr('data-day'));
-        if (Number.isInteger(day)) startTimeTravel({ month: almCalMonth() + 1, day });
+        if (Number.isInteger(day)) void startTimeTravel({ month: almCalMonth() + 1, day });
     });
-    $almanac.on('click', '.sp-alm-time-travel-stop', function () { cancelTimeTravel(); });
+    $almanac.on('click', '.sp-alm-time-travel-stop', function () { void cancelTimeTravel(); });
     $almanac.on('click', '.sp-alm-cell[data-day]', function () { axisCalendarActions.selectDay(parseInt($(this).attr('data-day'), 10)); });
     $almanac.on('click', '.sp-alm-cal-clearsel', function () { axisCalendarActions.selectDay(null); });
     $almanac.on('click', '.sp-alm-add-day', function () {
@@ -4730,6 +4028,9 @@ function injectModal() {
         const isSideTab = $btn.hasClass('sp-side-tab');
         const isSubBtn  = $btn.hasClass('sp-sub-btn');
 
+        // 离开棱时统一走 UI 生命周期出口，避免全屏滚动锁和 Esc listener 跟到其他侧栏。
+        if (isSideTab && theaterMode && view !== 'theater') theaterFeature.leave();
+
         // 切模块（历/线/面/棱/锚/轴）会藏掉 sub-toggle → 顺手收起可能开着的 TA▾ 抽屉，免得它残留浮在别处。
         if (isSideTab) closeTaDrawer();
 
@@ -4759,7 +4060,6 @@ function injectModal() {
                 linesMode = false;
                 spaceMode = false;
                 theaterMode = false;
-                anchorMode = false;
                 axisState.almanacMode = false;
                 $in('#sp-body').hide();
                 $in('#sp-lines-wrap').hide();
@@ -4770,17 +4070,7 @@ function injectModal() {
                 $in('#sp-outline-wrap').css('display', 'flex');
                 $in('#sp-sub-toggle').hide();
                 $in('#sp-content-title').text('面');
-                loadCreativeChatHistory();
-                updateCreativeChatModeUI();
-                renderCreativeChatHistory();
-                // 生成在途时切回来：重建 loading，别 fallback 到"生成面"空态误导用户
-                if (isGeneratingOutline) {
-                    setOutlineBody(loadingHtml('正在构思面', 'sp-abort-outline'));
-                } else {
-                    cachedOutline = loadCachedOutlineForCurrentChat();
-                    if (cachedOutline) setOutlineBody(cachedOutline);
-                    else setOutlineBody(renderEmptyOutlineState());
-                }
+                outlineFeature.open();
                 return;
             }
             if (view === 'lines') {
@@ -4789,7 +4079,6 @@ function injectModal() {
                 outlineMode = false;
                 spaceMode = false;
                 theaterMode = false;
-                anchorMode = false;
                 axisState.almanacMode = false;
                 $in('#sp-body').hide();
                 $in('#sp-outline-wrap').hide();
@@ -4816,7 +4105,6 @@ function injectModal() {
                 outlineMode = false;
                 linesMode = false;
                 theaterMode = false;
-                anchorMode = false;
                 axisState.almanacMode = false;
                 $in('#sp-body').hide();
                 $in('#sp-outline-wrap').hide();
@@ -4827,9 +4115,7 @@ function injectModal() {
                 $in('#sp-space-wrap').css('display', 'flex');
                 $in('#sp-sub-toggle').hide();
                 $in('#sp-content-title').text('间');
-                $in('#sp-space-input').attr('placeholder', getSpaceChatPlaceholder());
-                loadSpaceChatHistory();
-                renderSpaceChatHistory();
+                spaceFeature.open();
                 return;
             }
             if (view === 'theater') {
@@ -4838,7 +4124,6 @@ function injectModal() {
                 outlineMode = false;
                 linesMode = false;
                 spaceMode = false;
-                anchorMode = false;
                 axisState.almanacMode = false;
                 $in('#sp-body').hide();
                 $in('#sp-outline-wrap').hide();
@@ -4849,36 +4134,19 @@ function injectModal() {
                 $in('#sp-theater-wrap').css('display', 'flex');
                 $in('#sp-sub-toggle').hide();
                 $in('#sp-content-title').text('棱');
-                // 打开棱面板即预取剧情上下文（世界书/人设，异步），供写作 agent 用
-                refreshTheaterStoryContext().catch(() => {});
-                if (isGeneratingTheater) {
-                    setTheaterBody(loadingHtml('正在折射', 'sp-abort-theater'));
-                } else {
-                    renderTheaterPanel();
-                }
+                if (theaterFeature.busy) setTheaterBody(loadingHtml('正在折射', 'sp-abort-theater'));
+                else theaterFeature.open();
                 return;
             }
             if (view === 'anchor') {
-                if (anchorMode) return;
-                anchorMode = true;
-                _anchorTagFilter = null;   // 进 anchor 视图复位筛选；层间导航才保留
-                _tagMgrEditId = null; _tagMgrDelId = null;
-                _anchorFullTagEdit = false;
-                outlineMode = false;
-                linesMode = false;
-                spaceMode = false;
-                theaterMode = false;
-                axisState.almanacMode = false;
-                $in('#sp-body').hide();
-                $in('#sp-outline-wrap').hide();
-                $in('#sp-lines-wrap').hide();
-                $in('#sp-space-wrap').hide();
-                $in('#sp-theater-wrap').hide();
-                $in('#sp-almanac-wrap').hide();
-                $in('#sp-anchor-wrap').css('display', 'flex');
-                $in('#sp-sub-toggle').hide();
-                $in('#sp-content-title').text('坐标');
-                renderAnchorPanel();
+                enterCoordinateSidebar({
+                    resetModes: () => { outlineMode = false; linesMode = false; spaceMode = false; theaterMode = false; axisState.almanacMode = false; },
+                    hidePanels: () => { $in('#sp-body').hide(); $in('#sp-outline-wrap').hide(); $in('#sp-lines-wrap').hide(); $in('#sp-space-wrap').hide(); $in('#sp-theater-wrap').hide(); $in('#sp-almanac-wrap').hide(); },
+                    showCoordinate: () => $in('#sp-anchor-wrap').css('display', 'flex'),
+                    hideSubToggle: () => $in('#sp-sub-toggle').hide(),
+                    setTitle: title => $in('#sp-content-title').text(title),
+                    feature: coordinateRuntime?.feature,
+                });
                 return;
             }
             if (view === 'almanac') {
@@ -4888,7 +4156,6 @@ function injectModal() {
                 linesMode = false;
                 spaceMode = false;
                 theaterMode = false;
-                anchorMode = false;
                 $in('#sp-body').hide();
                 $in('#sp-outline-wrap').hide();
                 $in('#sp-lines-wrap').hide();
@@ -4906,7 +4173,7 @@ function injectModal() {
             if (linesMode)   { linesMode   = false; $in('#sp-lines-wrap').hide(); }
             if (spaceMode)   { spaceMode   = false; $in('#sp-space-wrap').hide(); }
             if (theaterMode) { theaterMode = false; $in('#sp-theater-wrap').hide(); }
-            if (anchorMode)  { anchorMode  = false; $in('#sp-anchor-wrap').hide(); }
+            coordinateRuntime?.feature?.close?.(); $in('#sp-anchor-wrap').hide();
             if (axisState.almanacMode) { axisState.almanacMode = false; $in('#sp-almanac-wrap').hide(); }
             $in('#sp-body').show();
             $in('#sp-sub-toggle').show();
@@ -4951,7 +4218,7 @@ function injectModal() {
         getSettings().injectEnabled = this.checked;
         saveSettingsDebounced();
         refreshLinesInjection();
-        refreshOutlineInjection();
+        outlineFeature.injection.refresh();
         refreshLedgerInjection();
     });
     // Master switch: apply immediately so the user sees inline blocks appear/
@@ -5039,10 +4306,9 @@ function injectModal() {
     $in('#sp-outline-inject').on('change', function () {
         getSettings().outlineInject = this.checked;
         saveSettingsDebounced();
-        outlineJudgeMsgCounter = 0;   // 开/关都重置计数，避免残留计数导致刚开就判
-        refreshOutlineInjection();
-        // 面板开着看大纲 → 重渲染让高亮出现/消失
-        if (outlineMode) { const s = readStore(getOutlineCacheKey()); if (s?.raw) { cachedOutline = renderOutline(s.raw, getOutlineCursor()); setOutlineBody(cachedOutline); } }
+        outlineFeature.resetJudgeCounter();
+        outlineFeature.injection.refresh();
+        if (outlineMode) outlineFeature.refreshPanel();
     });
     // 大纲判定间隔：改完即重新计数（避免旧计数立刻触发判定）
     $in('#sp-outline-judge-interval').on('change', function () {
@@ -5050,7 +4316,7 @@ function injectModal() {
         getSettings().outlineJudgeInterval = n;
         this.value = String(n);
         saveSettingsDebounced();
-        outlineJudgeMsgCounter = 0;
+        outlineFeature.resetJudgeCounter();
     });
     // 历·自动确认当前日期 开关：改完重置历计数（避免残留计数刚开就判）
     $in('#sp-almanac-autodetect').on('change', function () {
@@ -5122,7 +4388,7 @@ function injectModal() {
     $in('#sp-anchor-inline-btn').on('change', function () {
         getSettings().anchorInlineBtn = this.checked;
         saveSettingsDebounced();
-        scanAnchorButtons();
+        coordinateRuntime?.feature?.scanButtons();
     });
     // Inline model list: pick an item → write to input + refresh active highlight
     $in('#sp-model-list-items').on('click', '.sp-model-list-item', function () {
@@ -5207,7 +4473,7 @@ function injectModal() {
 
 function onRegenClick() {
     if (outlineMode) {
-        triggerGenerateOutline();
+        void outlineFeature.generation.trigger({ reroll: true, module: 'outline' });
         return;
     }
     if (axisState._almSyncingPoint) { showToast('点正在同步到今天，稍候再刷新', null, true); return; }   // 同步在飞：别让点这边的刷新跟后台同步抢 store（否则重排点会被同步写回）
@@ -5404,7 +4670,7 @@ function refreshCharPinIcon() {
 // 无条件隐藏所有非点 wrap（不靠 mode 标志守卫）：CHAT_CHANGED 在面板隐藏时会把标志清成
 // false 却不动 DOM，若这里再按标志判断就会漏隐藏 → 出现「点 + 坐标」同屏。故一律硬隐藏。
 function resetPanelToScheduleHome() {
-    outlineMode = linesMode = spaceMode = theaterMode = anchorMode = axisState.almanacMode = false;
+    outlineMode = linesMode = spaceMode = theaterMode = axisState.almanacMode = false;
     $in('#sp-outline-wrap').hide();
     $in('#sp-lines-wrap').hide();
     $in('#sp-space-wrap').hide();
@@ -5473,9 +4739,8 @@ function closePanel() {
     // 关闭主面板时取消活动确认，但独立弹窗宿主本身不隐藏。
     // 收全屏残留：全屏中经背景/FAB 关面板时，若不清这些类，body 的滚动锁会滞留（酒馆卡死），
     // 且 .sp-sheet 的 sp-fs-flat 会带到下次打开（手机右移半屏）。棱、坐标一并清。
-    _clearAnchorFs();
-    inEl('#sp-theater-result')?.classList.remove('sp-theater-fullscreen');
-    document.body.classList.remove('sp-theater-fs-lock');
+    coordinateRuntime?.feature?.close?.();
+    theaterFeature.onPanelClosed();
     _activeSpConfirmCancel?.();
     _activeStoreConflictFinish?.('defer');
     removeDialogOverlays();
@@ -5564,11 +4829,11 @@ async function memoryPreCheckConfirm() {
         return true;
     }
     if (getSettings().useDatabase) {
-        const result = await getDatabaseMemResult({ query: '' }).catch(error => ({ status: 'worldbook-read-failed', text: '', error }));
+        const result = await databaseMemoryAccess.result({ query: '' });
         if (result.text) return true;
         return spConfirm({
             title: '数据库记忆为空',
-            body: `${databaseDiagnostic(result)}。继续生成将不注入数据库历史。`,
+            body: `${databaseMemoryDiagnostic(result)}。继续生成将不注入数据库历史。`,
             confirmText: '继续生成',
             cancelText: '取消',
         });
@@ -5721,58 +4986,15 @@ async function runGenerate(travelContext = null, owner = null) { return pointCon
 function abortScheduleGen() {
     pointController.abort();
 }
-function abortOutlineGen() {
-    if (!isGeneratingOutline) return;
-    const owner = outlineGenerationOwner;
-    outlineAbortController?.abort();
-    abortOutlineJudge();
-    outlineAbortController = null;
-    outlineGenerationOwner = null;
-    isGeneratingOutline = false;
-    if (owner?.baseline?.raw && getContext().chatId === owner.chatId) {
-        cachedOutline = renderOutline(owner.baseline.raw, owner.baseline.cursor ?? 1);
-        if (outlineMode) setOutlineBody(cachedOutline);
-    } else if (outlineMode) setOutlineBody(renderEmptyOutlineState());
-}
 function abortLinesGen() {
     if (!linesRuntime.busy) return;
     linesFeature.abortGeneration();
     if (linesMode && linesFeature.sheet === 'events') linesFeature.refreshPanel();
 }
-function abortTheaterGen() {
-    if (!isGeneratingTheater) return;
-    theaterAbortController?.abort();
-    theaterAbortController = null;
-    isGeneratingTheater = false;
-    theater.resetTheaterGenerating();   // 同步清 theater.js 内部标志，避免立刻再点生成误报"正在生成中"
-    renderTheaterPanel();
-}
 function abortAlmanacGen() {
     if (!axisState.isGeneratingAlmanac) return;
-    axisState.almanacAbortController?.abort();
-    axisState.almanacAbortController = null;
-    axisState.isGeneratingAlmanac = false;
+    axisGenerationController.reset();
     if (axisState.almanacMode) renderAlmanacPanel();
-}
-
-// 保存/查看时同步草稿里同 id 条目的 title（保证草稿列表与永久保存一致）
-function syncDraftMeta(piece) {
-    const drafts = theater.loadDrafts();
-    const idx = drafts.findIndex(p => p.id === piece.id);
-    if (idx >= 0) {
-        drafts[idx].title = piece.title;
-        // theater.js 无 setter；直接回写 localStorage 同一 key
-        const chatId = getContext().chatId;
-        const key = buildTheaterDraftKey(chatId);
-        if (key) { try { localStorage.setItem(key, JSON.stringify(drafts.slice(-theater.THEATER_DRAFT_CAP))); } catch {} }
-    }
-}
-
-// 在草稿+已保存里按 id 找 piece
-function findPieceById(id) {
-    return theater.loadDrafts().find(p => p.id === id)
-        || theater.loadSaved().find(p => p.id === id)
-        || null;
 }
 
 async function generate(ctx, userName, charName, perspective = 'user', signal = null, pinned = null, travelContext = null) {
@@ -5787,35 +5009,6 @@ async function generate(ctx, userName, charName, perspective = 'user', signal = 
     return callCustomApi(ctx, prompt, cfg, userName, charName, signal, 10, apiOpts);
 }
 
-
-// Story context for theater's writing agent: world info + persona + character card.
-// Reuses the same readers as 点/线/面 (buildWorldInfoContext / readCardExtras) so
-// the mini-theater is grounded in the same setting. Returns sys blocks + names.
-// NOTE: async work (world info) is prefetched into a cache on panel open; this
-// sync accessor returns the last snapshot so theater.js can build messages sync.
-let _theaterStorySnap = { sysBlocks: [], userName: '用户', charName: '角色' };
-async function refreshTheaterStoryContext() {
-    const ctx = getContext();
-    const userName = ctx.name1 || '用户';
-    const charName = ctx.name2 || '角色';
-    const char = ctx.characters?.[ctx.characterId] ?? {};
-    let wiContext = '';
-    try { wiContext = await buildWorldInfoContext(ctx); } catch { wiContext = ''; }
-    const { personaDesc, authorNote } = readCardExtras(ctx);
-    const memText = await getMemText();
-    const sysBlocks = [
-        personaDesc      ? `【${userName} 的人物设定】\n${personaDesc}` : '',
-        char.description ? `【${charName} 的背景资料】\n${char.description}` : '',
-        char.personality ? `【性格】${char.personality}` : '',
-        char.scenario    ? `【场景】${char.scenario}`    : '',
-        authorNote       ? `【作者注释（当前聊天）】\n${authorNote}` : '',
-        wiContext,
-        memText ? `【故事记忆库】以下是本插件自动生成的剧情客观摘要（从最早到近期的关键事件与伏笔），作为这段小剧场的既有背景，注意与之保持连贯：\n\n${memText}` : '',
-    ].filter(Boolean);
-    _theaterStorySnap = { sysBlocks, userName, charName };
-    return _theaterStorySnap;
-}
-function getTheaterStoryContext() { return _theaterStorySnap; }
 
 // ─── World-info entry filter (per character) ──────────────────────────────────
 // Stores disabled entry uids per character in extension_settings.
@@ -6308,58 +5501,58 @@ function getDatabasePrimaryWorldbookName(ctx = getContext()) {
     return String(ctx?.characters?.[ctx.characterId]?.data?.extensions?.world || '').trim();
 }
 
-async function getDatabaseMemText(opts = {}) {
-    const result = await getDatabaseMemResult(opts);
-    return result.text;
-}
-
-async function getDatabaseMemResult(opts = {}) {
-    const th = globalThis.TavernHelper;
-    if (!th || typeof th.getWorldbook !== 'function') return { status: 'api-unavailable', text: '', entries: 0, matched: 0, usable: 0, selected: 0 };
-    const name = getDatabasePrimaryWorldbookName();
-    if (!name) return { status: 'worldbook-unavailable', text: '', entries: 0, matched: 0, usable: 0, selected: 0 };
-    let entries;
-    try { entries = await th.getWorldbook(name); } catch (error) { return { status: 'worldbook-read-failed', text: '', entries: 0, matched: 0, usable: 0, selected: 0, error }; }
-    if (!Array.isArray(entries)) return { status: 'invalid-response', text: '', entries: 0, matched: 0, usable: 0, selected: 0 };
-    const matchedEntries = entries.filter(isDatabaseMemoEntry);
-    if (!matchedEntries.length) return { status: 'no-match', text: '', entries: entries.length, matched: 0, usable: 0, selected: 0 };
-    const memories = matchedEntries.map((entry, index) => ({
-        text: String(entry?.content || '').trim(),
-        tags: mergeRecallTags(entry),
-        batch: index, slice: 0, time: '',
-    }));
-    const nonEmpty = memories.filter(item => item.text);
-    if (!nonEmpty.length) return { status: 'empty-content', text: '', entries: entries.length, matched: matchedEntries.length, usable: 0, selected: 0 };
-    const selected = selectAnimaSlices(nonEmpty, buildAnimaRecallQuery(opts.query), getAnimaRecallCount());
-    const text = selected.map(item => item.text).join('\n\n');
-    return { status: text ? 'ready' : 'empty-content', text, entries: entries.length, matched: matchedEntries.length, usable: nonEmpty.length, selected: selected.length };
-}
-
-function databaseDiagnostic(result) {
-    const labels = {
-        'api-unavailable': '检测不到 TavernHelper 世界书读取接口',
-        'worldbook-unavailable': '未取得角色主世界书',
-        'worldbook-read-failed': '主世界书读取失败',
-        'invalid-response': '世界书返回结构异常',
-        'no-match': '主世界书中没有匹配到数据库纪要',
-        'empty-content': `匹配到数据库纪要，但正文为空（匹配 ${result?.matched || 0} 条，可用 ${result?.usable || 0} 条）`,
-        ready: `数据库记忆已就绪（匹配 ${result?.matched || 0} 条，可用 ${result?.usable || 0} 条，本次注入 ${result?.selected || 0} 条）`,
+function captureDatabaseMemoryTarget() {
+    const selectedName = normalizeDatabaseWorldbookName(getSettings().databaseWorldbookName);
+    // Do not even consult the primary book when an explicit target is configured:
+    // a missing/renamed explicit book must fail visibly instead of crossing archives.
+    return {
+        selectedName,
+        primaryName: selectedName ? '' : getDatabasePrimaryWorldbookName(),
     };
-    return labels[result?.status] || '数据库读取状态未知';
 }
 
-// Memory-source dispatcher. Priority: Anima → 柏宝书 → built-in L0/L1 store. The
+function captureDatabaseWorldbookReader() {
+    const th = globalThis.TavernHelper;
+    if (typeof th?.getWorldbook === 'function') return th.getWorldbook.bind(th);
+    let context = null;
+    try { context = getContext?.() || null; } catch {}
+    if (typeof context?.loadWorldInfo !== 'function') return null;
+    return async name => {
+        const result = await context.loadWorldInfo(name);
+        const entries = result?.entries;
+        if (Array.isArray(entries)) {
+            if (!entries.length) throw new Error('worldbook-entries-empty');
+            return entries;
+        }
+        if (entries && typeof entries === 'object') {
+            const values = Object.values(entries);
+            if (!values.length) throw new Error('worldbook-entries-empty');
+            return values;
+        }
+        throw new Error('worldbook-entries-invalid');
+    };
+}
+
+const databaseMemoryAccess = createDatabaseMemoryAccess({
+    captureTarget: captureDatabaseMemoryTarget,
+    captureReader: captureDatabaseWorldbookReader,
+    buildQuery: buildAnimaRecallQuery,
+    getLimit: getAnimaRecallCount,
+    selectSlices: selectAnimaSlices,
+});
+
+// Memory-source dispatcher. Priority: Anima → 数据库 → 柏宝书 → built-in L0/L1 store. The
 // alternate sources are mutually exclusive (enforced in bindMemoryHandlers); each
 // returns its own history or nothing (empty prompt block) — no fallback between them.
 async function _getMemTextRaw(opts = {}) {
     const s = getSettings();
     if (s.useAnima) {
         try { return await getAnimaMemText(opts); }
-        catch (err) { console.warn('[7dayscal] Anima 取摘要出错:', err); return ''; }
+        catch (err) { console.warn('[7dayscal] Anima 取摘要出错', safeDiagnosticLog('memory', 'request', err, { background: true })); return ''; }
     }
     if (s.useDatabase) {
-        try { return await getDatabaseMemText(opts); }
-        catch (err) { console.warn('[7dayscal] 数据库取纪要出错:', err); return ''; }
+        try { return await databaseMemoryAccess.text(opts); }
+        catch (err) { console.warn('[7dayscal] 数据库取纪要出错', safeDiagnosticLog('memory', 'request', err, { background: true })); return ''; }
     }
     if (s.useBaiBaiBook) {
         const api = globalThis.STBaiBaiBook;
@@ -6380,7 +5573,7 @@ async function _getMemTextRaw(opts = {}) {
             }
             return api.getInjectedHistory()?.relativeText || '';
         } catch (err) {
-            console.warn('[7dayscal] 柏宝书取历史出错:', err);
+            console.warn('[7dayscal] 柏宝书取历史出错', safeDiagnosticLog('memory', 'request', err, { background: true }));
             return '';
         }
     }
@@ -6396,7 +5589,7 @@ async function _getMemTextRaw(opts = {}) {
 async function getMemText(opts = {}) {
     const raw = await _getMemTextRaw(opts);
     try { return await _capMemText(raw, !!opts.full); }
-    catch (err) { console.warn('[7dayscal] 记忆预算封顶出错，回退原文:', err); return raw; }
+    catch (err) { console.warn('[7dayscal] 记忆预算封顶出错，回退原文', safeDiagnosticLog('memory', 'request', err, { background: true })); return raw; }
 }
 function getMemMaxTokens() {
     const v = parseInt(getSettings().memMaxTokens, 10);
@@ -6470,13 +5663,6 @@ function readCardExtras(ctx) {
 // historyLimit：喂给这次调用的「最近 AI 楼」条数上限（连带其配对 user 楼）。默认 10。
 // 传 0 = 完全不喂近景，只靠 system 块（人设/卡描述/世界书/记忆库）——冷知识发散专用，
 // 免得被最近十楼里反复出现的某个道具/场景锚死。点/线/面/判定仍用默认 10（它们要贴当前剧情）。
-function stripRerollModuleArtifacts(text) {
-    return String(text || '')
-        .replace(/<(?:calendar|schedule|storylines|line|outline|almanac|era)_widget(?:\s[^>]*)?>[\s\S]*?<\/(?:calendar|schedule|storylines|line|outline|almanac|era)_widget>/gi, '')
-        .replace(/<\/?(?:calendar|schedule|storylines|line|outline|almanac|era)_widget(?:\s[^>]*)?>/gi, '')
-        .trim();
-}
-
 async function buildMessages(ctx, prompt, userName, charName, historyLimit = 10, opts = {}) {
     const char = ctx.characters?.[ctx.characterId] ?? {};
     const wiContext = await buildWorldInfoContext(ctx);
@@ -6484,14 +5670,14 @@ async function buildMessages(ctx, prompt, userName, charName, historyLimit = 10,
 
     // Story memory (Plan C: objective memory + view tag)
     const rawMemText = await getMemText({ full: opts.fullMemory, query: prompt });
-    const memText = opts.reroll ? stripRerollModuleArtifacts(rawMemText) : rawMemText;
+    const memText = sanitizeGenerationContextText(rawMemText, { reroll: opts.reroll });
     const memPerspective = opts.pointView === 'char' ? charName : opts.pointView === 'user' ? userName : null;
     const memBlock = memText
         ? `【故事记忆库】以下由本插件在对话过程中自动生成的客观摘要，反映从最早到近期的关键事件与伏笔。请**优先信任记忆库描述**，即使它与角色卡/世界书中较早的描述冲突（因为记忆库记录了事件后的最新状态）。${memPerspective ? `点视角优先关注对${memPerspective}有意义的信息。` : '请按当前聊天主角色上下文理解，不继承点的 TA 视角。'}\n\n${memText}`
         : '';
 
     // 历（本世界观重要日期）：历自己不进主楼，只在这里作为数据源反哺点/线/大纲。
-    const almanacText = opts.noAlmanac ? '' : getAlmanacInjectText();
+    const almanacText = resolveAlmanacContextText(opts, getAlmanacInjectText);
     const almanacBlock = almanacText
         ? `【本世界观·重要日期（历）】以下是这个世界的既定节日、生日、纪念日等重要日子，已按「当前剧情日期」标注倒计时；每条冒号后的「说明」是该日子的既定设定（由来、涉及人物阵营、习俗活动、持续天数等），是背景事实。\n${almanacText}\n\n★ 推演点/线/大纲时：凡列在【近期将至】里的日子（未来数日内或进行中），应**主动**把它纳入近期剧情——依据其「说明」里的设定生成与之相关的铺垫、筹备、事件或人物动向，让故事顺着该世界的历法自然推进；【全年其他重要日子】作为背景，时间线接近时再纳入考量。\n★ 务必尊重每条「说明」里的既定设定，据此展开合理、可延续的剧情；说明里没写到的细节可以合理补完，但**不得编造与既定设定冲突的内容**。`
         : '';
@@ -6538,7 +5724,7 @@ async function buildMessages(ctx, prompt, userName, charName, historyLimit = 10,
             return !(mesId === excluded.mesId && String(m.mes ?? '') === excluded.text);
         }).map(({ m }) => ({
             role   : m.is_user ? 'user' : 'assistant',
-            content: substituteParams(opts.reroll ? stripRerollModuleArtifacts(memory.stripTags(m.mes ?? '', stripOpts)) : memory.stripTags(m.mes ?? '', stripOpts)),
+            content: substituteParams(sanitizeGenerationContextText(m.mes ?? '', { reroll: opts.reroll, stripTags: value => memory.stripTags(value, stripOpts) })),
         }));
     }
     if (Array.isArray(opts.ledgerSourceFloors)) {
@@ -6550,49 +5736,6 @@ async function buildMessages(ctx, prompt, userName, charName, historyLimit = 10,
     return [{ role: 'system', content: sys }, ...history, { role: 'user', content: prompt }];
 }
 
-// ─── Outline cache helpers ────────────────────────────────────────────────────
-
-function getOutlineCacheKey(view, charName) {
-    return outlineRepository.key('outline');
-}
-
-function getCreativeChatHistoryKey(view, charName) {
-    return outlineRepository.key('creative-chat');
-}
-
-function loadCreativeChatHistory(view, charName) {
-    const saved = readStore(getCreativeChatHistoryKey(view, charName));
-    outlineChatHistory = Array.isArray(saved) ? saved.filter(item => item?.role && item?.content) : [];
-    return outlineChatHistory;
-}
-
-function saveCreativeChatHistory(view, charName) {
-    writeStore(getCreativeChatHistoryKey(view, charName), outlineChatHistory);
-}
-
-function updateCreativeChatModeUI() {
-    $in('#sp-chat-input').attr('placeholder', getCreativeChatPlaceholder());
-}
-
-function renderCreativeChatHistory() {
-    const $msgs = $in('#sp-chat-msgs');
-    $msgs.empty();
-    outlineChatHistory.forEach((msg, idx) => {
-        appendChatMsg(msg.role === 'assistant' ? 'ai' : msg.role, msg.content, idx);
-    });
-}
-
-function loadCachedOutlineForCurrentChat(view, charName) {
-    const saved = readStore(getOutlineCacheKey(view, charName));
-    if (saved?.raw) {
-        // 游标取自同一 saved 对象（对任意 view 都正确；有大纲无 cursor → 默认 1）。
-        const n = Number(saved.cursor);
-        const cursor = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 1;
-        return renderOutline(saved.raw, cursor);
-    }
-    return null;
-}
-
 // ─── Inject ───────────────────────────────────────────────────────────────────
 
 function makeInjectBtn(text) {
@@ -6601,19 +5744,9 @@ function makeInjectBtn(text) {
     return `<button class="sp-inject-btn" data-iid="${id}" title="注入到输入框"><i class="fa-solid fa-arrow-right-to-bracket"></i></button>`;
 }
 
-// 复制按钮：仿 makeInjectBtn 把整段文本寄存进 _copyTexts、按钮带 data-cid，点击时 handler 取回写剪贴板。
-// 用于面·逐 step 复制（每个剧情节点一份干净文本）。
-const _copyTexts = {};
-let _copyIdSeq = 0;
-function makeCopyBtn(text) {
-    const id = ++_copyIdSeq;
-    _copyTexts[id] = text;
-    return `<button class="sp-beat-copy" data-cid="${id}" title="复制这一步"><i class="fa-solid fa-copy"></i></button>`;
-}
-
 function injectToST(text) {
     const $ta = $('#send_textarea');
-    if (!$ta.length) { showToast('找不到输入框', null, true); return; }
+    if (!$ta.length) { showToast('找不到输入框', null, true); return false; }
     // Append instead of overwrite — don't nuke whatever the user was typing.
     // Empty box → just set; non-empty → prepend a blank line separator so the
     // injection stays visually distinct from prior text.
@@ -6628,6 +5761,7 @@ function injectToST(text) {
     }
     el?.scrollTo?.({ top: el.scrollHeight });
     showToast(prev.trim() ? '已追加到输入框' : '已注入到输入框');
+    return true;
 }
 
 // ─── Outline chat ─────────────────────────────────────────────────────────────
@@ -6652,7 +5786,7 @@ function renderAiMessageHtml(text) {
         try {
             return ctx.messageFormatting(String(text ?? ''), '', false, false, null, {}, false);
         } catch (err) {
-            console.warn('[7dayscal] messageFormatting failed, falling back to plain:', err);
+            console.warn('[7dayscal] messageFormatting failed, falling back to plain', safeDiagnosticLog('generation', 'parse', err));
         } finally {
             if (guardRegex) {
                 const i = de.indexOf('regex');
@@ -6663,274 +5797,51 @@ function renderAiMessageHtml(text) {
     return escapeHtml(String(text ?? '')).replace(/\n/g, '<br>');
 }
 
-// ─── Space chat widget extraction ─────────────────────────────────────────
-// AI 输出 <schedule_widget> / <line_widget> / <almanac_widget> 时切成三段：
-//   1. widget 之外的正文（如果有）走 markdown 渲染
-//   2. 每个 widget 转成"卡片 + 应用按钮"预览
-// 多个 widget 一起出可以并列显示，用户挑一个应用。
-function extractSpaceWidgets(raw) {
-    const widgets = [];
-    const rx = /<(schedule_widget|line_widget|almanac_widget|era_widget)([^>]*)>([\s\S]*?)<\/\1\s*>/gi;
-    let cleaned = String(raw || '');
-    let m;
-    while ((m = rx.exec(cleaned)) !== null) {
-        const em = (m[2] || '').match(/\bedit\s*=\s*["']?\s*(\d+)/i);
-        widgets.push({ kind: m[1].toLowerCase(), body: m[3].trim(), editIdx: em ? parseInt(em[1], 10) : null });
-    }
-    cleaned = cleaned.replace(rx, '').trim();
-    return { text: cleaned, widgets };
-}
-
-// Turn a widget body into a preview card HTML (no apply button yet — button is
-// wired separately so click handler can capture the raw body).
-function renderSpaceWidgetCard(kind, body, wid, editIdx = null) {
-    if (kind === 'schedule_widget') {
-        const line = body.split('\n').find(l => /^Event\s*:/i.test(l)) || '';
-        const parts = line.replace(/^Event\s*:\s*/i, '').split('|').map(s => s.trim());
-        const [type, title, desc, time, location, dynamic] = parts;
-        const TYPE_META = { main: { label: '明线', color: '#d6b85a' }, hidden: { label: '暗线', color: '#a06fd6' }, bond: { label: '红线', color: '#d67f6f' } };
-        const meta = TYPE_META[type] || { label: type || '?', color: '#9aa6b2' };
-        return `<div class="sp-space-widget-card" data-wid="${wid}" data-kind="schedule">
-            <div class="sp-space-widget-head">
-                <span class="sp-space-widget-badge" style="background:${meta.color}22;color:${meta.color};border-color:${meta.color}">
-                    <i class="fa-regular fa-calendar"></i> ${editIdx != null ? `建议改点·第 ${editIdx} 条` : '建议加到点'}（${escapeHtml(meta.label)}）
-                </span>
-            </div>
-            <div class="sp-space-widget-body">
-                <div class="sp-space-widget-title">${escapeHtml(title || '(未命名)')}</div>
-                ${desc ? `<div class="sp-space-widget-desc">${escapeHtml(desc)}</div>` : ''}
-                <div class="sp-space-widget-meta">
-                    ${time ? `<span><i class="fa-regular fa-clock"></i> ${escapeHtml(time)}</span>` : ''}
-                    ${location ? `<span><i class="fa-solid fa-location-dot"></i> ${escapeHtml(location)}</span>` : ''}
-                </div>
-                ${dynamic ? `<div class="sp-space-widget-dynamic">🧵 ${escapeHtml(dynamic)}</div>` : ''}
-            </div>
-            <div class="sp-space-widget-actions">
-                <button class="sp-space-widget-apply" data-wid="${wid}"><i class="fa-solid ${editIdx != null ? 'fa-pen' : 'fa-plus'}"></i> ${editIdx != null ? `替换第 ${editIdx} 条` : '应用到点'}</button>
-            </div>
-        </div>`;
-    }
-    if (kind === 'line_widget') {
-        const lineRow = body.split('\n').find(l => /^Line\s*:/i.test(l)) || '';
-        const descRow = body.split('\n').find(l => /^Desc\s*:/i.test(l)) || '';
-        const nextRow = body.split('\n').find(l => /^Next\s*:/i.test(l)) || '';
-        const parts = lineRow.replace(/^Line\s*:\s*/i, '').split('|').map(s => s.trim());
-        const [name, ltype, stage, level, when, agency, stall] = parts;
-        const desc = descRow.replace(/^Desc\s*:\s*/i, '').trim();
-        const next = nextRow.replace(/^Next\s*:\s*/i, '').trim();
-        const isStall = String(stall).toLowerCase() === 'true';
-        return `<div class="sp-space-widget-card" data-wid="${wid}" data-kind="line">
-            <div class="sp-space-widget-head">
-                <span class="sp-space-widget-badge sp-space-widget-badge-line">
-                    <i class="fa-solid fa-diagram-project"></i> ${editIdx != null ? `建议改线·第 ${editIdx} 条` : '建议加到线'}
-                </span>
-            </div>
-            <div class="sp-space-widget-body">
-                <div class="sp-space-widget-title">${escapeHtml(name || '(未命名)')}</div>
-                <div class="sp-space-widget-meta">
-                    ${ltype  ? `<span>${escapeHtml(ltype)}</span>` : ''}
-                    ${stage  ? `<span>${escapeHtml(stage)}${isStall ? ' · 停滞' : ''}</span>` : ''}
-                    ${when   ? `<span>${escapeHtml(when)}</span>` : ''}
-                    ${agency ? `<span>${agency === 'player' ? '需推动' : '自演化'}</span>` : ''}
-                </div>
-                ${desc ? `<div class="sp-space-widget-desc">${escapeHtml(desc)}</div>` : ''}
-                ${next ? `<div class="sp-space-widget-next">→ ${escapeHtml(next)}</div>` : ''}
-            </div>
-            <div class="sp-space-widget-actions">
-                <button class="sp-space-widget-apply" data-wid="${wid}"><i class="fa-solid ${editIdx != null ? 'fa-pen' : 'fa-plus'}"></i> ${editIdx != null ? `替换第 ${editIdx} 条` : '应用到线'}</button>
-            </div>
-        </div>`;
-    }
-    if (kind === 'almanac_widget') {
-        // 每个日期渲染成**独立一张卡 + 独立按钮**，可分别注入（用 data-idx 对齐 parseAlmanacWidget 的下标）。
-        const items = parseAlmanacWidget(body);
-        if (!items.length) return '';
-        const cal = loadCalDesc();
-        const TYPE_LABEL = { festival: '节日', birthday: '生日', anniversary: '纪念日', custom: '自定义' };
-        return items.map((it, i) => {
-            const dateTxt = it.displayDate || `${calMonthName(cal, it.month)}${it.day}日`;
-            const label = TYPE_LABEL[it.type] || '自定义';
-            return `<div class="sp-space-widget-card" data-wid="${wid}" data-kind="almanac">
-                <div class="sp-space-widget-head">
-                    <span class="sp-space-widget-badge sp-space-widget-badge-almanac">
-                        <i class="fa-regular fa-calendar-check"></i> 建议加到历
-                    </span>
-                </div>
-                <div class="sp-space-widget-body">
-                    <div class="sp-space-widget-almrow">
-                        <span class="sp-space-widget-almdate">${escapeHtml(dateTxt)}</span>
-                        <span class="sp-space-widget-almname">${escapeHtml(it.name)}</span>
-                        <span class="sp-space-widget-almtype">${escapeHtml(label)}</span>
-                    </div>
-                </div>
-                <div class="sp-space-widget-actions">
-                    <button class="sp-space-widget-apply" data-wid="${wid}" data-idx="${i}"><i class="fa-solid fa-plus"></i> 应用到轴</button>
-                </div>
-            </div>`;
-        }).join('');
-    }
-    if (kind === 'era_widget') {
-        // 历法/纪年描述符：单张卡，展示纪年名 + 「一年 N 月、共 M 天」+ 每月名·天数；应用即换整套历法。
-        const desc = parseEraWidget(body);
-        if (!desc) return '';
-        const monthsHtml = desc.months
-            .map(mo => `<span class="sp-space-widget-eramonth">${escapeHtml(mo.name)}·${mo.days}天</span>`)
-            .join('');
-        return `<div class="sp-space-widget-card" data-wid="${wid}" data-kind="era">
-            <div class="sp-space-widget-head">
-                <span class="sp-space-widget-badge sp-space-widget-badge-era">
-                    <i class="fa-regular fa-calendar-days"></i> 建议应用历法
-                </span>
-            </div>
-            <div class="sp-space-widget-body">
-                <div class="sp-space-widget-title">${escapeHtml(desc.era || '自定义历法')}</div>
-                <div class="sp-space-widget-desc">一年 ${calMonthCount(desc)} 个月、共 ${calYearLen(desc)} 天</div>
-                <div class="sp-space-widget-eramonths">${monthsHtml}</div>
-            </div>
-            <div class="sp-space-widget-actions">
-                <button class="sp-space-widget-apply" data-wid="${wid}"><i class="fa-solid fa-calendar-check"></i> 应用历法</button>
-            </div>
-        </div>`;
-    }
-    return '';
-}
-
-// Cache widget bodies by short id so click handler can retrieve them.
-// Persists per-session; not saved to disk (raw is preserved in chat history anyway).
-const _spaceWidgetStore = new Map();
-let _spaceWidgetSeq = 0;
 
 // idx0 从 0 起。就地替换 calendar_widget 内第 idx0 个 Event: 行（保留其 Day/Future 归属与缩进），找不到返回 null。
 function replaceNthEventLine(raw, idx0, newEventLine) {
     return replacePointEventBlock(raw, idx0, newEventLine);
 }
 
-// 点 widget 由 business/point/widget.js 承担；线 widget 保持冻结。
-const applyScheduleWidget = applyPointWidget;
+function readCacheRaw(desc) {
+    const saved = readStore(desc);
+    return saved?.raw || '';
+}
 
 // ─── Apply widget to almanac (历) ─────────────────────────────────────────
 // 历是一张扁平日期表（非 raw 文本）。一张卡一个日期，按 idx 取该条单独注入。
 // **纯追加**：只把这一条去重后加进去，绝不动任何已有项——尤其不能碰「生成节日」出的
 // 未锁 AI 节日（那是 source='ai' pin=false，用 mergeAlmanac 会被当未锁 AI 项清掉 → 原版节日全没）。
 // 间来的日期默认 pin，日后「生成节日」重算也保得住（与「间加线默认锁定」一致）。
-function applyAlmanacWidget(body, $btn, idx) {
-    const items = parseAlmanacWidget(body);
-    const it = items[Number(idx)] || (items.length === 1 ? items[0] : null);
-    if (!it) { showToast('卡片格式不完整，无法应用', null, true); return; }
-    if (!getAlmanacKey()) { showToast('当前 chat 没有可写入的轴缓存', null, true); return; }
-    it.pin = true;
-    const existing = loadAlmanac();
-    const seen = new Set(existing.map(almDedupKey));
-    if (seen.has(almDedupKey(it))) {
-        $btn.prop('disabled', true).html(`<i class="fa-solid fa-check"></i> 轴里已有`);
-        showToast('这个日期轴里已经有了', null, true);
-        return;
-    }
-    saveAlmanacItems([...existing, it]);   // 纯追加，不丢任何现有项
-    if (axisState.almanacMode) renderAlmanacPanel();
-    syncLatestAlmanacBlock();   // 楼内历条即时刷（对齐 applyEraWidget）
-    $btn.prop('disabled', true).html(`<i class="fa-solid fa-check"></i> 已加到轴`);
-    showToast(`已加到轴：${it.name}`);
-}
+// 历法 widget 动作统一由 axisWidgetActions 提供。
 
-// 应用间落地的历法描述符：写入全局 caldesc（单例，非追加），整个历的月数/月名/月长随之改变。
-// 换历法后月历选中态可能越界 → 清 _almanacCalMonth/_almanacCalDay 回落当前锚点月；刷新历面板 + 楼内历条/今头纪年名。
-async function applyEraWidget(body, $btn) {
-    const desc = parseEraWidget(body);
-    if (!desc) { showToast('历法卡片格式不完整，无法应用', null, true); return; }
-    if (!getCalDescKey()) { showToast('当前 chat 没有可写入的历法缓存', null, true); return; }
-    const result = await commitCalendarDesc(desc);
-    if (!result.ok) {
-        if (!result.cancelled) showToast(result.error || '历法保存失败', null, true);
-        return;
-    }
-    if (axisState.almanacMode) renderAlmanacPanel();
-    $btn.prop('disabled', true).html(`<i class="fa-solid fa-check"></i> 历法已应用`);
-    if (getSettings().notifyMode !== 'off') showToast(`历法已更新：${result.cal.era ? result.cal.era + '·' : ''}${calendarSummary(result.cal)}`);
-}
+const axisWidgetActions = createAxisWidgetActions({
+    parseAlmanac: parseAlmanacWidget,
+    parseEra: parseEraWidget,
+    key: getAlmanacKey,
+    calKey: getCalDescKey,
+    loadItems: loadAlmanac,
+    dedupKey: almDedupKey,
+    saveItems: saveAlmanacItems,
+    render: () => { if (axisState.almanacMode) renderAlmanacPanel(); },
+    sync: syncLatestAlmanacBlock,
+    done: ($btn, label) => $btn.prop('disabled', true).html(`<i class="fa-solid fa-check"></i> ${label}`),
+    error: message => { showToast(message, null, true); return { ok: false }; },
+    notify: message => showToast(message),
+    commitCalendar: commitCalendarDesc,
+    notifyEra: cal => { if (getSettings().notifyMode !== 'off') showToast(`历法已更新：${cal.era ? cal.era + '·' : ''}${calendarSummary(cal)}`); },
+});
 
-function appendChatMsg(role, content, historyIndex = null) {
-    const display = content.replace(/<outline_widget[\s\S]*?<\/outline_widget>/gi, '[↑ 已生成新面]');
-    const cls = role === 'user' ? 'sp-chat-msg-user' : role === 'ai' ? 'sp-chat-msg-ai' : 'sp-chat-msg-system';
-    const wrapCls = role === 'user' ? 'sp-chat-msg-wrap-user'
-                  : role === 'ai'   ? 'sp-chat-msg-wrap-ai'
-                                    : 'sp-chat-msg-wrap-system';
-    const canAct = role !== 'system' && Number.isInteger(historyIndex);
-    // User: keep plain text (they typed literally). AI: run through ST's markdown.
-    const contentHtml = role === 'ai'
-        ? renderAiMessageHtml(display)
-        : escapeHtml(display).replace(/\n/g, '<br>');
-    // wrap holds both the bubble and its actions (actions live outside the bubble)
-    const $wrap = $('<div>').addClass(`sp-chat-msg-wrap ${wrapCls}`);
-    if (canAct) $wrap.attr('data-idx', historyIndex);
-    const $msg = $('<div>').addClass(`sp-chat-msg ${cls}`);
-    $msg.html(`<div class="sp-chat-msg-content">${contentHtml}</div>`);
-    $wrap.append($msg);
-    if (canAct) {
-        const editBtn = role === 'user'
-            ? '<button class="sp-chat-msg-edit" title="编辑"><i class="fa-solid fa-pen"></i></button>'
-            : '';
-        $wrap.append(
-            `<div class="sp-chat-msg-actions">${editBtn}` +
-            `<button class="sp-chat-msg-delete" title="删除"><i class="fa-solid fa-trash"></i></button></div>`,
-        );
-    }
-    $wrap.appendTo($in('#sp-chat-msgs'));
-    const el = inEl('#sp-chat-msgs');
-    if (el) el.scrollTop = el.scrollHeight;
-}
-
-function startInlineEdit($msg, idx) {
-    const original = outlineChatHistory[idx]?.content ?? '';
-    $msg.find('.sp-chat-msg-content').replaceWith(
-        `<textarea class="sp-chat-msg-editor">${escapeHtml(original)}</textarea>`
-    );
-    $msg.find('.sp-chat-msg-actions').replaceWith(
-        '<div class="sp-chat-msg-actions sp-chat-msg-editing">' +
-        '<button class="sp-chat-msg-edit-save">保存并重发</button>' +
-        '<button class="sp-chat-msg-edit-cancel">取消</button>' +
-        '</div>'
-    );
-    const $ta = $msg.find('.sp-chat-msg-editor');
-    $ta.trigger('focus');
-    const val = $ta.val();
-    $ta[0].setSelectionRange(val.length, val.length);
-
-    $msg.find('.sp-chat-msg-edit-cancel').on('click', () => {
-        renderCreativeChatHistory();
-    });
-    $msg.find('.sp-chat-msg-edit-save').on('click', () => {
-        if (isOutlineChatting) return;
-        const newText = $ta.val().trim();
-        if (!newText) return;
-        // Truncate from this user message onward (drops the paired AI reply too),
-        // then rerun sendOutlineChat with the new text.
-        outlineChatHistory.splice(idx);
-        saveCreativeChatHistory();
-        renderCreativeChatHistory();
-        sendOutlineChat(newText);
-    });
-    $ta.on('keydown', e => {
-        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-            e.preventDefault();
-            $msg.find('.sp-chat-msg-edit-save').trigger('click');
-        } else if (e.key === 'Escape') {
-            e.preventDefault();
-            renderCreativeChatHistory();
-        }
-    });
-}
-
-async function buildOutlineChatMessages(userMsg) {
+async function composeCreativeChatMessages({ target, userMsg, historySnapshot }) {
     const ctx      = getContext();
     const userName = ctx.name1 || '用户';
     const charName = ctx.name2 || '角色';
-    let outlineCtx = '';
-    const savedOutline = readStore(getOutlineCacheKey());
-    if (savedOutline?.raw) outlineCtx = savedOutline.raw;
+    const outlineCtx = outlineFeature.repository.readRaw(target);
+    const { personaDesc, authorNote } = readCardExtras(ctx);
+    const almanacText = getAlmanacInjectText();
+    const calDescText = getCalDescInjectText();
     const wiContext = await buildWorldInfoContext(ctx);
     const recentCtx = await buildRecentChatContext(ctx);
-    const { personaDesc, authorNote } = readCardExtras(ctx);
     const sys = buildCreativeChatSystemPrompt({
         userName,
         charName,
@@ -6939,94 +5850,11 @@ async function buildOutlineChatMessages(userMsg) {
         outlineRaw: outlineCtx,
         wiContext,
         recentCtx,
-        almanacText: getAlmanacInjectText(),
-        calDescText: getCalDescInjectText(),
+        almanacText,
+        calDescText,
     });
-    return [{ role: 'system', content: sys }, ...outlineChatHistory, { role: 'user', content: userMsg }];
-}
-
-let outlineChatAbortController = null;
-const OUTLINE_HISTORY_CAP = 20;   // sliding window: keep last N messages, drop the rest
-
-async function sendOutlineChat(userMsg) {
-    if (isOutlineChatting) return;
-    outlineChatHistory.push({ role: 'user', content: userMsg });
-    // Sliding window: cap history growth so localStorage doesn't bloat.
-    // When trim happens all indices shift, so re-render instead of append.
-    let trimmed = false;
-    if (outlineChatHistory.length > OUTLINE_HISTORY_CAP) {
-        outlineChatHistory.splice(0, outlineChatHistory.length - OUTLINE_HISTORY_CAP);
-        trimmed = true;
-    }
-    if (trimmed) renderCreativeChatHistory();
-    else appendChatMsg('user', userMsg, outlineChatHistory.length - 1);
-    saveCreativeChatHistory();
-    isOutlineChatting = true;
-    const chatIdSnap = getContext().chatId;
-    const myCtrl = new AbortController();
-    outlineChatAbortController = myCtrl;
-    const $dots = $('<div>').addClass('sp-chat-msg sp-chat-msg-ai sp-chat-thinking').html('<span class="sp-typing"><i></i><i></i><i></i></span>').appendTo($in('#sp-chat-msgs'));
-    const el = inEl('#sp-chat-msgs');
-    if (el) el.scrollTop = el.scrollHeight;
-    try {
-        const cfg = loadCfg();
-        if (!cfg.url || !cfg.key) { if (!settingsOpen) toggleSettings(); throw new Error('请先配置 API'); }
-        const reply = await postChatCompletion({
-            cfg,
-            messages: await buildOutlineChatMessages(userMsg),
-            maxTokens: 30000,
-            temperature: GEN_TEMPERATURE,
-            signal: myCtrl.signal,
-        });
-        if (outlineChatAbortController !== myCtrl || myCtrl.signal.aborted || getContext().chatId !== chatIdSnap) return;
-        outlineChatHistory.push({ role: 'assistant', content: reply });
-        saveCreativeChatHistory();
-        $dots.remove();
-        appendChatMsg('ai', reply, outlineChatHistory.length - 1);
-        if (/<outline_widget/i.test(reply)) {
-            const pendingRaw = reply;
-            const $btn = $('<button class="sp-apply-outline-btn">应用此面</button>');
-            $btn.on('click', () => {
-                // 应用新大纲 → 游标归 1（第一个节点），先落库带 cursor 再渲染/刷注入。
-                writeStore(getOutlineCacheKey(), { raw: pendingRaw, ts: Date.now(), cursor: 1 });
-                refreshOutlineInjection();
-                const html = renderOutline(pendingRaw, 1);
-                setOutlineBody(html);
-                cachedOutline = html;
-                $btn.text('✓ 已应用').prop('disabled', true);
-            });
-            $('<div class="sp-chat-msg sp-chat-msg-system sp-apply-row"></div>').append($btn).appendTo($in('#sp-chat-msgs'));
-            const el2 = inEl('#sp-chat-msgs');
-            if (el2) el2.scrollTop = el2.scrollHeight;
-        }
-    } catch (err) {
-        if (outlineChatAbortController === myCtrl && getContext().chatId === chatIdSnap && err?.name !== 'AbortError') appendChatMsg('system', `发送失败：${err.message}`);
-    } finally {
-        $dots.remove();
-        if (outlineChatAbortController === myCtrl) {
-            outlineChatAbortController = null;
-            isOutlineChatting = false;
-        }
-    }
-}
-
-// ─── Space chat (间：off-scenario OOC) ───────────────────────────────────────
-// Mirrors outline chat but talks to the user out of scene as consultant/知识帮手.
-// Same context sources (world info + memory + outline for reference), no
-// <outline_widget> extraction.
-
-function getSpaceChatHistoryKey(view, charName) {
-    return keyDesc('space-chat', 'user', '');
-}
-
-function loadSpaceChatHistory(view, charName) {
-    const saved = readStore(getSpaceChatHistoryKey(view, charName));
-    spaceChatHistory = Array.isArray(saved) ? saved.filter(item => item?.role && item?.content) : [];
-    return spaceChatHistory;
-}
-
-function saveSpaceChatHistory(view, charName) {
-    writeStore(getSpaceChatHistoryKey(view, charName), spaceChatHistory);
+    // 历史快照已包含刚写入的 user turn；末尾再追加一次是当前生产合同，禁止在本轮去重。
+    return [{ role: 'system', content: sys }, ...historySnapshot, { role: 'user', content: userMsg }];
 }
 
 // 写剪贴板：优先 navigator.clipboard（需安全上下文），失败/不可用则退回 execCommand。
@@ -7050,807 +5878,12 @@ async function copyPlainText(text) {
     } catch { return false; }
 }
 
-// 取某条间消息的可复制纯文本：AI 消息剥掉 widget 标签（只留正文），user/system 原样。
-function spaceMsgPlainText(msg) {
-    if (!msg) return '';
-    const raw = String(msg.content ?? '');
-    if (msg.role === 'assistant') return extractSpaceWidgets(raw).text;
-    return raw;
-}
-
-function renderSpaceChatHistory() {
-    const $msgs = $in('#sp-space-msgs');
-    $msgs.empty();
-    spaceChatHistory.forEach((msg, idx) => {
-        appendSpaceChatMsg(msg.role === 'assistant' ? 'ai' : msg.role, msg.content, idx);
-    });
-}
-
-function appendSpaceChatMsg(role, content, historyIndex = null) {
-    const cls = role === 'user' ? 'sp-chat-msg-user' : role === 'ai' ? 'sp-chat-msg-ai' : 'sp-chat-msg-system';
-    const wrapCls = role === 'user' ? 'sp-chat-msg-wrap-user'
-                  : role === 'ai'   ? 'sp-chat-msg-wrap-ai'
-                                    : 'sp-chat-msg-wrap-system';
-    const canAct = role !== 'system' && Number.isInteger(historyIndex);
-    // AI: extract schedule/line widgets first — they render as cards below the
-    // text bubble. Non-widget text still renders as markdown.
-    let contentHtml;
-    let widgetCards = '';
-    if (role === 'ai') {
-        const { text, widgets } = extractSpaceWidgets(content);
-        contentHtml = text ? renderAiMessageHtml(text) : '';
-        widgetCards = widgets.map(w => {
-            const wid = String(++_spaceWidgetSeq);
-            _spaceWidgetStore.set(wid, { kind: w.kind, body: w.body, editIdx: w.editIdx });
-            return renderSpaceWidgetCard(w.kind, w.body, wid, w.editIdx);
-        }).join('');
-    } else {
-        contentHtml = escapeHtml(content).replace(/\n/g, '<br>');
-    }
-    const $wrap = $('<div>').addClass(`sp-chat-msg-wrap ${wrapCls}`);
-    if (canAct) $wrap.attr('data-idx', historyIndex);
-    // Only render the bubble if there's text; if AI's whole reply is just a
-    // widget card, skip the empty bubble
-    if (contentHtml) {
-        const $msg = $('<div>').addClass(`sp-chat-msg ${cls}`);
-        $msg.html(`<div class="sp-chat-msg-content">${contentHtml}</div>`);
-        $wrap.append($msg);
-    }
-    if (widgetCards) $wrap.append(widgetCards);
-    if (canAct) {
-        const editBtn = role === 'user'
-            ? '<button class="sp-chat-msg-edit" title="编辑"><i class="fa-solid fa-pen"></i></button>'
-            : '';
-        $wrap.append(
-            `<div class="sp-chat-msg-actions">${editBtn}` +
-            `<button class="sp-chat-msg-copy" title="复制"><i class="fa-solid fa-copy"></i></button>` +
-            `<button class="sp-chat-msg-delete" title="删除"><i class="fa-solid fa-trash"></i></button></div>`,
-        );
-    }
-    $wrap.appendTo($in('#sp-space-msgs'));
-    const el = inEl('#sp-space-msgs');
-    if (el) el.scrollTop = el.scrollHeight;
-}
-
-function startSpaceInlineEdit($msg, idx) {
-    const original = spaceChatHistory[idx]?.content ?? '';
-    $msg.find('.sp-chat-msg-content').replaceWith(
-        `<textarea class="sp-chat-msg-editor">${escapeHtml(original)}</textarea>`
-    );
-    $msg.find('.sp-chat-msg-actions').replaceWith(
-        '<div class="sp-chat-msg-actions sp-chat-msg-editing">' +
-        '<button class="sp-chat-msg-edit-save">保存并重发</button>' +
-        '<button class="sp-chat-msg-edit-cancel">取消</button>' +
-        '</div>'
-    );
-    const $ta = $msg.find('.sp-chat-msg-editor');
-    $ta.trigger('focus');
-    const val = $ta.val();
-    $ta[0].setSelectionRange(val.length, val.length);
-
-    $msg.find('.sp-chat-msg-edit-cancel').on('click', () => renderSpaceChatHistory());
-    $msg.find('.sp-chat-msg-edit-save').on('click', () => {
-        if (isSpaceChatting) return;
-        const newText = $ta.val().trim();
-        if (!newText) return;
-        spaceChatHistory.splice(idx);
-        saveSpaceChatHistory();
-        renderSpaceChatHistory();
-        sendSpaceChat(newText);
-    });
-    $ta.on('keydown', e => {
-        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-            e.preventDefault();
-            $msg.find('.sp-chat-msg-edit-save').trigger('click');
-        } else if (e.key === 'Escape') {
-            e.preventDefault();
-            renderSpaceChatHistory();
-        }
-    });
-}
-
-// 「间」聊天改现有点/线：命中关键词才把当前 raw 编号后注入，供 AI 定位"第 N 条"。
-// 关键词与落地卡片一致（见 state.js），避免用户学两套词；单字"点/线"可能误命中，
-// 但注入只是多给点上下文，真正改不改由提示词把关，代价可控。平时不命中就不注入，省 token。
-const EDIT_POINT_KEYWORDS = ['日程', '日历', '待办', '点'];
-const EDIT_LINE_KEYWORDS  = ['事件线', '线索', '伏笔', '线'];
-// 刻度（暗历·时间账）触发词：命中才把活跃条目喂进「间」（省 token，与点/线同套路）。
-const LEDGER_READ_KEYWORDS = ['刻度', '暗历', '暗账', '状态', '伤', '病', '孕', '约定', '周期', '待办', '身心', '现在怎', '好了没', '没了结'];
-// 排障/答疑触发词：命中才把「插件功能 FAQ + 当前开关状态」喂进「间」，让它当客服答「XX 在哪 / 怎么开 / 为啥没生效」。
-const SPACE_HELP_KEYWORDS = ['悬浮球', '悬浮按钮', '开关', '在哪', '怎么开', '怎么用', '怎么设', '为什么', '为啥', '没反应', '没生效', '不生效', '注入', '没出现', '不显示', '设置在', '功能', '干嘛', '干什么', '啥用', '什么用', '怎么弄', '找不到', '能不能', '可以吗', '能吗', '会吗', '支持', '自动', '后台', '纪念日', '补录'];
-
-function readCacheRaw(desc) {
-    const saved = readStore(desc);
-    return saved?.raw || '';
-}
-
-function numberedLineList(raw) {
-    return parseLines(raw).map((l, i) => {
-        const bits = [`#${i + 1}`, l.name || '(未命名)'];
-        if (l.type)  bits.push(`｜${l.type}`);
-        if (l.stage) bits.push(`｜${l.stage}${l.stall ? '(停滞)' : ''}`);
-        if (l.when)  bits.push(`｜${l.when}`);
-        bits.push(`｜${l.agency === 'player' ? '需推动' : '自演化'}`);
-        if (l.desc)  bits.push(`｜${l.desc}`);
-        if (l.next)  bits.push(`｜下一步:${l.next}`);
-        return bits.join(' ');
-    }).join('\n');
-}
-
-// 「间」可读的活跃刻度清单（只读参考，非编号可改列表——刻度不走「改第N条」落地）。
-// 复用注入侧的距今/倒计时语义，但去掉「别念编号」等主楼叙事约束（间是局外答问、可直说）。
-function numberedLedgerList() {
-    let items = [];
-    try { items = ledger.listEntries() || []; } catch { return ''; }
-    if (!items.length) return '';
-    return formatLedgerList(items, { daysSince: ledgerDaysSince, dueInfo: ledgerDueInfo });
-}
-
-// 「间」排障/答疑知识：插件功能 + 每个开关的真实位置（照设置面板实际文案/结构，不是模块简介）。
-// 静态骨架部分是死知识；动态部分（buildSpaceHelpText）再拼当前开关的实际开/关状态，让间能答「你这个没开」。
-const SPACE_HELP_FACTS = `【构画·功能与设置速查（你据此回答用户关于"某开关在哪、怎么开、为啥没生效"的问题，要答得具体、能指路，别只泛泛介绍模块）】
-· 【拿不准就别编，铁律】只回答这份速查覆盖到、或你有明确依据的内容；速查没写到、或你不确定的构画细节，老实说"这条我不太确定，建议点开设置里对应的小问号看说明"，**绝不凭大模型常识编造构画的功能、开关或用法**——宁可说不知道，也别给个听着合理的错答案误导用户。
-· 面板入口：点屏幕上的「构画」悬浮球打开主面板；面板左侧竖排是模块页签——点、轴、线、面、间、棱、坐标。
-· 悬浮球开关：在主面板**右上角**、标题栏那排小图标里——一个**空心圆点**图标（鼠标停上去显示"悬浮按钮"），点它切换悬浮球显示/隐藏（它旁边分别是主题切换、关闭）。**它不在设置里**，很多人找不到就是因为在找设置页。关掉悬浮球后想再打开面板，可从酒馆的扩展/魔杖菜单进入。
-· 设置入口：主面板里的齿轮「设置」。设置从上到下分几大块：总开关 / 基础设置（API、世界书、记忆、显示与通知）/ 模块设置（时间戳、轴、线、面、棱、间）/ 高级设置（标签、自定义提示词、存储管理）。
-· 总开关（设置最顶部）：①「启用构画」——关了整个插件如同未安装。②「允许潜伏注入主楼 AI（线/面/刻度）」——这是**注入总闸**，它关着的话，就算线/面/刻度各自的注入开关开了也不会注入。用户说"我开了注入怎么没用"先让他确认这个总闸。
-· 【谁能后台注入主楼 AI（关键事实，别答错）】只有**三家**能潜伏注入主楼 AI：线、面（大纲）、刻度（暗历）。**「点/日程」不能后台自动注入主楼 AI**——它是只读展示（面板卡片 + 楼内日程条），只能手动生成/刷新，没有"注入开关"。同理「轴/历」本身也不注入正文（历只在楼内挂只读日程块）。用户问"点能不能后台自动注入/自动喂给 AI"，答案是**不能**，别顺着说可以；他要的效果得靠线/面/刻度承载。
-· 时间戳（设置→模块设置→时间戳）：「启用时间戳」，让主楼 AI 每楼打隐形时间戳作时间源，默认开。
-· 故事星期：只认当前 AI 楼 start/end 双侧完整 SDC；缺失或半残时显示“星期未记录”。唯一 fallback 是用户亲自设置的“校准故事时间”人工锚；后续完整有效 SDC 自动接管，点击“恢复自动”会立即重判当前楼。
-· 轴（设置→模块设置→轴）：含「读不到戳时用 API 兜底判定日期」「点·后台自动跟随今天」「（刻度）潜伏注入主楼 AI」等。
-· 轴·生成节日 vs 补录纪念日（都在轴面板右上角工具区，手机端收在 ⋮ 菜单里）：「**生成节日**」按世界观**重铺一整年**——会先参照世界书/角色卡判断故事所在地域文化再铺对应节日（别默认套中华节庆，美国背景就别硬塞中秋），已锁定条与你手动加的会保留、未锁的旧 AI 条被替换。「**补录纪念日**」只**增补**剧情里新浮现的重大里程碑纪念日（上限约 3 条、宁缺毋滥、可能一条都不补），**纯追加、不动任何现有条、也不重铺整历**，补录的条目会自动锁定防日后重铺被冲。两者别混：想加新纪念日又不想动现有历，用「补录纪念日」。目前补录**只有手动触发**，暂无后台自动补录。
-· 线（设置→模块设置→线）：「启用平行事件（线）」「潜伏注入主楼 AI」「虚线·冷知识」「推进策略（回合/时间/手动）+ 间隔」。线以 UC（用户核心角色）为主轴，也会额外放行 1-2 条**非 UC 的配角/NPC 支线**（重要配角自己的小线索，须同一世界观、同一叙事尺度，不会跨尺度乱入）。
-· 面（设置→模块设置→面）：「大纲自动注入」+ 判定间隔。
-· 刻度/暗历（自动标注）：开关在设置里，默认**关**（opt-in，会多一路后台 API）。要它自动从剧情捞状态/约定，得手动开；也可在轴面板「刻度」页手动「立即标注」「立即推进」。每条刻度可单独操作：**锁定**（AI 判定车不再改它）、**暂停埋入**（暂不注入主楼、但仍在账上跟进现状，再点恢复；与锁定正交）、**了结**（归档、可捞回）、**编辑**。刻度注入**不定死条数、也不硬凑**——只挑当下氛围最相关的埋进去（锁定的必进、暂停埋入的必不进），活跃条多也不会硬塞满一堆。
-· 楼内渲染框（设置→基础设置→显示与通知）：主开关「楼内渲染框」，下面有子开关分别控制 点/线/轴/标注池/召回 这几个框显不显；主开关关了子开关全失效。
-· 界面字号：设置→显示与通知里的 −／＋ 步进，独立于酒馆自身的字号。
-· 通知档位：关／简约／全量三档。`;
-
-// 动态拼当前开关实际状态（让间能直接指出「你这个开关现在是关的」，而非泛泛而谈）。
-function buildSpaceHelpText() {
-    const s = getSettings();
-    const on = v => v ? '开' : '关';
-    const state = [
-        `\n【该用户此刻的开关实况（据此排障；发现用户想要的效果依赖的开关是"关"，直接点出来）】`,
-        `- 启用构画：${on(s.pluginEnabled !== false)}`,
-        `- 潜伏注入总闸（线/面/刻度注入的总开关）：${on(s.injectEnabled !== false)}`,
-        `- 时间戳：${on(s.storyClockEnabled !== false)}`,
-        `- 线·启用：${on(s.linesEnabled !== false)}；线·潜伏注入：${on(s.linesInject === true)}`,
-        `- 面·大纲自动注入：${on(s.outlineInject === true)}`,
-        `- 刻度·自动标注：${on(s.ledgerCaptureEnabled === true)}；刻度·潜伏注入：${on(s.ledgerInject === true)}`,
-        `- 楼内渲染框·主开关：${on(s.inlineRenderEnabled !== false)}`,
-        `- 悬浮球显示：${on(s.fabShow !== false)}`,
-    ].join('\n');
-    return `${SPACE_HELP_FACTS}\n${state}`;
-}
-
-// 发给 API 前，把历史 AI 回复里的结构化卡片块换成占位符。旧卡片带的是当时的点/线数据，
-// 会污染"改第 N 条"定位（AI 可能照抄历史里的旧内容）；system 已注入最新编号列表作为唯一真相源。
-// 只作用于发给 API 的副本，不改 spaceChatHistory 本身，界面显示与"应用"按钮不受影响。
-function stripWidgetsForApi(history) {
-    return history.map(m => {
-        if (m.role !== 'assistant') return m;
-        const cleaned = String(m.content || '')
-            .replace(/<schedule_widget[^>]*>[\s\S]*?<\/schedule_widget\s*>/gi, '【已输出一张点卡片（内容以当前面板为准）】')
-            .replace(/<line_widget[^>]*>[\s\S]*?<\/line_widget\s*>/gi, '【已输出一张线卡片（内容以当前面板为准）】')
-            .replace(/<almanac_widget[^>]*>[\s\S]*?<\/almanac_widget\s*>/gi, '【已输出一张历卡片（内容以当前面板为准）】')
-            .replace(/<era_widget[^>]*>[\s\S]*?<\/era_widget\s*>/gi, '【已输出一张历法卡片（内容以当前面板为准）】');
-        return cleaned === m.content ? m : { ...m, content: cleaned };
-    });
-}
-
-async function buildSpaceChatMessages(userMsg) {
-    const ctx      = getContext();
-    const userName = ctx.name1 || '用户';
-    const charName = ctx.name2 || '角色';
-    let outlineCtx = '';
-    const savedOutline = readStore(getOutlineCacheKey());
-    if (savedOutline?.raw) outlineCtx = savedOutline.raw;
-    // 命中关键词才注入编号版现有点/线，供"改第 N 条"定位；平时不注入省 token
-    const msg = String(userMsg || '');
-    const pointList = EDIT_POINT_KEYWORDS.some(w => msg.includes(w)) ? numberedPointList(readCacheRaw(getCacheKey('user', ''))) : '';
-    const lineList  = EDIT_LINE_KEYWORDS.some(w => msg.includes(w))  ? numberedLineList(readCacheRaw(getLinesCacheKey())) : '';
-    // 命中刻度词才喂活跃刻度（问状态/伤情/约定/周期时才带，省 token）；命中排障/答疑词才喂功能FAQ+开关实况
-    const ledgerList = LEDGER_READ_KEYWORDS.some(w => msg.includes(w)) ? numberedLedgerList() : '';
-    const faqText    = SPACE_HELP_KEYWORDS.some(w => msg.includes(w))  ? buildSpaceHelpText() : '';
-    const wiContext = await buildWorldInfoContext(ctx);
-    const memText   = await getMemText();
-    const recentCtx = await buildRecentChatContext(ctx);
-    const { personaDesc, authorNote } = readCardExtras(ctx);
-    const sys = buildSpaceChatSystemPrompt({
-        userName,
-        charName,
-        personaDesc,
-        authorNote,
-        outlineRaw: outlineCtx,
-        wiContext,
-        memText,
-        recentCtx,
-        pointList,
-        lineList,
-        ledgerList,
-        almanacText: getAlmanacInjectText(),
-        calDescText: getCalDescInjectText(),
-        faqText,
-        personaOverride: (getSettings().spacePersona || '').trim(),   // 间·人格覆盖：填了就换间的语气/人格（顾问身份恒保留）
-    });
-    return [{ role: 'system', content: sys }, ...stripWidgetsForApi(spaceChatHistory), { role: 'user', content: userMsg }];
-}
-
-const SPACE_HISTORY_CAP = 20;
-
-async function sendSpaceChat(userMsg) {
-    if (isSpaceChatting) return;
-    spaceChatHistory.push({ role: 'user', content: userMsg });
-    let trimmed = false;
-    if (spaceChatHistory.length > SPACE_HISTORY_CAP) {
-        spaceChatHistory.splice(0, spaceChatHistory.length - SPACE_HISTORY_CAP);
-        trimmed = true;
-    }
-    if (trimmed) renderSpaceChatHistory();
-    else appendSpaceChatMsg('user', userMsg, spaceChatHistory.length - 1);
-    saveSpaceChatHistory();
-    isSpaceChatting = true;
-    const chatIdSnap = getContext().chatId;
-    const myCtrl = new AbortController();
-    spaceChatAbortController = myCtrl;
-    const $dots = $('<div>').addClass('sp-chat-msg sp-chat-msg-ai sp-chat-thinking').html('<span class="sp-typing"><i></i><i></i><i></i></span>').appendTo($in('#sp-space-msgs'));
-    const el = inEl('#sp-space-msgs');
-    if (el) el.scrollTop = el.scrollHeight;
-    try {
-        const cfg = loadCfg();
-        if (!cfg.url || !cfg.key) { if (!settingsOpen) toggleSettings(); throw new Error('请先配置 API'); }
-        const reply = await postChatCompletion({
-            cfg,
-            messages: await buildSpaceChatMessages(userMsg),
-            maxTokens: 30000,
-            temperature: GEN_TEMPERATURE,
-            signal: myCtrl.signal,
-        });
-        if (spaceChatAbortController !== myCtrl || myCtrl.signal.aborted || getContext().chatId !== chatIdSnap) return;
-        spaceChatHistory.push({ role: 'assistant', content: reply });
-        saveSpaceChatHistory();
-        $dots.remove();
-        appendSpaceChatMsg('ai', reply, spaceChatHistory.length - 1);
-    } catch (err) {
-        if (spaceChatAbortController === myCtrl && getContext().chatId === chatIdSnap && err?.name !== 'AbortError') appendSpaceChatMsg('system', `发送失败：${err.message}`);
-    } finally {
-        $dots.remove();
-        if (spaceChatAbortController === myCtrl) {
-            spaceChatAbortController = null;
-            isSpaceChatting = false;
-        }
-    }
-}
-
-
-
-
 // ─── 棱（小剧场）render ─────────────────────────────────────────────────────────
 
 function setTheaterBody(html) { $in('#sp-theater-body').html(html); }
 
-// 一条 piece 的卡片（草稿/已保存列表共用）。saved=true 时显示"删除"，false 时"升永久+删除"。
-function renderPieceCard(piece, saved) {
-    const title = escapeHtml(piece.title || '(未命名)');
-    const when  = piece.ts ? new Date(piece.ts).toLocaleString('zh-CN', { hour12: false }) : '';
-    const actions = saved
-        ? `<button class="sp-theater-del-saved" data-id="${escapeAttr(piece.id)}">删除</button>`
-        : `<button class="sp-theater-promote" data-id="${escapeAttr(piece.id)}">永久保存</button>
-           <button class="sp-theater-del-draft" data-id="${escapeAttr(piece.id)}">删除</button>`;
-    return `<div class="sp-theater-card" data-id="${escapeAttr(piece.id)}">
-        <div class="sp-theater-card-head">
-            <span class="sp-theater-card-title">${title}</span>
-            <span class="sp-theater-card-time">${escapeHtml(when)}</span>
-        </div>
-        <div class="sp-theater-card-actions">
-            <button class="sp-theater-view" data-id="${escapeAttr(piece.id)}">查看</button>
-            ${actions}
-        </div>
-    </div>`;
-}
-
-// 主面板：输入区 + 结果区 + 操作栏 + 草稿/已保存列表。
-function renderTheaterPanel() {
-    // 模板改用内联可点列表（不用原生 <select>：其弹层在内置浏览器里会跑到面板下面，
-    // 跟 API 模型选择当初同款坑）。骨架先渲染，refreshTheaterTemplates() 异步填充。
-    const drafts = theater.loadDrafts().slice().reverse();
-    const saved  = theater.loadSaved().slice().reverse();
-    const available = [...drafts, ...saved];
-    const currentId = theaterCurrentPiece?.id;
-    const currentValid = currentId && available.find(piece => piece.id === currentId);
-    const piece = theaterCurrentPiece = currentValid ? theaterCurrentPiece : (drafts[0] || saved[0] || null);
-
-    const resultHtml = piece
-        ? `<div class="sp-theater-result-inner">${piece.html || ''}</div>`
-        : `<div class="sp-empty sp-theater-result-empty"><i class="fa-solid fa-masks-theater"></i><p>填写场景与要求，生成一段小剧场</p></div>`;
-
-    const sourceBlock = piece?.templateSource?.input
-        ? `<div class="sp-theater-source-wrap"><button type="button" class="sp-theater-source-toggle" aria-expanded="false" title="查看本次实际使用内容"><i class="fa-solid fa-file-lines"></i><span>模板 · ${escapeHtml(piece.templateSource.title || '(无标题)')}</span><i class="fa-solid fa-chevron-down sp-theater-source-chevron"></i></button><div id="sp-theater-source-detail" class="sp-theater-source-detail" style="display:none"><div class="sp-theater-source-caption">本次实际使用内容</div><pre>${escapeHtml(piece.templateSource.input)}</pre></div></div>` : '';
-
-    // 长篇预览折叠：piece 存在时把结果区包一层，底部给个展开/收起按钮，
-    // 具体是否显示按钮由 applyTheaterFold() 按实际高度决定（矮内容不折叠）。
-    const resultBlock = piece
-        ? `<div class="sp-theater-result-wrap">
-              <button class="sp-theater-fullscreen-btn" type="button" title="全屏浏览小剧场">
-                  <i class="fa-solid fa-expand"></i>
-              </button>
-              <button class="sp-theater-fold-toggle" type="button" style="display:none">
-                  <i class="fa-solid fa-chevron-down"></i><span class="sp-theater-fold-label">展开全文</span>
-              </button>
-              <div class="sp-theater-result sp-theater-result-collapsible" id="sp-theater-result">${resultHtml}</div>
-           </div>`
-        : `<div class="sp-theater-result" id="sp-theater-result">${resultHtml}</div>`;
-
-    const opBar = piece
-        ? `<div class="sp-theater-opbar">
-              <button class="sp-btn sp-theater-regen">重新生成</button>
-              <input type="text" id="sp-theater-title" class="sp-input" placeholder="标题（可选）" value="${escapeAttr(piece.title || '')}">
-              <button class="sp-btn sp-btn-primary sp-theater-save">永久保存</button>
-           </div>`
-        : '';
-
-    const draftsHtml = drafts.length
-        ? drafts.map(p => renderPieceCard(p, false)).join('')
-        : '<div class="sp-theater-list-empty">暂无草稿</div>';
-    const savedHtml = saved.length
-        ? saved.map(p => renderPieceCard(p, true)).join('')
-        : '<div class="sp-theater-list-empty">暂无永久保存</div>';
-
-    setTheaterBody(`
-        <div class="sp-theater-input-area">
-            <details class="sp-theater-tpl-picker" id="sp-theater-tpl-picker">
-                <summary class="sp-theater-tpl-picker-summary">
-                    <i class="fa-solid fa-chevron-right sp-theater-tpl-picker-chevron"></i>
-                    <span>选择模板起草（可选）</span>
-                </summary>
-                <div class="sp-theater-tpl-picker-body" id="sp-theater-tpl-picker-list">
-                    <div class="sp-theater-list-empty">加载中…</div>
-                </div>
-            </details>
-            <textarea id="sp-theater-input" class="sp-input sp-theater-textarea" placeholder="描述这段小剧场：场景、人物状态、想看的走向、字数等…">${escapeHtml(piece?.request || piece?.templateSource?.input || '')}</textarea>
-            <div class="sp-theater-btn-row">
-                <button class="sp-btn sp-theater-random" title="从模板库随机抽一个模板直接生成"><i class="fa-solid fa-shuffle"></i> 随机</button>
-                <button class="sp-btn sp-btn-primary sp-theater-generate">生成小剧场</button>
-            </div>
-        </div>
-        <hr class="sp-theater-divider">
-        ${resultBlock}
-        ${sourceBlock}
-        ${opBar}
-        <hr class="sp-theater-divider">
-        <div class="sp-theater-lists">
-            <details class="sp-theater-list-group" open>
-                <summary>草稿（最多 ${theater.THEATER_DRAFT_CAP} 条，新挤旧）</summary>
-                <div class="sp-theater-list">${draftsHtml}</div>
-            </details>
-            <details class="sp-theater-list-group"${saved.length ? ' open' : ''}>
-                <summary>已永久保存（本对话）</summary>
-                <div class="sp-theater-list">${savedHtml}</div>
-            </details>
-        </div>
-    `);
-    refreshTheaterTemplates();
-    applyTheaterFold();
-}
-
 // 预览折叠：内容超过阈值才折叠并露出「展开全文」按钮，短内容不折。
-function applyTheaterFold() {
-    const el = inEl('#sp-theater-result');
-    const $btn = $in('.sp-theater-fold-toggle');
-    if (!el || !el.classList.contains('sp-theater-result-collapsible')) { $btn.hide(); return; }
-    const COLLAPSED_MAX = 360;
-    // 图片未加载完时 scrollHeight 可能偏小，这里先按当前测；下方 img.onload 再复测。
-    const measure = () => {
-        if (el.scrollHeight > COLLAPSED_MAX + 40) {
-            el.classList.add('sp-theater-result-collapsed');
-            $btn.css('display', '');
-            $btn.find('.sp-theater-fold-label').text('展开全文');
-            $btn.find('i').attr('class', 'fa-solid fa-chevron-down');
-        } else {
-            el.classList.remove('sp-theater-result-collapsed');
-            $btn.hide();
-        }
-    };
-    measure();
-    el.querySelectorAll('img').forEach(img => {
-        if (!img.complete) img.addEventListener('load', measure, { once: true });
-    });
-}
-
-// 异步拉模板填进内联列表（棱面板 + 设置分节共用数据源）
-async function refreshTheaterTemplates() {
-    let templates = [];
-    try { templates = await theater.listTemplates(); } catch (err) { console.warn('[7dayscal] 模板读取失败:', err); }
-    _theaterTemplateCache = templates;
-    const $list = $in('#sp-theater-tpl-picker-list');
-    if ($list.length) {
-        $list.html(templates.length
-            ? templates.map(t => `<button type="button" class="sp-theater-tpl-pick" data-uid="${escapeAttr(t.uid)}">${escapeHtml(t.title)}</button>`).join('')
-            : '<div class="sp-theater-list-empty">暂无模板，可在设置 · 棱里新增</div>');
-    }
-    // 若设置分节开着，也刷新其列表
-    if ($in('#sp-theater-tpl-mgr').length) renderTheaterTemplateManager(templates);
-}
-let _theaterTemplateCache = [];
-let _theaterTemplateSource = null;
-let _lastRandomTheaterTemplateUid = null;
-
-// ─── 棱生成编排（照抄 runGenerateOutline 的 abort/chatId 快照守卫）──────────────
-async function runGenerateTheater(userInput) {
-    const chatIdSnap = getContext().chatId;
-    const myCtrl = theaterAbortController = new AbortController();
-    const inputSnapshot = String(userInput || '').trim();
-    const sourceSnapshot = _theaterTemplateSource ? { ..._theaterTemplateSource } : null;
-    isGeneratingTheater = true;
-    setTheaterBody(loadingHtml('正在折射', 'sp-abort-theater'));
-    try {
-        await refreshTheaterStoryContext();
-        const { piece } = await theater.generate(inputSnapshot, {
-            signal: myCtrl.signal,
-            templateSource: snapshotTheaterSource(sourceSnapshot, inputSnapshot),
-            onStage: (stage) => {
-                if (theaterAbortController === myCtrl && theaterMode) {
-                    setTheaterBody(loadingHtml(`正在${stage}`, 'sp-abort-theater'));
-                }
-            },
-        });
-        if (theaterAbortController !== myCtrl) return;
-        if (getContext().chatId !== chatIdSnap) {
-            isGeneratingTheater = false;
-            theaterAbortController = null;
-            return;
-        }
-        isGeneratingTheater = false;
-        theaterAbortController = null;
-        theaterCurrentPiece = piece;
-        if (_theaterTemplateSource?.uid === sourceSnapshot?.uid && _theaterTemplateSource?.input === sourceSnapshot?.input) _theaterTemplateSource = null;
-        if (theaterMode) { renderTheaterPanel(); if (getSettings().notifyMode !== 'off') showToast('棱已生成'); }
-        else showToast('棱已生成，点击查看', () => {
-            $in('.sp-view-btn[data-view="theater"]').trigger('click');
-            showPanel();
-        });
-    } catch (err) {
-        if (theaterAbortController !== myCtrl) return;
-        isGeneratingTheater = false;
-        theaterAbortController = null;
-        if (err?.name === 'AbortError') {
-            if (theaterMode && getContext().chatId === chatIdSnap) renderTheaterPanel();
-            return;
-        }
-        if (getContext().chatId !== chatIdSnap) return;
-        // 面板可见才落面板正文；关了面板则弹 toast。必须判可见而非只判 theaterMode——closePanel 只
-        // display:none、不重置视角标志，关面板后 theaterMode 仍为真，漏可见性判断会把错误写进看不见的面板、不弹 toast。
-        if (theaterMode && $(`#${MODAL_ID}`).is(':visible')) setTheaterBody(`<div class="sp-error"><i class="fa-solid fa-circle-exclamation"></i><p>生成失败：${escapeHtml(err.message || '未知错误')}</p><button class="sp-btn sp-theater-back">返回</button></div>`);
-        else showToast('棱生成失败，请重试', null, true);
-    }
-}
-
-// 设置分节里的模板管理器渲染
-function renderTheaterTemplateManager(templates) {
-    const $mgr = $in('#sp-theater-tpl-mgr');
-    if (!$mgr.length) return;
-    // 重渲染前记住外层抽屉的开合，避免用户整理时被合上
-    const libOpen = $mgr.find('.sp-theater-tpl-library').prop('open');
-    // 设置面板只做写入口（新增 + 批量导入）；查看/修改/删除交给酒馆世界书编辑器
-    // （模板本就是 TEMPLATE_BOOK 的条目）——不在此重造折叠列表，避开抽屉展开挤压相邻项的老问题。
-    const count = (templates || []).length;
-    $mgr.html(`
-        <details class="sp-theater-tpl-library"${libOpen ? ' open' : ''}>
-            <summary class="sp-theater-tpl-library-head">
-                <i class="fa-solid fa-chevron-right sp-theater-tpl-library-chevron"></i>
-                <span>模板库</span>
-                <span class="sp-theater-tpl-library-count">${count}</span>
-            </summary>
-            <div class="sp-theater-tpl-library-body">
-                <div class="sp-theater-tpl-add-row">
-                    <input type="text" id="sp-theater-tpl-new-title" class="sp-input" placeholder="新模板标题">
-                    <textarea id="sp-theater-tpl-new-text" class="sp-input" placeholder="新模板内容"></textarea>
-                    <button class="sp-btn sp-btn-primary" id="sp-theater-tpl-add">+ 新增模板</button>
-                </div>
-                <div class="sp-theater-tpl-import-row">
-                    <input type="file" id="sp-theater-tpl-import-file" accept=".txt,text/plain" hidden>
-                    <button class="sp-btn" id="sp-theater-tpl-import">批量导入 txt</button>
-                    <span class="sp-theater-tpl-import-hint">每条以 <code>title：</code> 起头，正文接 <code>content：</code>（可跨多行）</span>
-                </div>
-                <div class="sp-theater-tpl-manage-hint">查看 / 修改 / 删除模板请到世界书 <code>构画-棱-小剧场模板</code></div>
-            </div>
-        </details>
-    `);
-}
-
-
-// 解析棱批量导入 txt：每条以行首 `title：` 起头（全/半角冒号 + 可选空格），
-// 其后正文可跨多行，直到下一个 `title：` 行为止；正文里开头的 `content：` 前缀会被剥掉。
-// title 行之前的散文（无 title 起头的开场白）忽略。返回 [{ title, text }]。
-function parseTheaterImport(raw) {
-    const text = String(raw || '').replace(/\r\n?/g, '\n');
-    const titleRe = /^[ \t]*title[ \t]*[：:][ \t]*(.*)$/i;
-    const items = [];
-    let cur = null;      // { title, bodyLines: [] }
-    for (const line of text.split('\n')) {
-        const m = line.match(titleRe);
-        if (m) {
-            if (cur) items.push(cur);
-            cur = { title: m[1].trim(), bodyLines: [] };
-        } else if (cur) {
-            cur.bodyLines.push(line);
-        }
-    }
-    if (cur) items.push(cur);
-    return items.map(it => {
-        // 拼回正文，剥掉最前面的 content： 前缀，再去掉首尾空行
-        let body = it.bodyLines.join('\n').replace(/^[ \t]*content[ \t]*[：:][ \t]*/i, '');
-        body = body.replace(/^\n+/, '').replace(/\n+$/, '');
-        return { title: it.title, text: body };
-    }).filter(it => it.title || it.text);
-}
-
-function renderEmptyOutlineState() {
-    return `<div class="sp-empty"><i class="fa-solid fa-scroll"></i><p>当前还没有面，可以先直接聊天讨论，也可以生成一版面作为起点</p><button class="sp-gen-btn sp-outline-gen-btn" id="sp-gen-outline-now">生成面</button></div>`;
-}
-
 function setOutlineBody(html) { $in('#sp-outline-beats').html(html); }
-
-// ─── Outline generation ───────────────────────────────────────────────────────
-
-async function triggerGenerateOutline() {
-    if (isGeneratingOutline) return;
-    if (!await memoryPreCheckConfirm()) return;
-    abortOutlineJudge();
-    cachedOutline = null;
-    isGeneratingOutline = true;
-    setOutlineBody(loadingHtml('正在构思面', 'sp-abort-outline'));
-    runGenerateOutline({ reroll: true, module: 'outline' });
-}
-
-async function runGenerateOutline(apiOpts = {}) {
-    const chatIdSnap = getContext().chatId;
-    const savedBaseline = readStore(getOutlineCacheKey()) || {};
-    const baselineCursor = savedBaseline.cursor == null ? 1 : (Number.isFinite(Number(savedBaseline.cursor)) ? Number(savedBaseline.cursor) : 1);
-    const baseline = Object.freeze({ raw: String(savedBaseline.raw || ''), ts: Number(savedBaseline.ts) || null, cursor: baselineCursor, html: savedBaseline.html || null });
-    const myCtrl = outlineAbortController = new AbortController();
-    const owner = outlineGenerationOwner = Object.freeze({ controller: myCtrl, chatId: chatIdSnap, baseline });
-    try {
-        const ctx      = getContext();
-        const userName = ctx.name1 || '用户';
-        const charName = ctx.name2 || '角色';
-        const cfg = loadCfg();
-        if (!cfg.url || !cfg.key) {
-            if (!settingsOpen) toggleSettings();
-            throw new Error('请先在设置中填写自定义 API 的 URL 和 Key');
-        }
-        const prompt   = buildOutlinePrompt(userName, charName, 'user');
-        const raw      = await callCustomApi(ctx, prompt, cfg, userName, charName, myCtrl.signal, 10, apiOpts);
-
-        if (outlineGenerationOwner !== owner || outlineAbortController !== myCtrl) return;
-        if (getContext().chatId !== chatIdSnap) {
-            isGeneratingOutline = false;
-            outlineAbortController = null;
-            if (outlineGenerationOwner === owner) outlineGenerationOwner = null;
-            return;
-        }
-
-        // 新生成大纲 → 游标归 1，先落库带 cursor 再刷注入/渲染。
-        writeStore(getOutlineCacheKey(), { raw, ts: Date.now(), cursor: 1 });
-        refreshOutlineInjection();
-        const html     = renderOutline(raw, 1);
-        isGeneratingOutline = false;
-        outlineAbortController = null;
-        if (outlineGenerationOwner === owner) outlineGenerationOwner = null;
-        cachedOutline = html;
-        if (outlineMode) { setOutlineBody(html); if (getSettings().notifyMode !== 'off') showToast('面已生成'); }
-        else showToast('面已生成，点击查看', () => {
-            if (!outlineMode) $in('.sp-view-btn[data-view="outline"]').trigger('click');
-            showPanel();
-        });
-    } catch (err) {
-        if (outlineGenerationOwner !== owner || outlineAbortController !== myCtrl) return;
-        isGeneratingOutline = false;
-        outlineAbortController = null;
-        if (outlineGenerationOwner === owner) outlineGenerationOwner = null;
-        if (err.name === 'AbortError') {
-            if (getContext().chatId === chatIdSnap) {
-                if (owner.baseline.raw) { cachedOutline = renderOutline(owner.baseline.raw, owner.baseline.cursor ?? 0); if (outlineMode) setOutlineBody(cachedOutline); }
-                else if (outlineMode) setOutlineBody(renderEmptyOutlineState());
-            }
-            return;
-        }
-        if (getContext().chatId !== chatIdSnap) return;
-        if (owner.baseline?.raw) {
-            cachedOutline = renderOutline(owner.baseline.raw, owner.baseline.cursor ?? 0);
-            if (outlineMode && $(`#${MODAL_ID}`).is(':visible')) setOutlineBody(cachedOutline);
-            showToast('面生成失败，已保留原存档', null, true);
-            return;
-        }
-        const errHtml = `<div class="sp-error"><i class="fa-solid fa-circle-exclamation"></i><p>生成失败：${escapeHtml(err.message || '未知错误')}</p></div>`;
-        // 面板可见才落面板正文；关了面板则弹 toast。必须判可见而非只判 outlineMode——closePanel 只
-        // display:none、不重置视角标志，关面板后 outlineMode 仍为真，漏可见性判断会把错误写进看不见的面板、不弹 toast。
-        if (outlineMode && $(`#${MODAL_ID}`).is(':visible')) setOutlineBody(errHtml);
-        else showToast('面生成失败，请重试', null, true);
-    }
-}
-
-function buildOutlinePrompt(userName, charName, perspective = 'user') {
-    const subject = perspective === 'char' ? charName : userName;
-    return `请暂停角色扮演，以编剧顾问身份根据以上剧情，为当前故事生成大纲。
-【重要】所有输出必须使用中文（人名、地名可保留原文）。
-【人称】以编剧顾问的第三人称视角撰写，直呼角色名字，不要扮演角色，严禁使用"我""我们"等第一人称。
-
-【第一步：故事基础分析】
-生成节点之前，先在注释中梳理以下内容（300字以上）：
-① 当前状态：故事中主要人物（包括 ${subject} 及其他关键角色）的现状、各自目标、未解决的矛盾
-② 角色主次关系：核心主角、重要配角、对立势力及其在剧情中的权重
-③ 核心吸引力：这个故事中最抓人的戏剧张力是什么？（取决于故事类型，可以是情感羁绊，也可以是权谋博弈、生存压迫、复仇执念、逆袭成长、探案解谜等。如“互相利用却暗生情愫”、“以弱胜强的势力博弈”、“绝境求生中的人性考验”、“背负血仇的步步为营”）
-④ 外部环境现状与发展趋势：当前势力平衡、社会危机、即将发生的大事件等，以及若无干预的自然走向
-⑤ 剧情模式：这是什么类型的故事？内部驱动力是什么？（如“外部压迫下的生存斗争 + 内部关系演变”或“个人复仇与救赎之旅”）
-⑥ 故事线汇总：按故事需要列出有证据的故事线。【主线】若剧情存在外部目标、任务或对抗外部势力则保留；此外按故事类型选择有依据的副线——如情感线、成长线、势力斗争线、复仇线、悬疑解谜线等。不要为了达到固定数量或凑情感线而生硬加戏。
-⑦ 各主要角色的行为模式与语言风格特征，确保节点中的人物表现符合原设
-
-【第二步：生成关键节点，建议约 8 个，按素材增减，不要凑数】
-节点必须基于上述分析，体现你确定的剧情模式。
-- 【时间跨度·宏观】这是一份宏观长线大纲，节点应横跨数周乃至数月，是一次庞大的长期推进，绝非日程式的今天/明天/后天。每个节点代表故事的一个**大阶段或重大转折**（可能持续数天到数周），不是某个具体场景、更不是某一天里的一幕。
-- 【大胆发散】未来本就未知，大纲不必拘泥于眼前既定事实的线性延伸，可以放开想象、铺开多种可能的长线走向，给出有张力的大开大合。
-- 故事线需要螺旋推进（进→退→再进），不可直线发展；这种进退发生在横跨较长时间的大阶段之间，而非连续几场戏之间。
-- 节点可覆盖完整故事弧线，例如开局状态、摩擦/试探、推进、受挫、危机、转折、余波与新平衡；按素材选择阶段，不要求每个阶段固定一个节点。
-- 每个节点的 Scene 和 Think 内容充实，不压缩质量。
-
-【创作顺序】每个节点先想透 Scene（发生了什么）与 Think（创作思考），再从已构思好的内容里提炼 title 与 Subtext 引言，让标题和引言是对内容的凝练与升华。（脑内可先内容后标题，但**输出时仍严格按 Beat→Scene→Subtext→Think 的字段顺序排列**，不可打乱，否则大纲窗口无法解析。）
-
-【标题要求】title 是这一节点的凝练点题小标题——形式与长度都放开：可以是一个意象、一个动作、一个词或半句话，贴合这一节点的气质与情绪即可。
-
-【字段说明】
-Beat: 推演时间|标题|类型|所属故事线|结果
-- 推演时间：宏观、相对、粗略的长跨度时间锚（如"初期""数周内""约一两个月后""数月之后""半年左右"），不要精确到某一天；相邻节点之间通常间隔数天到数周乃至更久。
-Scene: 这一阶段大致发生了什么、故事整体推进到了哪一步（80-120字），着眼段落级的进展与走向，而非某一个镜头
-Subtext: 这一节点的**引言**（题记）——含蓄、文艺、有留白的一句或几句话，为这一段定调。它是像卷首题记那样的文学化点睛，而非对 Scene 的复述总结；可自由取用说书、箴言、史评、心声、民谣、预言、判词等任一叙述口吻，用意象或余韵点出这一节点的情绪底色。直接写引言正文，风格、句式与长短随内容自然生发。
-Think: 创作思考（100-150字），必须覆盖：
- ① 如何体现核心吸引力和剧情模式
- ② 主要角色（至少一个）此刻的心理状态
- ③ 对各故事线的推进作用
- ④ 在螺旋进退中处于哪个位置（相对于前一个节点）
-
-【输出格式（严格遵守）】
-<!-- 故事分析：（第一步的分析，300字以上） -->
-<outline_widget>
-Beat: 推演时间|标题|类型|所属故事线|结果
-Scene: …
-Subtext: …
-Think: …
-（节点数量按素材与剧情证据浮动，每节点重复上述结构）
-</outline_widget>`;}
-
-// ─── Outline parse / render ───────────────────────────────────────────────────
-
-function parseOutline(raw) {
-    const m = raw.match(/<outline_widget[^>]*>([\s\S]*?)<\/outline_widget>/i);
-    const content = m ? m[1] : raw;  // fallback: parse raw directly if no widget tag
-    const beats = []; let cur = null;
-    for (const rawLine of content.split('\n')) {
-        // 容错：去掉行首的 Markdown 装饰（**、*、-、>、#、空格）再匹配字段名，
-        // 免得模型把 Beat/Scene 包成 **Beat:** 或 "- Beat:" 时整段落解析失败。
-        const t = rawLine.trim().replace(/^[>#*\-\s]+/, '').replace(/\*+/g, '');
-        if (!t) continue;
-        if (/^Beat\s*[:：]/i.test(t)) {
-            if (cur) beats.push(cur);
-            const parts = t.replace(/^Beat\s*[:：]\s*/i, '').split(/[|｜]/);
-            cur = {
-                time   : (parts[0] || '').trim(),
-                title  : (parts[1] || '').trim(),
-                type   : (parts[2] || '').trim(),
-                line   : (parts[3] || '').trim(),
-                outcome: (parts[4] || '').trim(),
-                scene  : '',
-                subtext: '',
-                think  : '',
-            };
-        } else if (/^Scene\s*[:：]/i.test(t) && cur) {
-            cur.scene = t.replace(/^Scene\s*[:：]\s*/i, '').trim();
-        } else if (/^Subtext\s*[:：]/i.test(t) && cur) {
-            cur.subtext = t.replace(/^Subtext\s*[:：]\s*/i, '').trim();
-        } else if (/^Think\s*[:：]/i.test(t) && cur) {
-            cur.think = t.replace(/^Think\s*[:：]\s*/i, '').trim();
-        }
-    }
-    if (cur) beats.push(cur);
-    return beats;
-}
-
-function deleteOutlineBeatFromRaw(raw, idx) {
-    const src = String(raw || '');
-    const widget = /<outline_widget[^>]*>([\s\S]*?)<\/outline_widget>/i.exec(src);
-    const contentStart = widget ? widget.index + widget[0].indexOf(widget[1]) : 0;
-    const content = widget ? widget[1] : src;
-    const contentEnd = contentStart + content.length;
-    const starts = [];
-    let offset = 0;
-    for (const lineWithBreak of content.matchAll(/.*(?:\n|$)/g)) {
-        const line = lineWithBreak[0];
-        if (!line) continue;
-        const text = line.replace(/\r?\n$/, '').trim().replace(/^[>#*\-\s]+/, '').replace(/\*+/g, '');
-        if (/^Beat\s*[:：]/i.test(text)) starts.push(contentStart + offset);
-        offset += line.length;
-    }
-    if (idx < 0 || idx >= starts.length) return null;
-    const removeStart = starts[idx];
-    const removeEnd = idx + 1 < starts.length ? starts[idx + 1] : contentEnd;
-    return src.slice(0, removeStart) + src.slice(removeEnd);
-}
-
-async function triggerDeleteOutlineBeat(idx) {
-    if (isGeneratingOutline) return;
-    const key = getOutlineCacheKey();
-    const saved = readStore(key);
-    const raw = saved?.raw || '';
-    const target = parseOutline(raw)[idx];
-    if (!target) return;
-    if (!await spConfirm({ title: '删除这个面', body: `将删除「${target.title || '未命名'}」这一节点，其它面保留。此操作不可撤销。`, confirmText: '删除', cancelText: '取消' })) return;
-    const nextRaw = deleteOutlineBeatFromRaw(raw, idx);
-    if (nextRaw == null) return;
-    const remaining = parseOutline(nextRaw);
-    if (!remaining.length) {
-        removeStore(key); cachedOutline = null; refreshOutlineInjection();
-        if (outlineMode) setOutlineBody(renderEmptyOutlineState());
-        return;
-    }
-    const cursor = getOutlineCursor();
-    const nextCursor = cursor > idx + 1 ? cursor - 1 : Math.min(cursor, remaining.length);
-    writeStore(key, { ...saved, raw: nextRaw, ts: Date.now(), cursor: nextCursor });
-    refreshOutlineInjection();
-    cachedOutline = renderOutline(nextRaw, nextCursor);
-    if (outlineMode) setOutlineBody(cachedOutline);
-}
-
-function renderOutline(raw, cursor = 0) {
-    const beats = parseOutline(raw);
-    const toolbar = `<div class="sp-panel-toolbar"><button class="sp-panel-refresh sp-refresh-outline" title="重新生成面"><i class="fa-solid fa-rotate-right"></i></button></div>`;
-    if (beats.length === 0) return toolbar + `<div class="sp-raw">${escapeHtml(raw).replace(/\n/g, '<br>')}</div>`;
-    // 高亮不再受「自动注入」开关限制：只要有游标(cursor>=1)就点亮当前节点 .sp-beat-current + 下一节点 .sp-beat-next，
-    // 让用户随时看清剧情演到哪。每个节点带「设为当前」按钮 .sp-beat-setcur（手选游标，见 #sp-outline-beats 委托）。
-    const cards = beats.map((b, i) => {
-        const injectParts = [`【剧情节点参考】`, `${b.time}·《${b.title}》${b.type ? '·' + b.type : ''}${b.line ? '（' + b.line + '）' : ''}`];
-        if (b.scene)   injectParts.push(b.scene);
-        if (b.outcome) injectParts.push(`结果：${b.outcome}`);
-        const injectBtn = makeInjectBtn(injectParts.join('\n'));
-        // 逐 step 复制：该节点的干净可读文本（时间·标题·类型（线）/结果/场景/潜台词），供粘贴到别处。
-        const copyBtn = makeCopyBtn([
-            `${b.time}·《${b.title}》${b.type ? '·' + b.type : ''}${b.line ? '（' + b.line + '）' : ''}`,
-            b.outcome ? `结果：${cleanText(b.outcome)}` : '',
-            b.scene   ? cleanText(b.scene) : '',
-            b.subtext ? `"${cleanText(b.subtext)}"` : '',
-        ].filter(Boolean).join('\n'));
-        const isCur  = cursor >= 1 && i + 1 === cursor;
-        const isNext = cursor >= 1 && i + 1 === cursor + 1;
-        const hi = isCur ? ' sp-beat-current' : (isNext ? ' sp-beat-next' : '');
-        const badge = isCur  ? `<span class="sp-beat-badge sp-beat-badge-cur">进行中</span>`
-                    : isNext ? `<span class="sp-beat-badge sp-beat-badge-next">预计下一步</span>`
-                    : '';
-        const setcurBtn = `<button class="sp-beat-setcur${isCur ? ' sp-beat-setcur-on' : ''}" data-idx="${i + 1}" title="${isCur ? '当前剧情点（再点取消狙击）' : '设为当前剧情点'}"><i class="fa-solid fa-location-crosshairs"></i></button>`;
-        return `
-        <div class="sp-beat${hi}">
-            <div class="sp-beat-head">
-                <span class="sp-beat-index">${i + 1}</span>
-                ${badge}
-                <span class="sp-beat-time">${escapeHtml(b.time)}</span>
-                ${b.type ? `<span class="sp-beat-type">${escapeHtml(b.type)}</span>` : ''}
-                <span class="sp-beat-actions">${setcurBtn}${injectBtn}${copyBtn}<button class="sp-beat-delete" data-idx="${i}" title="删除此节点"><i class="fa-solid fa-trash"></i></button></span>
-            </div>
-            ${b.line ? `<span class="sp-beat-linerow">${escapeHtml(b.line)}</span>` : ''}
-            <div class="sp-beat-title">${escapeHtml(b.title)}</div>
-            ${b.outcome ? `<div class="sp-beat-outcome">${escapeHtml(cleanText(b.outcome))}</div>` : ''}
-            ${b.scene   ? `<div class="sp-beat-scene">${escapeHtml(cleanText(b.scene))}</div>` : ''}
-            ${b.subtext ? `<div class="sp-beat-subtext">"${escapeHtml(cleanText(b.subtext))}"</div>` : ''}
-            ${b.think   ? `<details class="sp-beat-think"><summary>创作思考</summary><p>${escapeHtml(cleanText(b.think))}</p></details>` : ''}
-        </div>`;
-    }).join('');
-    // If we parsed few beats but the raw has substantial content, LLM likely
-    // deviated from format — surface it so the user isn't silently truncated.
-    const rawTail = beats.length < 3
-        ? `<details class="sp-debug"><summary>⚠ 仅解析到 ${beats.length} 个节点</summary><pre class="sp-debug-raw">${escapeHtml(raw)}</pre></details>`
-        : '';
-    return toolbar + cards + rawTail;
-}
-
 
 // ─── Storylines (事件线) ─────────────────────────────────────────────────────
 
@@ -7872,10 +5905,7 @@ function getLinesCacheKey(view, charName) {
 function _floorSig(mid) {
     try {
         const t = String(getContext().chat?.[Number(mid)]?.mes ?? '');
-        const sm = SDC_START_RE.exec(t);
-        const em = SDC_END_RE.exec(t);
-        let body = t;
-        if (sm && em && em.index > sm.index + sm[0].length) body = t.slice(sm.index + sm[0].length, em.index);
+        const body = storyClockNarrativeBody(t);
         return body.length + '|' + body.slice(0, 32) + '|' + body.slice(-32);
     } catch { return ''; }
 }
@@ -7904,410 +5934,6 @@ function loadCachedLinesForCurrentChat(view, charName) {
     return null;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  锚·收藏楼层面板：三层抽屉（聊天桶 → 缩略 → 全文）+ Shadow DOM 全文渲染
-// ═══════════════════════════════════════════════════════════════════════════
-
-function setAnchorBody(html) { $in('#sp-anchor-body').html(html); }
-
-
-// ─── 坐标·标签 ─────────────────────────────────────────────────────────────────
-// 8 个低饱和预设色 key；tag 只存 color=key，实际配色由 style.css 的
-// `.sp-anchor-tagchip[data-color="key"]` 定义（日/夜自洽）。JS 侧只用 key 列色板供选择器画色块。
-const ANCHOR_TAG_PALETTE = ['rose', 'amber', 'olive', 'teal', 'indigo', 'plum', 'slate', 'clay'];
-
-// 单标签筛选：模块级状态（null=不筛）。进入 anchor 视图复位，层间导航保留。
-let _anchorTagFilter = null;
-// 标签管理面的行内编辑/删除态（只在管理面内有意义）：正在改名改色的 id / 待确认删除的 id
-let _tagMgrEditId = null;
-let _tagMgrDelId  = null;
-
-// 当前单标签筛选下，某条 item 是否入选（无筛选=全入选；meta 自带 tags，无需拉快照）
-function itemMatchesFilter(it) {
-    if (!_anchorTagFilter) return true;
-    return Array.isArray(it.tags) && it.tags.includes(_anchorTagFilter);
-}
-
-// 三层通用的筛选栏：全局标签 chip + 「全部」清除项，active 高亮。无标签则不渲染。
-function renderAnchorFilterBar(tags, activeId) {
-    if (!Array.isArray(tags) || !tags.length) return '';
-    const allChip = `<button type="button" class="sp-anchor-filter-chip${!activeId ? ' sp-anchor-filter-on' : ''}" data-id="">全部</button>`;
-    const chips = tags.map(t =>
-        `<button type="button" class="sp-anchor-filter-chip sp-anchor-filter-tag${t.id === activeId ? ' sp-anchor-filter-on' : ''}" data-id="${escapeAttr(t.id)}"><span class="sp-anchor-tagchip" data-color="${escapeAttr(t.color || 'slate')}">${escapeHtml(t.name)}</span></button>`
-    ).join('');
-    return `<div class="sp-anchor-filterbar">${allChip}${chips}</div>`;
-}
-
-// item.tags(id 数组) + 标签注册表 Map(id→{name,color}) → 只读 chip 串。
-// 无标签 / 全是孤儿 id 则返回空串（配合 .sp-anchor-item-tags:empty{display:none} 布局零变化）。
-function renderTagChips(tagIds, tagMap) {
-    if (!Array.isArray(tagIds) || !tagIds.length) return '';
-    return tagIds.map(id => {
-        const t = tagMap.get(id);
-        if (!t) return '';
-        return `<span class="sp-anchor-tagchip" data-color="${escapeAttr(t.color || 'slate')}">${escapeHtml(t.name)}</span>`;
-    }).join('');
-}
-
-async function renderAnchorPanel() {
-    if (!anchorMode) return;
-    // 离开全文视图（返回/删除/切档/外部刷新到非 full）时清全屏态；停在同一 full 则不清，
-    // 由 renderAnchorFull 读 #sp-anchor-body 的 fs 类自行保留（「编辑标签」重渲即靠此不丢全屏）。
-    if (_anchorView.level !== 'full') _clearAnchorFs();
-    setAnchorBody('<div class="sp-anchor-loading"><div class="sp-spinner"></div></div>');
-    try {
-        if (_anchorView.level === 'full' && _anchorView.itemId) { await renderAnchorFull(_anchorView.itemId); return; }
-        if (_anchorView.level === 'items' && _anchorView.chatId != null) { await renderAnchorItems(_anchorView.chatId); return; }
-        if (_anchorView.level === 'tags') { await renderAnchorTagManager(); return; }
-        if (_anchorView.level === 'chats') { await renderAnchorChats(_anchorView.charName); return; }
-        await renderAnchorChars();
-    } catch (err) {
-        console.error('[SP anchor] 面板渲染失败', err);
-        setAnchorBody(`<div class="sp-error"><i class="fa-solid fa-circle-exclamation"></i><p>读取收藏失败：${escapeHtml(err?.message || '未知错误')}</p></div>`);
-    }
-}
-
-// 第一层：按角色分组（同名角色会合并——收藏只存 charName 显示名、无 avatar 键，无法区分同名不同卡）
-async function renderAnchorChars() {
-    const buckets = await anchor.listByChat();
-    const tags = await anchor.getTags();
-    // L1 顶部小 head：标题「标签」+ 标签管理入口（空态也保留，好让用户随时进管理面）
-    const head = `<div class="sp-anchor-head sp-anchor-chars-head">
-        <span class="sp-anchor-head-title">标签</span>
-        <button class="sp-icon-btn sp-anchor-tagmgr-btn" title="标签管理"><i class="fa-solid fa-tags"></i></button>
-    </div>`;
-    if (!buckets.length) {
-        setAnchorBody(`${head}<div class="sp-empty"><span class="sp-anchor-empty-glyph">${anchorSvg('sp-anchor-empty-svg')}</span><p>还没有收藏的楼层</p><p class="sp-anchor-empty-hint">在聊天楼层的角色名旁点「坐标」图标即可收藏</p></div>`);
-        return;
-    }
-    // 把聊天桶再按角色归并：一个角色可能跑了多个聊天文件（多条剧情线）；先按标签过滤 items，丢空桶
-    const chars = new Map();
-    for (const b of buckets) {
-        const items = b.items.filter(itemMatchesFilter);
-        if (!items.length) continue;
-        const key = b.charName || '(未知角色)';
-        if (!chars.has(key)) chars.set(key, { charName: key, chatCount: 0, count: 0, latestTs: 0 });
-        const c = chars.get(key);
-        c.chatCount += 1;
-        c.count     += items.length;
-        const latest = items.reduce((m, it) => Math.max(m, it.ts || 0), 0);
-        if (latest > c.latestTs) c.latestTs = latest;
-    }
-    const list = [...chars.values()].sort((a, z) => z.latestTs - a.latestTs);
-    const sizeInfo = await anchor.checkSize().catch(() => null);
-    const bar = sizeInfo
-        ? `<div class="sp-anchor-sizebar${sizeInfo.over ? ' sp-anchor-sizebar-over' : ''}">已用 ${anchor.formatBytes(sizeInfo.bytes)}${sizeInfo.over ? ' · 偏大，建议清理旧收藏' : ''}</div>`
-        : '';
-    const filterBar = renderAnchorFilterBar(tags, _anchorTagFilter);
-    const cards = list.length ? list.map(c => `
-        <button class="sp-anchor-char-card" data-char="${escapeAttr(c.charName)}">
-            <span class="sp-anchor-chat-icon">${anchorSvg('sp-anchor-chat-svg')}</span>
-            <span class="sp-anchor-chat-main">
-                <span class="sp-anchor-chat-name">${escapeHtml(c.charName)}</span>
-                <span class="sp-anchor-chat-sub">${c.chatCount} 个聊天</span>
-            </span>
-            <span class="sp-anchor-chat-meta">
-                <span class="sp-anchor-chat-count">${c.count}</span>
-                <span class="sp-anchor-chat-ts">${fmtAnchorTs(c.latestTs)}</span>
-            </span>
-        </button>`).join('') : `<div class="sp-anchor-filter-empty">没有含此标签的收藏</div>`;
-    setAnchorBody(`${head}<div class="sp-anchor-scroll">${bar}${filterBar}<div class="sp-anchor-char-list">${cards}</div></div>`);
-}
-
-// 标签管理面（面板内一层，_anchorView.level='tags'）：建 / 改名 / 改色 / 删。
-// 删除是全局破坏性操作（会从所有收藏剥离该标签），故做一次轻量行内确认。
-async function renderAnchorTagManager() {
-    const tags = await anchor.getTags();
-    // 各标签被多少条收藏引用（meta 自带 tags，无需拉快照）
-    const buckets = await anchor.listByChat();
-    const usage = new Map();
-    for (const b of buckets) for (const it of b.items) {
-        if (!Array.isArray(it.tags)) continue;
-        for (const id of it.tags) usage.set(id, (usage.get(id) || 0) + 1);
-    }
-    const swatches = (activeColor) => ANCHOR_TAG_PALETTE.map(c =>
-        `<button type="button" class="sp-tagmgr-swatch${c === activeColor ? ' sp-tp-swatch-on' : ''}" data-color="${c}"><span class="sp-anchor-tagchip" data-color="${c}">A</span></button>`
-    ).join('');
-    const rows = tags.length ? tags.map(t => {
-        const n = usage.get(t.id) || 0;
-        if (_tagMgrEditId === t.id) {
-            // 编辑态：名输入 + 色板 + 保存/取消
-            return `<div class="sp-anchor-tagmgr-row sp-tagmgr-editing" data-id="${escapeAttr(t.id)}">
-                <input type="text" class="sp-tagmgr-name-input sp-input" value="${escapeAttr(t.name)}" maxlength="20">
-                <div class="sp-tagmgr-swatches">${swatches(t.color)}</div>
-                <div class="sp-tagmgr-row-actions">
-                    <button type="button" class="sp-tagmgr-save sp-mini-btn"><i class="fa-solid fa-check"></i></button>
-                    <button type="button" class="sp-tagmgr-cancel sp-mini-btn"><i class="fa-solid fa-xmark"></i></button>
-                </div>
-            </div>`;
-        }
-        if (_tagMgrDelId === t.id) {
-            // 删除确认态
-            return `<div class="sp-anchor-tagmgr-row sp-tagmgr-confirming" data-id="${escapeAttr(t.id)}">
-                <span class="sp-tagmgr-confirm-text">删除「${escapeHtml(t.name)}」？将从 ${n} 条收藏移除</span>
-                <div class="sp-tagmgr-row-actions">
-                    <button type="button" class="sp-tagmgr-del-yes sp-mini-btn sp-mini-btn-danger">删除</button>
-                    <button type="button" class="sp-tagmgr-del-no sp-mini-btn">取消</button>
-                </div>
-            </div>`;
-        }
-        return `<div class="sp-anchor-tagmgr-row" data-id="${escapeAttr(t.id)}">
-            <span class="sp-anchor-tagchip" data-color="${escapeAttr(t.color || 'slate')}">${escapeHtml(t.name)}</span>
-            <span class="sp-tagmgr-usage">${n} 条</span>
-            <div class="sp-tagmgr-row-actions">
-                <button type="button" class="sp-tagmgr-edit sp-icon-btn" title="改名 / 改色"><i class="fa-solid fa-pen"></i></button>
-                <button type="button" class="sp-tagmgr-del sp-icon-btn" title="删除标签"><i class="fa-solid fa-trash"></i></button>
-            </div>
-        </div>`;
-    }).join('') : `<div class="sp-anchor-filter-empty">还没有标签，在下方新建第一个</div>`;
-    setAnchorBody(`
-        <div class="sp-anchor-head sp-anchor-tagmgr-head">
-            <button class="sp-anchor-back" data-to="chars"><i class="fa-solid fa-chevron-left"></i></button>
-            <span class="sp-anchor-head-title">标签管理</span>
-            <span class="sp-anchor-head-count">${tags.length} 个</span>
-        </div>
-        <div class="sp-anchor-scroll">
-            <div class="sp-anchor-tagmgr-new">
-                <input type="text" class="sp-tagmgr-new-name sp-input" placeholder="新建标签名…" maxlength="20">
-                <div class="sp-tagmgr-swatches sp-tagmgr-new-swatches">${swatches(ANCHOR_TAG_PALETTE[0])}</div>
-                <button type="button" class="sp-tagmgr-new-add sp-mini-btn"><i class="fa-solid fa-plus"></i> 新建</button>
-            </div>
-            <div class="sp-anchor-tagmgr-list">${rows}</div>
-        </div>`);
-}
-
-// 第二层：某角色下的聊天文件分桶（charName 为 null 时退化为全部，兜底）
-async function renderAnchorChats(charName) {
-    const all = await anchor.listByChat();
-    const key = charName || '(未知角色)';
-    const allBuckets = charName == null ? all : all.filter(b => (b.charName || '(未知角色)') === key);
-    if (!allBuckets.length) { _anchorView = { level: 'chars', charName: null, chatId: null, itemId: null }; await renderAnchorChars(); return; }
-    const tags = await anchor.getTags();
-    // 每桶按标签过滤 items、丢空桶；count/latestTs 用过滤后的重算
-    const buckets = allBuckets
-        .map(b => {
-            const items = b.items.filter(itemMatchesFilter);
-            return { ...b, items, count: items.length, latestTs: items.reduce((m, it) => Math.max(m, it.ts || 0), 0) };
-        })
-        .filter(b => b.items.length);
-    const filterBar = renderAnchorFilterBar(tags, _anchorTagFilter);
-    const cards = buckets.length ? buckets.map(b => `
-        <button class="sp-anchor-chat-card" data-chatid="${escapeAttr(b.chatId ?? '')}">
-            <span class="sp-anchor-chat-icon">${anchorSvg('sp-anchor-chat-svg')}</span>
-            <span class="sp-anchor-chat-main">
-                <span class="sp-anchor-chat-name">${escapeHtml(b.chatName || '(未命名聊天)')}</span>
-                <span class="sp-anchor-chat-sub">${escapeHtml(b.charName || '')}</span>
-            </span>
-            <span class="sp-anchor-chat-meta">
-                <span class="sp-anchor-chat-count">${b.count}</span>
-                <span class="sp-anchor-chat-ts">${fmtAnchorTs(b.latestTs)}</span>
-            </span>
-        </button>`).join('') : `<div class="sp-anchor-filter-empty">没有含此标签的收藏</div>`;
-    setAnchorBody(`
-        <div class="sp-anchor-head">
-            <button class="sp-anchor-back" data-to="chars"><i class="fa-solid fa-chevron-left"></i></button>
-            <span class="sp-anchor-head-title">${escapeHtml(key)}</span>
-            <span class="sp-anchor-head-count">${buckets.length} 个聊天</span>
-        </div>
-        <div class="sp-anchor-scroll">${filterBar}<div class="sp-anchor-chat-list">${cards}</div></div>`);
-}
-
-// 第三层：某聊天文件内收藏的缩略列表（只显正文前一小段）
-async function renderAnchorItems(chatId) {
-    const buckets = await anchor.listByChat();
-    const bucket  = buckets.find(b => String(b.chatId ?? '') === String(chatId ?? ''));
-    if (!bucket) { _anchorView = { level: 'chars', charName: null, chatId: null, itemId: null }; await renderAnchorChars(); return; }
-    const charKey = bucket.charName || '(未知角色)';
-    _anchorView.charName = charKey;   // 回填角色键：openAnchorAtChat 直达 items 时，返回键也能正确落到角色层
-    const tags = await anchor.getTags();
-    const tagMap = new Map(tags.map(t => [t.id, t]));
-    const items = bucket.items.filter(itemMatchesFilter);
-    const filterBar = renderAnchorFilterBar(tags, _anchorTagFilter);
-    const cards = items.length ? items.map(it => `
-        <button class="sp-anchor-item-card" data-id="${escapeAttr(it.id)}">
-            <span class="sp-anchor-item-tags">${renderTagChips(it.tags, tagMap)}</span>
-            <span class="sp-anchor-item-main">
-                <span class="sp-anchor-item-floor">#${it.floorIndex ?? '?'}</span>
-                <span class="sp-anchor-item-preview">${escapeHtml(it.textPreview || '(无正文预览)')}</span>
-                <span class="sp-anchor-item-ts">${fmtAnchorTs(it.ts)}</span>
-            </span>
-        </button>`).join('') : `<div class="sp-anchor-filter-empty">没有含此标签的收藏</div>`;
-    setAnchorBody(`
-        <div class="sp-anchor-head">
-            <button class="sp-anchor-back" data-to="chats" data-char="${escapeAttr(charKey)}"><i class="fa-solid fa-chevron-left"></i></button>
-            <span class="sp-anchor-head-title">${escapeHtml(bucket.chatName || bucket.charName || '收藏')}</span>
-            <span class="sp-anchor-head-count">${items.length} 条</span>
-        </div>
-        <div class="sp-anchor-scroll">${filterBar}<div class="sp-anchor-item-list">${cards}</div></div>`);
-}
-
-// 第三层：全文——Shadow DOM 渲染，隔离状态栏 <style>（既不外泄污染面板，也不被面板样式覆盖）
-// 关键：ST 的 decodeStyleTags 会给楼层 <style> 每条选择器加 `.mes_text ` 前缀（类名再改 .custom-*），
-// 所以快照容器必须带 class="mes_text" 当祖先，否则正则状态栏「有文字没样式」。
-async function renderAnchorFull(itemId) {
-    const it = await anchor.getItem(itemId);
-    if (!it) { _anchorView = { level: 'chars', charName: null, chatId: null, itemId: null }; await renderAnchorChars(); return; }
-    _anchorCurrentItem = it;
-    // 全屏态挂在 #sp-anchor-body（跨重渲持久）；重建头部时按当前态给全屏按钮初始图标/标题，
-    // 否则「编辑标签」重渲后按钮会被复位成 fa-expand（虽仍在全屏、图标却成「进入全屏」）。
-    const fsOn = !!inEl('#sp-anchor-body')?.classList.contains('sp-anchor-fs-on');
-    const tagMap = new Map((await anchor.getTags()).map(t => [t.id, t]));
-    // 标签区：只读态（chips + 编辑标签按钮）/ 内联编辑态（chip 点选即写 + 新建行 + 完成）。
-    // 内联而非 body 浮层——全文视图铺满面板，浮层会被面板盖住看不见（用户反馈）。
-    let tagsBlock;
-    if (_anchorFullTagEdit) {
-        const selSet = new Set(Array.isArray(it.tags) ? it.tags : []);
-        const allTags = [...tagMap.values()];
-        const chips = allTags.length
-            ? allTags.map(t => `<button type="button" class="sp-anchor-ftag-chip${selSet.has(t.id) ? ' sp-tp-chip-on' : ''}" data-id="${escapeAttr(t.id)}"><span class="sp-anchor-tagchip" data-color="${escapeAttr(t.color || 'slate')}">${escapeHtml(t.name)}</span></button>`).join('')
-            : '<div class="sp-tagpicker-empty">还没有标签，在下方新建</div>';
-        const swatches = ANCHOR_TAG_PALETTE.map((c, i) => `<button type="button" class="sp-anchor-ftag-swatch${i === 0 ? ' sp-tp-swatch-on' : ''}" data-color="${c}"><span class="sp-anchor-tagchip" data-color="${c}">A</span></button>`).join('');
-        tagsBlock = `<div class="sp-anchor-full-tagedit">
-                <div class="sp-anchor-ftag-chips">${chips}</div>
-                <div class="sp-anchor-ftag-new">
-                    <input type="text" class="sp-anchor-ftag-name sp-input" placeholder="新建标签名…" maxlength="20">
-                    <div class="sp-tagmgr-swatches">${swatches}</div>
-                    <button type="button" class="sp-anchor-ftag-add sp-mini-btn"><i class="fa-solid fa-plus"></i></button>
-                </div>
-                <div class="sp-anchor-ftag-foot">
-                    <button type="button" class="sp-anchor-ftag-done sp-mini-btn"><i class="fa-solid fa-check"></i> 完成</button>
-                </div>
-            </div>`;
-    } else {
-        tagsBlock = `<div class="sp-anchor-full-tags">${renderTagChips(it.tags, tagMap)}<button class="sp-anchor-tag-edit sp-mini-btn" type="button"><i class="fa-solid fa-tag"></i> 编辑标签</button></div>`;
-    }
-    setAnchorBody(`
-        <div class="sp-anchor-head">
-            <button class="sp-anchor-back" data-to="items" data-chatid="${escapeAttr(it.chatId ?? '')}"><i class="fa-solid fa-chevron-left"></i></button>
-            <span class="sp-anchor-head-title">${escapeHtml(it.charName || '')}<span class="sp-anchor-head-floor"> · #${it.floorIndex ?? '?'}</span></span>
-            <span class="sp-anchor-head-actions">
-                <button class="sp-icon-btn sp-anchor-fullscreen" title="${fsOn ? '退出全屏' : '全屏浏览（便于截图）'}"><i class="fa-solid ${fsOn ? 'fa-compress' : 'fa-expand'}"></i></button>
-                <button class="sp-icon-btn sp-anchor-del"    title="删除此收藏"><i class="fa-solid fa-trash"></i></button>
-            </span>
-        </div>
-        <div class="sp-anchor-scroll">
-            ${tagsBlock}
-            <div class="sp-anchor-full-host" id="sp-anchor-full-host"></div>
-            <div class="sp-anchor-full-ts">收藏于 ${fmtAnchorTs(it.ts)}</div>
-        </div>
-        <div class="sp-anchor-fs-resize" title="拖拽调整大小"></div>`);
-    const host = inEl('#sp-anchor-full-host');
-    if (host) {
-        // Shadow DOM 的 :host{all:initial} 会切断颜色继承；只设字色救不了——快照里状态栏常自带
-        // 背景卡片，单一字色遇到「浅字撞浅底/深字撞深底」必然翻车（夜间尤其）。正解是给容器一对
-        // **自洽的「底+字」**（见下方取值），状态栏自带 inline 背景的卡片用自己的底覆盖容器底、不受影响；
-        // 只设了字色没设底的状态栏文字则落在容器底上，底与字同主题、必然对比清晰。
-        // 用探针把 CSS 变量解析成具体 rgb（规避 var() 在 getComputedStyle 里不展开的坑）再内联进 Shadow。
-        // Shadow DOM 切断继承；直接读 currentTheme 取硬编码色对，规避探针在 CSS 变量继承链上的不稳定。
-        // 日=深字+浅底，夜=浅字+深底，两两成对必然可读。
-        const isNight = currentTheme === 'night';
-        const fg   = isNight ? '#D8D9DA' : '#2c2e2a';
-        const bg   = isNight ? '#272829' : '#F6F4E8';
-        const link = isNight ? '#A8A49E' : '#DC9B9B';
-        const root = host.shadowRoot || host.attachShadow({ mode: 'open' });
-        // Shadow DOM 的 :host{all:initial} 隔断了 ST 那条 `.mes q:before/:after{content:''}`，
-        // UA 默认的 q 自动引号在 shadow 里复活；而 ST 格式化阶段已把字面引号写进文本，
-        // 于是「字面引号 + UA 自动引号」= 双引号。这里补回同款压制。
-        root.innerHTML = `<style>:host{all:initial;display:block;}
-            .sp-anchor-snap{display:block;color:${fg};background:${bg};padding:16px 18px !important;margin:0 !important;border:none !important;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;font-size:12px;line-height:1.6;word-break:break-word;}
-            .sp-anchor-snap img{max-width:100%;height:auto;}
-            .sp-anchor-snap a{color:${link};}
-            .sp-anchor-snap q:before,.sp-anchor-snap q:after{content:'';}
-        </style><div class="mes_text sp-anchor-snap">${it.html || ''}</div>`;
-    }
-}
-
-// ─── 坐标·导出图片 ─────────────────────────────────────────────────────────────
-// 坐标全屏浏览：纯 CSS 切 class + 锁背景滚动 + Esc 退出（照搬小剧场全屏，稳且不依赖任何库）。
-// 状态类挂 #sp-anchor-body 本身（不是 .sp-anchor-scroll）：setAnchorBody 只换 innerHTML、不动元素本身，
-// 「编辑标签」触发的重渲因此不丢全屏态；头部退出按钮也随卡片一起 fixed，无需 :has() 钉位。
-// 桌面留白成卡片、手机铺满面板（尺寸/留白见 style.css 媒体查询）。
-let _anchorFsEsc = null;
-// 清全屏浮卡的拖拽 inline 尺寸/坐标：退出全屏时必须清，否则 width/height 会黏到非全屏的
-// in-flow #sp-anchor-body 上（它此时是 flex:1 子项），把列表视图撑破版。
-function _clearAnchorFsInline() {
-    const b = inEl('#sp-anchor-body');
-    if (!b) return;
-    b.style.left = b.style.top = b.style.right = b.style.bottom = b.style.width = b.style.height = '';
-}
-// 清坐标全屏态（三个类一起去）：返回/删除/切档等离开全文视图时调用，避免 fixed 卡片黏在列表视图上。
-function _clearAnchorFs() {
-    inEl('#sp-anchor-body')?.classList.remove('sp-anchor-fs-on');
-    inEl('.sp-sheet')?.classList.remove('sp-fs-flat');
-    document.body.classList.remove('sp-anchor-fs-lock');
-    _clearAnchorFsInline();
-}
-function toggleAnchorFullscreen(btnEl) {
-    const body = inEl('#sp-anchor-body');
-    if (!body) return;
-    const on = body.classList.toggle('sp-anchor-fs-on');
-    if (!on) _clearAnchorFsInline();   // 退出：清掉拖拽留下的 inline 尺寸/坐标
-    // 桌面去掉 .sp-sheet 的 transform 让 fixed 卡片逃出面板锚到视口（.sp-fs-flat 在 CSS 里 desktop-only，
-    // 手机不动 → sheet 的居中 translateX(-50%) 保留、卡片不再右移半屏）。
-    inEl('.sp-sheet')?.classList.toggle('sp-fs-flat', on);
-    const $i = $(btnEl).find('i');
-    $i.attr('class', on ? 'fa-solid fa-compress' : 'fa-solid fa-expand');
-    $(btnEl).attr('title', on ? '退出全屏' : '全屏浏览（便于截图）');
-    document.body.classList.toggle('sp-anchor-fs-lock', on);
-    if (on && !_anchorFsEsc) {
-        _anchorFsEsc = (ev) => {
-            if (ev.key !== 'Escape') return;
-            if (inEl('#sp-anchor-body.sp-anchor-fs-on')) $in('.sp-anchor-fullscreen').trigger('click');
-        };
-        document.addEventListener('keydown', _anchorFsEsc);
-    }
-}
-
-// 坐标全屏浮卡·拖拽移动 + 右下角缩放（PC 专属：手机全屏铺满面板、不允许拖，故只绑鼠标、不碰 touch）。
-// 机制镜像主面板 sheet 的 drag/resize：卡片默认位置由 CSS vw/vh 锚定，首次手势时 snap 成显式 px
-// （left/top/width/height + right/bottom:auto），之后 inline 坐标驱动。退出全屏时由 _clearAnchorFs /
-// toggle-off 清掉这些 inline，避免黏到非全屏的 in-flow #sp-anchor-body 上（width/height 会破版）。
-let _anchorFsGesture = null;
-function _anchorFsSnapToPx(card) {
-    if (card.style.width) return;   // 已 snap 过：本次全屏会话内保留用户调好的尺寸
-    const r = card.getBoundingClientRect();
-    card.style.left = r.left + 'px'; card.style.top = r.top + 'px';
-    card.style.width = r.width + 'px'; card.style.height = r.height + 'px';
-    card.style.right = 'auto'; card.style.bottom = 'auto';
-}
-function _anchorFsGestureStart(mode, e) {
-    if (isMobile()) return;
-    const card = inEl('#sp-anchor-body');
-    if (!card || !card.classList.contains('sp-anchor-fs-on')) return;
-    e.preventDefault(); e.stopPropagation();
-    _anchorFsSnapToPx(card);
-    const r = card.getBoundingClientRect();
-    _anchorFsGesture = { mode, startX: e.clientX, startY: e.clientY,
-        origLeft: r.left, origTop: r.top, origW: r.width, origH: r.height };
-    document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', _anchorFsGestureMove);
-    document.addEventListener('mouseup', _anchorFsGestureEnd);
-}
-function _anchorFsGestureMove(e) {
-    if (!_anchorFsGesture) return;
-    if (e.buttons === 0) { _anchorFsGestureEnd(); return; }   // 自愈：鼠标离窗错过 mouseup 时别卡住
-    const card = inEl('#sp-anchor-body');
-    if (!card) return;
-    const g = _anchorFsGesture;
-    if (g.mode === 'move') {
-        const left = Math.max(0, Math.min(g.origLeft + e.clientX - g.startX, window.innerWidth  - card.offsetWidth));
-        const top  = Math.max(0, Math.min(g.origTop  + e.clientY - g.startY, window.innerHeight - 40));
-        card.style.left = left + 'px'; card.style.top = top + 'px';
-    } else {
-        const w = Math.max(320, Math.min(window.innerWidth  - g.origLeft - 8, g.origW + e.clientX - g.startX));
-        const h = Math.max(240, Math.min(window.innerHeight - g.origTop  - 8, g.origH + e.clientY - g.startY));
-        card.style.width = w + 'px'; card.style.height = h + 'px';
-    }
-}
-function _anchorFsGestureEnd() {
-    if (!_anchorFsGesture) return;
-    _anchorFsGesture = null;
-    document.body.style.userSelect = '';
-    document.removeEventListener('mousemove', _anchorFsGestureMove);
-    document.removeEventListener('mouseup', _anchorFsGestureEnd);
-}
-
-// 收藏占用统计 → 设置面板「收藏占用」行（打开设置时刷新）
 // ─── 存储管理面板 ──────────────────────────────────────────────────────────────
 // 三层：①本聊天 chat_metadata（点线面间讨论 + 记忆 + 棱永久）②收藏（坐标·服务器）
 //       ③本机缓存（localStorage：棱草稿 + UI 位置）。构画只统计/清理自己的数据。
@@ -8320,7 +5946,6 @@ const STORAGE_KIND_LABELS = {
     'space-chat'   : '间（局外）',
     'dashed'       : '虚线·冷知识',
     'almanac'      : '轴·日历条目（节日/生日/纪念日）',
-    'date-anchor'  : '轴·剧情今天（日期锚点）',
 };
 const STORAGE_OWNKEY_LABELS = {
     'sp-memory' : '记忆',
@@ -8364,7 +5989,7 @@ async function renderStorageUsage() {
     } else {
         const usage = store.usageByKind();
         const rows = [];
-        for (const kind of store.KINDS) {
+        for (const kind of store.USER_CLEAR_KINDS) {
             const b = usage[kind] || 0;
             if (!b) continue;
             rows.push(storageRow(
@@ -8388,7 +6013,7 @@ async function renderStorageUsage() {
     }
 
     // ③ 本机缓存（localStorage：棱草稿 + UI 位置），先算好（同步）
-    const localBytes = theater.pluginCacheBytes();
+    const localBytes = theaterDeviceCache.pluginCacheBytes();
 
     // 先渲染同步部分 + 收藏占位（服务器读取慢，先占位再补）
     $body.html(`
@@ -8410,11 +6035,12 @@ async function renderStorageUsage() {
 
     // ② 收藏（坐标·服务器）——异步补进占位
     try {
-        const cnt = await anchor.countItems();
-        const bytes = await anchor.estimateBytes();
+        const usage = await coordinateRuntime?.feature?.storageUsage?.() || { count: 0, bytes: 0 };
+        const cnt = usage.count;
+        const bytes = usage.bytes;
         $in('#sp-storage-anchor-rows').html(
             cnt
-                ? storageRow(`共 ${cnt} 条收藏`, anchor.formatBytes(bytes),
+                ? storageRow(`共 ${cnt} 条收藏`, coordinateRuntime.feature.formatBytes(bytes),
                     `<button class="sp-storage-del sp-mini-btn sp-mini-btn-danger" data-scope="anchor">清空</button>`)
                 : `<div class="sp-cfg-hint" style="padding:4px 0">暂无收藏</div>`
         );
@@ -8436,9 +6062,7 @@ function refreshLedgerAfterStoreClear() {
 }
 
 function invalidateAlmanacTasksForStoreClear() {
-    axisState.almanacAbortController?.abort();
-    axisState.almanacAbortController = null;
-    axisState.isGeneratingAlmanac = false;
+    axisGenerationController.reset();
     axisState._almanacEditor = null;
     axisCalendarManager.close();
     axisState._almanacCalDay = null;
@@ -8457,17 +6081,13 @@ function invalidateKindTasksForStoreClear(kind) {
         _autoRegenSchedAbort?.abort(); _autoRegenSchedAbort = null;
         pointState.isGenerating = false;
     } else if (kind === 'outline') {
-        outlineAbortController?.abort(); outlineAbortController = null;
-        outlineJudgeAbort?.abort(); outlineJudgeAbort = null; outlineJudgeOwner = null;
-        isGeneratingOutline = false; isJudgingOutline = false;
+        outlineFeature.invalidateStoreKind(kind);
     } else if (kind === 'lines') {
         linesFeature.abortGeneration();
     } else if (kind === 'space-chat') {
-        spaceChatAbortController?.abort(); spaceChatAbortController = null;
-        isSpaceChatting = false;
+        spaceFeature.invalidateStoreKind(kind);
     } else if (kind === 'creative-chat') {
-        outlineChatAbortController?.abort(); outlineChatAbortController = null;
-        isOutlineChatting = false;
+        outlineFeature.invalidateStoreKind(kind);
     } else if (kind === 'dashed') {
         linesFeature.dashed.abort();
     }
@@ -8480,22 +6100,18 @@ function refreshEditorsAfterStoreClear(kind) {
         setBody(`<div class="sp-empty"><i class="fa-regular fa-calendar"></i><p>还没有点</p><button class="sp-gen-btn" id="sp-gen-schedule-now">生成点</button></div>`);
         syncLatestScheduleBlock();
     }
-    if (kind === 'outline') { if (outlineMode) setOutlineBody(renderEmptyOutlineState()); refreshOutlineInjection(); syncLatestInlineBlock(); }
+    if (kind === 'outline') { outlineFeature.refreshAfterStoreClear(kind); syncLatestInlineBlock(); }
     if (kind === 'lines') { linesRuntime.reset(); if (linesMode) linesFeature.renderBody(renderEmptyLinesState()); refreshLinesInjection(); syncLatestInlineBlock(); }
     if (kind === 'dashed') {
         linesFeature.dashed.resetError();
         if (linesMode) linesFeature.refreshPanel();
         syncLatestInlineBlock();
     }
-    if (kind === 'space-chat' && spaceMode) $in('#sp-space-msgs').empty();
     if (kind === 'creative-chat') {
-        outlineChatHistory.length = 0;
-        if (outlineMode) renderCreativeChatHistory();
+        outlineFeature.refreshAfterStoreClear(kind);
     }
     if (kind === 'space-chat') {
-        spaceChatHistory.length = 0;
-        _spaceWidgetStore.clear();
-        if (spaceMode) renderSpaceChatHistory();
+        spaceFeature.refreshAfterStoreClear(kind);
     }
 }
 
@@ -8506,25 +6122,20 @@ function refreshEditorsFromCurrentStore(kind) {
         const saved = readStore(key);
         const subject = currentView === 'char' ? (charViewName || getContext().name2 || '角色') : (getContext().name1 || '用户');
         pointState.cachedSchedule = saved?.raw ? renderSchedule(saved.raw, saved.userName || subject, currentView, loadCalDesc()) : null;
-        if (!outlineMode && !linesMode && !spaceMode && !theaterMode && !anchorMode && $(`#${MODAL_ID}`).is(':visible')) {
+        if (!outlineMode && !linesMode && !spaceMode && !theaterMode && $(`#${MODAL_ID}`).is(':visible')) {
             setBody(pointState.cachedSchedule || `<div class="sp-empty"><i class="fa-regular fa-calendar"></i><p>还没有点</p><button class="sp-gen-btn" id="sp-gen-schedule-now">生成点</button></div>`);
         }
         syncLatestScheduleBlock();
     } else if (kind === 'outline') {
-        const saved = readStore(getOutlineCacheKey());
-        cachedOutline = saved?.raw ? renderOutline(saved.raw, getOutlineCursor()) : null;
-        if (outlineMode) setOutlineBody(cachedOutline || renderEmptyOutlineState());
-        refreshOutlineInjection();
+        outlineFeature.refreshFromStore(kind);
     } else if (kind === 'lines') {
         linesRuntime.reset();
         if (linesMode) linesFeature.refreshPanel();
         refreshLinesInjection();
     } else if (kind === 'creative-chat') {
-        loadCreativeChatHistory();
-        if (outlineMode) renderCreativeChatHistory();
+        outlineFeature.refreshFromStore(kind);
     } else if (kind === 'space-chat') {
-        loadSpaceChatHistory();
-        if (spaceMode) renderSpaceChatHistory();
+        spaceFeature.refreshFromStore(kind);
     } else if (kind === 'dashed') {
         linesFeature.dashed.resetError();
         if (linesMode) linesFeature.refreshPanel();
@@ -8541,6 +6152,8 @@ function bindStorageHandlers() {
 
     // 日历条目必须按精确 dataKey 删除，不能调用按 kind 前缀的清理。
     $body.on('click', '.sp-storage-del[data-scope="datakey"]', async function () {
+        const dataKey = $(this).attr('data-key');
+        if (!store.isStorageDataKeyClearable(dataKey)) return;
         const identity = storageChatIdentity();
         if (!identity) return;
         if (!await spConfirm({
@@ -8550,7 +6163,7 @@ function bindStorageHandlers() {
         if (!storageChatStillCurrent(identity)) return;
         invalidateAlmanacTasksForStoreClear();
         try {
-            const ok = await store.clearDataKeyAsync('almanac-user');
+            const ok = await store.clearDataKeyAsync(dataKey);
             if (!storageChatStillCurrent(identity)) return;
             refreshAlmanacAfterStoreClear();
             renderStorageUsage();
@@ -8565,7 +6178,7 @@ function bindStorageHandlers() {
         const kind = $(this).attr('data-kind');
         if (kind === STORAGE_CLEAR_TARGETS.almanac.kind) return;
         const label = STORAGE_KIND_LABELS[kind] || kind;
-        if (!store.KINDS.includes(kind)) return;
+        if (!store.USER_CLEAR_KINDS.includes(kind)) return;
         const identity = storageChatIdentity();
         if (!identity) return;
         const detail = kind === STORAGE_CLEAR_TARGETS.almanac.kind
@@ -8613,29 +6226,34 @@ function bindStorageHandlers() {
             }
             return;
         }
+        if (key === 'sp-theater') {
+            const target = theaterFeature.captureTarget(identity.chatId);
+            const result = await theaterFeature.clearSaved(target);
+            if (!storageChatStillCurrent(identity)) return;
+            if (theaterMode) theaterFeature.resetAfterStorageClear();
+            renderStorageUsage();
+            showToast(result?.ok ? `已清空${label}` : `清空${label}失败`, null, !result?.ok);
+            return;
+        }
         const ok = store.clearOwnKey(key);
         if (!storageChatStillCurrent(identity)) return;
         if (key === 'sp-memory') { refreshMemoryStatus?.(); }
-        if (key === 'sp-theater' && theaterMode) { theaterCurrentPiece = null; renderTheaterPanel(); }
+        if (key === 'sp-theater' && theaterMode) theaterFeature.resetAfterStorageClear();
         renderStorageUsage();
         showToast(ok ? `已清空${label}` : `${label}本就为空`);
     });
 
     // ② 收藏（坐标·服务器）—— 清空全部
     $body.on('click', '.sp-storage-del[data-scope="anchor"]', async function () {
-        const cnt = await anchor.countItems().catch(() => 0);
+        const cnt = await coordinateRuntime?.feature?.storageUsage?.().then(info => info.count).catch(() => 0);
         if (!cnt) { showToast('还没有任何收藏'); return; }
         if (!await spConfirm({ title: '清空全部收藏', body: `确定删除全部 ${cnt} 条收藏吗？此操作不可恢复（原楼层不受影响）。` })) return;
         try {
-            const items = await anchor.getAllItems();
-            for (const it of items) await anchor.deleteItem(it.id);
-            _anchorSavedKeys.clear();
-            document.querySelectorAll('#chat .mes .sp-anchor-btn').forEach(btn => { btn.classList.remove('sp-anchor-saved'); btn.title = '收藏此楼'; });
-            if (anchorMode) { _anchorView = { level: 'chars', charName: null, chatId: null, itemId: null }; renderAnchorPanel(); }
+            await coordinateRuntime?.feature?.clearAll?.();
             renderStorageUsage();
             showToast('已清空全部收藏');
         } catch (err) {
-            console.error('[SP storage] 清空收藏失败', err);
+            console.error('[SP storage] 清空收藏失败', safeDiagnosticLog('storage', 'save', err));
             showToast('清空失败：' + (err?.message || '未知错误'), null, true);
         }
     });
@@ -8643,8 +6261,8 @@ function bindStorageHandlers() {
     // ③ 本机缓存（localStorage：棱草稿 + UI 位置）
     $body.on('click', '.sp-storage-del[data-scope="local"]', async function () {
         if (!await spConfirm({ title: '清理本机缓存', body: '清理本浏览器的棱草稿与界面位置（面板位置/大小）。不影响已存服务端的点线面间和收藏。确定？' })) return;
-        const n = theater.clearPluginCache();
-        if (theaterMode) { theaterCurrentPiece = null; renderTheaterPanel(); }
+        const n = theaterDeviceCache.clearPluginCache();
+        if (theaterMode) theaterFeature.resetAfterStorageClear();
         renderStorageUsage();
         showToast(`已清理 ${n} 项本机缓存`);
     });
@@ -8660,17 +6278,8 @@ async function triggerGenerateLines() {
     return linesFeature.generate();
 }
 
-// Advance = generate based on existing raw (preserves previousRaw for continuity).
-// Called from manual-advance buttons on inline block + panel toolbar.
-async function triggerAdvanceLines() {
-    return linesFeature.advance();
-}
-
-// Delete just ONE line by index; the other lines stay applied.
-async function triggerDeleteOneLine(idx) { return linesFeature.deleteLine(idx); }
-function triggerToggleLinePin(idx) { return linesFeature.togglePin(idx); }
-function buildLinesPrompt(userName, charName, perspective = 'user', previousRaw = '', scale = 'auto') {
-    return buildCanonicalLinesPrompt(userName, charName, perspective, previousRaw, scale);
+function buildLinesPrompt(userName, charName, perspective = 'user', previousRaw = '', scale = 'auto', vectorContext = {}) {
+    return buildCanonicalLinesPrompt(userName, charName, perspective, previousRaw, scale, vectorContext);
 }
 
 // ─── Storylines parse / render ────────────────────────────────────────────────
@@ -8897,7 +6506,7 @@ async function fetchModels() {
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 120)}`);
         const data = await res.json();
-        if (data?.error) throw new Error(data.error.message || '返回错误');
+        if (data?.error) throw makeDiagnosticError('unknown', { phase: 'request' });
         const models = (data.data || data.models || [])
             .map(m => (typeof m === 'string' ? m : m.id))
             .filter(Boolean).sort();
@@ -8913,7 +6522,7 @@ async function fetchModels() {
         $in('#sp-model-list-section').attr('open', 'open').show();
         showToast(`已加载 ${models.length} 个模型`);
     } catch (err) {
-        showToast(`获取模型失败：${err.message}`, null, true);
+        showToast(`获取模型失败：${diagnosticMessage(err)}`, null, true);
     } finally {
         $btn.prop('disabled', false).html('<i class="fa-solid fa-list"></i>');
     }
@@ -8923,6 +6532,10 @@ function toggleSettings() {
     settingsOpen = !settingsOpen;
     const $overlay = $in('#sp-settings-overlay');
     if (settingsOpen) {
+        const savedLinesMode = getLinesMode();
+        for (const value of ['turns', 'days', 'manual']) {
+            $in(`input[name="sp-lines-mode"][value="${value}"]`).prop('checked', value === savedLinesMode);
+        }
         renderWiList();     // async, fire-and-forget — fills list when done
         renderWiExcludeList();   // 全局排除清单（async fire-and-forget；冷缓存会强刷世界书全表）
         renderScaleRow();   // per-character scale radios (sync)
@@ -8939,7 +6552,37 @@ function toggleSettings() {
 }
 
 // ─── Memory section renderer + handlers ─────────────────────────────────────
+let _databaseMemoryUiRevision = 0;
+
+function captureDatabaseMemoryUiIdentity() {
+    const ctx = getContext();
+    return databaseMemoryUiIdentity({
+        chatId: ctx?.chatId,
+        characterId: ctx?.characterId,
+        characterKey: charStableKey(ctx),
+        selectedName: getSettings().databaseWorldbookName,
+    });
+}
+
+function databaseMemoryUiRequestIsCurrent(identity, revision) {
+    return revision === _databaseMemoryUiRevision
+        && !!getSettings().useDatabase
+        && sameDatabaseMemoryUiIdentity(identity, captureDatabaseMemoryUiIdentity());
+}
+
+async function renderDatabaseWorldbookSelector(identity, revision, ctx) {
+    const $select = $in('#sp-mem-database-worldbook');
+    if (!$select.length || !databaseMemoryUiRequestIsCurrent(identity, revision)) return;
+    // Preserve the saved target immediately while the complete host list loads.
+    $select.html(renderDatabaseWorldbookOptions([], identity.selectedName));
+    let names = [];
+    try { names = await getAllWorldNames(ctx); } catch {}
+    if (!databaseMemoryUiRequestIsCurrent(identity, revision)) return;
+    $select.html(renderDatabaseWorldbookOptions(names, identity.selectedName));
+}
+
 function renderMemorySection() {
+    const databaseUiRevision = ++_databaseMemoryUiRevision;
     const s = getSettings();
     const useBbb   = !!s.useBaiBaiBook;
     const useAnima = !!s.useAnima;
@@ -8948,6 +6591,7 @@ function renderMemorySection() {
     $in('#sp-mem-source-anima').prop('checked', useAnima);
     $in('#sp-mem-source-database').prop('checked', useDatabase);
     $in('#sp-mem-anima-options').toggle(useAnima || useDatabase);
+    $in('#sp-mem-database-worldbook-options').toggle(useDatabase);
     $in('#sp-mem-anima-recall').val(getAnimaRecallCount());
     // 标签设置属于全局清洗规则，与记忆源无关；必须在各外部源 early-return 前回填。
     $in('#sp-mem-keeptags').val(typeof s.keepTags === 'string' ? s.keepTags : 'content');
@@ -8985,16 +6629,23 @@ function renderMemorySection() {
         return;
     }
     if (useDatabase) {
+        const ctx = getContext();
+        const identity = captureDatabaseMemoryUiIdentity();
+        void renderDatabaseWorldbookSelector(identity, databaseUiRevision, ctx);
         $in('#sp-mem-internal').hide();
         $in('#sp-mem-bbb-status, #sp-mem-anima-status').hide();
         $in('#sp-mem-database-status').show().html('<i class="fa-solid fa-circle-info"></i> 正在读取数据库纪要…');
-        getDatabaseMemResult().then(result => {
-            if (!getSettings().useDatabase) return;
+        databaseMemoryAccess.result().then(result => {
+            if (!databaseMemoryUiRequestIsCurrent(identity, databaseUiRevision)) return;
             const ok = result.status === 'ready';
             $in('#sp-mem-database-status').html(ok
-                ? `<i class="fa-solid fa-circle-check" style="color:var(--cardhub-accent,#7c9)"></i> ${escapeHtml(databaseDiagnostic(result))}`
-                : `<i class="fa-solid fa-triangle-exclamation" style="color:#e0a54e"></i> ${escapeHtml(databaseDiagnostic(result))}`);
-        }).catch(() => $in('#sp-mem-database-status').html('<i class="fa-solid fa-triangle-exclamation" style="color:#e0a54e"></i> 数据库读取失败'));
+                ? `<i class="fa-solid fa-circle-check" style="color:var(--cardhub-accent,#7c9)"></i> ${escapeHtml(databaseMemoryDiagnostic(result))}`
+                : `<i class="fa-solid fa-triangle-exclamation" style="color:#e0a54e"></i> ${escapeHtml(databaseMemoryDiagnostic(result))}`);
+        }).catch(error => {
+            if (!databaseMemoryUiRequestIsCurrent(identity, databaseUiRevision)) return;
+            const bookName = identity.selectedName || getDatabasePrimaryWorldbookName(ctx);
+            $in('#sp-mem-database-status').html(`<i class="fa-solid fa-triangle-exclamation" style="color:#e0a54e"></i> ${escapeHtml(databaseMemoryDiagnostic({ status: 'processing-failed', bookName, targetMode: identity.selectedName ? 'explicit' : 'primary', error }))}`);
+        });
         return;
     }
     $in('#sp-mem-internal').show();
@@ -9047,6 +6698,7 @@ async function renderAnimaStatus() {
 
 function refreshMemoryStatus() {
     const r = memory.getHealthReport();
+    if (!r.paused) memoryPauseNoticeShown = false;
     const rows = [
         `<div class="sp-mem-stat"><span class="sp-mem-stat-k">AI 楼总数</span><span class="sp-mem-stat-v">${r.totalAi}</span></div>`,
         `<div class="sp-mem-stat"><span class="sp-mem-stat-k">稳定分组数</span><span class="sp-mem-stat-v">${r.totalGroups}</span></div>`,
@@ -9067,47 +6719,12 @@ function refreshMemoryStatus() {
 function renderTheaterSection() {
     const s = getSettings();
     $in('#sp-theater-style').val(typeof s.theaterStylePrompt === 'string' ? s.theaterStylePrompt : '');
-    refreshTheaterTemplates();   // async, fills #sp-theater-tpl-mgr when done
+    void theaterFeature?.refreshUi();
 }
 
 // 棱设置分节的事件（config 字段即改即存；模板 CRUD。缓存治理已移交存储管理面板）
 function bindTheaterHandlers() {
-    $in('#sp-theater-style').on('change', function () {
-        getSettings().theaterStylePrompt = this.value;
-        saveSettingsDebounced();
-    });
-
-    // 模板写入口（委托到管理器容器，内容动态渲染）。查看/改/删交给酒馆世界书编辑器。
-    const $mgr = $in('#sp-theater-tpl-mgr');
-    $mgr.on('click', '#sp-theater-tpl-add', async function () {
-        const title = String($in('#sp-theater-tpl-new-title').val() || '').trim();
-        const text  = String($in('#sp-theater-tpl-new-text').val() || '').trim();
-        if (!title && !text) { showToast('模板标题或内容不能都为空', null, true); return; }
-        try {
-            await theater.addTemplate(title || '(无标题)', text);
-            $in('#sp-theater-tpl-new-title').val('');
-            $in('#sp-theater-tpl-new-text').val('');
-            await refreshTheaterTemplates();  // 重渲染 → 计数 +1
-            showToast('模板已新增');
-        } catch (err) { showToast('新增失败：' + (err.message || err), null, true); }
-    });
-    // 批量导入 txt：点按钮 → 触发隐藏 file input → 读文本 → 解析 → addTemplatesBatch 一次入库
-    $mgr.on('click', '#sp-theater-tpl-import', function () {
-        $in('#sp-theater-tpl-import-file').trigger('click');
-    });
-    $mgr.on('change', '#sp-theater-tpl-import-file', async function () {
-        const file = this.files && this.files[0];
-        this.value = '';                       // 允许连选同一文件重导
-        if (!file) return;
-        try {
-            const raw = await file.text();
-            const items = parseTheaterImport(raw);
-            if (!items.length) { showToast('未解析到模板，请检查 txt 格式（需 title：起头）', null, true); return; }
-            const n = await theater.addTemplatesBatch(items);
-            await refreshTheaterTemplates();
-            showToast(`已导入 ${n} 条模板`);
-        } catch (err) { showToast('导入失败：' + (err.message || err), null, true); }
-    });
+    theaterFeature?.bindSettings($in('#sp-theater-section'));
 }
 
 function bindMemoryHandlers() {
@@ -9116,7 +6733,7 @@ function bindMemoryHandlers() {
         s.useBaiBaiBook = this.checked;
         if (this.checked) { s.useAnima = false; s.useDatabase = false; }   // 记忆源互斥
         saveSettingsDebounced();
-        if (this.checked) memory.abortRebuild();
+        memory.abortAll();
         renderMemorySection();
     });
     $in('#sp-mem-source-anima').on('change', function () {
@@ -9124,7 +6741,7 @@ function bindMemoryHandlers() {
         s.useAnima = this.checked;
         if (this.checked) { s.useBaiBaiBook = false; s.useDatabase = false; }   // 记忆源互斥
         saveSettingsDebounced();
-        if (this.checked) memory.abortRebuild();
+        memory.abortAll();
         renderMemorySection();
     });
     $in('#sp-mem-source-database').on('change', function () {
@@ -9132,7 +6749,14 @@ function bindMemoryHandlers() {
         s.useDatabase = this.checked;
         if (this.checked) { s.useBaiBaiBook = false; s.useAnima = false; }
         saveSettingsDebounced();
-        if (this.checked) memory.abortRebuild();
+        memory.abortAll();
+        renderMemorySection();
+    });
+    $in('#sp-mem-database-worldbook').on('change', function () {
+        const value = normalizeDatabaseWorldbookName(this.value);
+        getSettings().databaseWorldbookName = value;
+        this.value = value;
+        saveSettingsDebounced();
         renderMemorySection();
     });
     $in('#sp-mem-anima-recall').on('change', function () {
@@ -9144,6 +6768,7 @@ function bindMemoryHandlers() {
     $in('#sp-mem-enabled').on('change', function () {
         getSettings().memoryEnabled = this.checked;
         saveSettingsDebounced();
+        if (!this.checked) memory.abortAll();
     });
     $in('#sp-mem-l0').on('change', function () {
         const v = Math.max(1, Math.min(30, parseInt(this.value, 10) || 5));
@@ -9252,7 +6877,7 @@ function bindMemoryHandlers() {
             });
             showToast('补齐完成');
         } catch (err) {
-            showToast('补齐失败：' + err.message, null, true);
+            showToast('补齐失败：' + diagnosticMessage(err), null, true);
         } finally {
             $(this).prop('disabled', false);
             setMemoryProgressVisible(false);
@@ -9282,7 +6907,7 @@ function bindMemoryHandlers() {
             });
             showToast(wasAborted ? '已中止，已还原到重构前的记忆' : '重构完成');
         } catch (err) {
-            showToast('重构失败：' + err.message, null, true);
+            showToast('重构失败：' + diagnosticMessage(err), null, true);
         } finally {
             $(this).prop('disabled', false);
             setMemoryProgressVisible(false);
@@ -9360,7 +6985,7 @@ async function renderWiList() {
     try {
         entries = await getCharBookEntries(ctx);
     } catch (err) {
-        $list.html(`<span class="sp-cfg-hint">加载失败：${escapeHtml(err.message || '未知错误')}</span>`);
+        $list.html(`<span class="sp-cfg-hint">加载失败：${escapeHtml(diagnosticMessage(err))}</span>`);
         return;
     }
 
@@ -9890,9 +7515,7 @@ function applyTheme(theme) {
         if (forced) wrapper.classList.add(`sp-forced-${theme}`);
     }
     syncVectorGlyphTheme(document, theme, forced);
-    // 坐标全屏快照的字/底色是按 currentTheme 烘死内联进嵌套 shadow 的（renderAnchorFull），变量级
-    // 换类救不到；正看全文快照时重渲一次让它跟主题（覆盖手动切主题 + ST 自动跟随两条路径）。
-    if (_anchorView.level === 'full' && _anchorCurrentItem) renderAnchorFull(_anchorCurrentItem.id);
+    coordinateRuntime?.feature?.onThemeChanged?.(theme);
 }
 
 // ─── Theme mode toggle (day / night / auto) ─────────────────────────────────

@@ -197,6 +197,17 @@ function almMapType(t) {
     return 'custom';
 }
 
+// 仅用于新解析出的 AI 历说明：旧存档、用户手填和通用 repository normalize 均不调用。
+// 句末闭合引号/括号存在时，把补出的句号放在闭合符号内，避免生成「……”。」一类倒置标点。
+export function normalizeAlmanacNoteTerminal(value) {
+    const text = String(value ?? '').trim();
+    if (!text) return '';
+    const closing = text.match(/([”’"'》】）)\]\}〉」』〕〗〙〛]+)$/u)?.[1] || '';
+    const body = closing ? text.slice(0, -closing.length).trimEnd() : text;
+    if (/[。！？.!?…]$/u.test(body)) return text;
+    return closing ? `${body}。${closing}` : `${text}。`;
+}
+
 function parseAlmanacWidget(raw) {
     const s = String(raw || '');
     const m = s.match(/<almanac_widget>([\s\S]*?)<\/almanac_widget>/i);
@@ -220,6 +231,8 @@ function parseAlmanacWidget(raw) {
         });
         if (it) out.push(it);
     }
+    // 必须等所有续行救援完成后再补一次句末标点；否则会在续行中间提前插入句号。
+    for (const item of out) item.note = normalizeAlmanacNoteTerminal(item.note);
     return out;
 }
 
