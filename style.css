@@ -993,45 +993,78 @@ select.sp-input { appearance: none; cursor: pointer; }
 }
 
 /* ─── Settings sections (collapsible) ───────────────────────────────────────── */
-.sp-settings-section {
-    border-bottom: 1px solid var(--sp-divider);
+:root {
+    --sp-settings-inline-indent: 16px;
+    --sp-settings-disclosure-width: 14px;
+    --sp-settings-disclosure-gap: 8px;
+    --sp-settings-content-indent: calc(var(--sp-settings-inline-indent) + var(--sp-settings-disclosure-width) + var(--sp-settings-disclosure-gap));
 }
-.sp-settings-section:last-child { border-bottom: none; }
+.sp-settings-section {
+    border-bottom: none;
+}
 
 .sp-settings-section-title {
     display      : flex;
     align-items  : center;
-    padding      : 11px 16px;
+    padding      : 11px var(--sp-settings-inline-indent);
     font-size    : var(--sp-fs-82);
     font-weight  : 600;
     color        : var(--sp-on-surface);
     cursor       : pointer;
     user-select  : none;
     list-style   : none;
-    gap          : 8px;
+    gap          : var(--sp-settings-disclosure-gap);
 }
 .sp-settings-section-title::-webkit-details-marker { display: none; }
 .sp-settings-section-title::before {
     content    : '▶';
     font-size  : var(--sp-fs-58);
+    line-height: 1;
     color      : var(--sp-subtle);
     transition : transform 0.18s;
-    display    : inline-block;
-    flex-shrink: 0;
+    display    : inline-flex;
+    flex: 0 0 var(--sp-settings-disclosure-width);
+    width: var(--sp-settings-disclosure-width);
+    height: var(--sp-settings-disclosure-width);
+    text-align: center;
+    align-items: center;
+    justify-content: center;
+    transform-origin: 50% 50%;
 }
-.sp-settings-section[open] .sp-settings-section-title::before { transform: rotate(90deg); }
+.sp-settings-section[open] > .sp-settings-section-title::before { transform: rotate(90deg); }
 .sp-settings-section-title:hover { background: var(--sp-hover-bg); }
+
+/* 静态设置组仍沿用同一层级和留白，但不显示折叠提示。 */
+.sp-settings-section-static > .sp-settings-section-title {
+    cursor: default;
+    padding-left: var(--sp-settings-content-indent);
+}
+.sp-settings-section-static > .sp-settings-section-title::before { display: none; }
+.sp-settings-section-static > .sp-settings-section-title:hover { background: transparent; }
+.sp-settings-section-static > .sp-settings-section-body { padding-left: var(--sp-settings-inline-indent); }
 
 .sp-settings-section-body {
     display       : flex;
     flex-direction: column;
     gap           : 8px;
-    padding       : 4px 16px 14px;
+    padding       : 8px var(--sp-settings-inline-indent) 14px var(--sp-settings-content-indent);
     background    : var(--sp-surface);
 }
 
-/* ─── Settings layers (三层收纳盒：基础 / 模块 / 高级) ─────────────────────────── */
-.sp-settings-layer:not(:last-child) { border-bottom: 1px solid var(--sp-divider); }
+/* 顶部总开关是单个设置，不再伪装成可展开的层级。 */
+.sp-settings-total-row {
+    display       : flex;
+    flex-direction: column;
+    gap           : 5px;
+    padding       : 12px 16px 13px;
+    border-bottom : 1px solid var(--sp-divider);
+    background    : var(--sp-surface);
+}
+.sp-settings-total-row .sp-mode-opt { gap: 8px; }
+.sp-settings-total-row .sp-cfg-hint { margin: 0; padding-left: 24px; }
+
+/* ─── Settings layers (五组收纳盒) ───────────────────────────────────────────── */
+.sp-settings-layer:not(:last-child) { border-bottom: none; }
 .sp-settings-layer-title {
     display       : flex;
     align-items   : center;
@@ -1045,21 +1078,218 @@ select.sp-input { appearance: none; cursor: pointer; }
     user-select   : none;
     list-style    : none;
     background    : var(--sp-hover-bg);
+    border-radius : 0;
 }
 .sp-settings-layer-title::-webkit-details-marker { display: none; }
 .sp-settings-layer-title::before {
-    content    : '▾';
-    font-size  : var(--sp-fs-72);
+    content    : '▶';
+    font-size  : var(--sp-fs-58);
+    line-height: 1;
     color      : var(--sp-subtle);
     transition : transform 0.18s;
-    display    : inline-block;
-    flex-shrink: 0;
+    display    : inline-flex;
+    flex: 0 0 var(--sp-settings-disclosure-width);
+    width: var(--sp-settings-disclosure-width);
+    height: var(--sp-settings-disclosure-width);
+    text-align: center;
+    align-items: center;
+    justify-content: center;
+    transform-origin: 50% 50%;
 }
-.sp-settings-layer:not([open]) > .sp-settings-layer-title::before { transform: rotate(-90deg); }
+.sp-settings-layer[open] > .sp-settings-layer-title::before { transform: rotate(90deg); }
 .sp-settings-layer-title:hover { background: var(--sp-divider); }
+.sp-settings-layer-static > .sp-settings-layer-title {
+    cursor: default;
+}
+.sp-settings-layer-static > .sp-settings-layer-title::before { display: none; }
+.sp-settings-layer-static > .sp-settings-layer-title:hover { background: var(--sp-hover-bg); }
+.sp-settings-layer-body { padding: 0; }
+.sp-settings-subsection {
+    margin: 6px 0;
+    border: 1px solid var(--sp-divider);
+    border-radius: 6px;
+    background: color-mix(in oklab, var(--sp-surface) 92%, var(--sp-hover-bg));
+}
+.sp-settings-subsection > summary {
+    padding: 8px 12px;
+    cursor: pointer;
+    color: var(--sp-subtle);
+    font-size: var(--sp-fs-80);
+    font-weight: 600;
+}
+.sp-settings-subsection > :not(summary) { margin-left: 12px; margin-right: 12px; }
+.sp-settings-subsection > :last-child { margin-bottom: 10px; }
+.sp-settings-subsection-static {
+    padding-bottom: 2px;
+}
+.sp-settings-subsection-static > .sp-settings-subsection-title {
+    padding: 8px 12px 4px;
+    margin-left: 0;
+    margin-right: 0;
+    color: var(--sp-subtle);
+    font-size: var(--sp-fs-80);
+    font-weight: 600;
+}
+.sp-settings-subsection-static > :not(.sp-settings-subsection-title) {
+    margin-left: 12px;
+    margin-right: 12px;
+}
+.sp-settings-subsection-static > :last-child { margin-bottom: 8px; }
 /* 嵌套 section 读作层的子项：标题略缩进，层内最后一节去掉分隔线让层色带干净 */
 .sp-settings-layer-body > .sp-settings-section:last-child { border-bottom: none; }
-.sp-settings-layer-body > .sp-settings-section > .sp-settings-section-title { padding-left: 26px; }
+.sp-settings-layer-body > .sp-settings-section > .sp-settings-section-title { padding-left: var(--sp-settings-inline-indent); }
+#sp-inject-master-section > .sp-settings-section-title {
+    padding-left: var(--sp-settings-content-indent);
+}
+
+/* 提示词抽屉是连续的编辑列表；内部间距由容器统一管理，避免零散 inline margin。 */
+#sp-prompts-section > .sp-settings-section-body { gap: 6px; padding: 10px 12px 16px; }
+#sp-prompts-section .sp-settings-subsection {
+    margin: 2px 0;
+    padding: 0 12px;
+    overflow: hidden;
+}
+#sp-prompts-section .sp-settings-subsection[open] {
+    padding-bottom: 12px;
+}
+#sp-prompts-section .sp-settings-subsection > summary {
+    margin: 0 -12px;
+    padding: 8px 12px;
+}
+#sp-prompts-section .sp-settings-subsection > :not(summary) {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    margin-inline: 0;
+}
+#sp-prompts-section .sp-settings-subsection > p.sp-cfg-hint,
+#sp-prompts-section .sp-settings-subsection > .sp-cfg-label,
+#sp-prompts-section .sp-settings-subsection > textarea,
+#sp-prompts-section .sp-settings-subsection > div {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+#sp-prompts-section .sp-settings-subsection[open] {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+#sp-prompts-section .sp-settings-subsection[open] > summary { margin-bottom: 0; }
+
+/* 标签清洗：说明与输入项成组排列，避免统一 gap 把上下关系拉散。 */
+#sp-prompts-section .sp-prompt-tags[open] {
+    gap: 0;
+    margin-top: 2px;
+    margin-bottom: 2px;
+}
+#sp-prompts-section .sp-prompt-tags > .sp-cfg-hint:first-of-type {
+    margin-bottom: 6px;
+}
+#sp-prompts-section .sp-prompt-tags > .sp-tag-opt {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+#sp-prompts-section .sp-prompt-tags > .sp-tag-opt + .sp-cfg-hint {
+    margin-top: 4px;
+    margin-bottom: 6px;
+}
+
+#sp-prompts-section .sp-prompt-global[open] {
+    gap: 0;
+}
+#sp-prompts-section .sp-prompt-global > textarea {
+    margin-top: 10px !important;
+}
+
+/* 各提示词编辑项：上一行说明与下方文本框必须有明确的视觉断开。 */
+#sp-prompts-section .sp-prompt-storyclock > textarea,
+#sp-prompts-section .sp-prompt-space > textarea,
+#sp-prompts-section .sp-prompt-theater-write > textarea {
+    margin-top: 8px !important;
+}
+#sp-prompts-section .sp-prompt-space > .sp-cfg-label,
+#sp-prompts-section .sp-prompt-theater-write > .sp-cfg-label {
+    margin-bottom: 0;
+}
+
+/* 提示词胶囊使用本区专属箭头，固定槽位避免标题文字随状态跳动。 */
+#sp-prompts-section .sp-settings-subsection > summary {
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-settings-disclosure-gap);
+}
+#sp-prompts-section .sp-settings-subsection > summary::-webkit-details-marker { display: none; }
+#sp-prompts-section .sp-settings-subsection > summary::before {
+    content: '▶';
+    flex: 0 0 var(--sp-settings-disclosure-width);
+    width: var(--sp-settings-disclosure-width);
+    height: var(--sp-settings-disclosure-width);
+    text-align: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--sp-fs-58);
+    line-height: 1;
+    color: var(--sp-subtle);
+    transition: transform 0.18s;
+    transform-origin: 50% 50%;
+}
+#sp-prompts-section .sp-settings-subsection[open] > summary::before { transform: rotate(90deg); }
+#sp-prompts-section .sp-prompt-global > .sp-cfg-hint { margin-top: 4px; }
+#sp-content-switches-section .sp-dashed-keep-row { padding-left: calc(var(--sp-settings-disclosure-width) + var(--sp-settings-disclosure-gap)); }
+
+#sp-prompts-section .sp-settings-subsection .sp-tag-opt {
+    gap: 8px;
+    min-width: 0;
+}
+#sp-prompts-section .sp-settings-subsection .sp-tag-input {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+#sp-prompts-section .sp-settings-subsection .sp-cfg-label + textarea,
+#sp-prompts-section .sp-settings-subsection textarea {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    min-width: 0;
+}
+
+/* 字体组与后续显示/通知设置之间使用统一 divider token。 */
+.sp-settings-display-divider { margin: 4px 0 2px; }
+.sp-settings-compat-group { display: contents; }
+
+/* 推进四项和提示词各项均按同一 section 层级对齐。 */
+#sp-settings-pace > .sp-settings-layer-body > .sp-settings-section-title,
+#sp-settings-pace > .sp-settings-layer-body > .sp-settings-section > .sp-settings-section-title {
+    padding-left: 16px;
+}
+#sp-settings-pace > .sp-settings-layer-body > .sp-settings-section > .sp-settings-section-body {
+    padding-left: var(--sp-settings-content-indent);
+}
+#sp-settings-content .sp-mode-opt,
+#sp-settings-pace .sp-mode-opt { gap: 8px; }
+.sp-settings-section-body .sp-mode-opt + .sp-cfg-hint,
+#sp-module-injection-section .sp-cfg-hint {
+    padding-left: calc(var(--sp-settings-disclosure-width) + var(--sp-settings-disclosure-gap));
+}
+#sp-module-injection-section > .sp-settings-section-body {
+    gap: 4px;
+    padding-top: 8px;
+}
+#sp-module-injection-section .sp-settings-subsection-static {
+    padding: 0 0 3px;
+    border: 0;
+    background: transparent;
+}
+#sp-module-injection-section .sp-settings-subsection-static > .sp-settings-subsection-title {
+    padding: 3px 0 4px;
+}
+#sp-module-injection-section .sp-settings-subsection-static > :not(.sp-settings-subsection-title) {
+    margin-left: 0;
+    margin-right: 0;
+}
 
 /* ─── World-info entry checklist ─────────────────────────────────────────────── */
 .sp-wi-list {
@@ -1764,11 +1994,15 @@ select.sp-input { appearance: none; cursor: pointer; }
     flex-shrink: 0;
 }
 .sp-type-world     { border-left: 3px solid #4fc3f7; }
-.sp-type-major     { border-left: 3px solid #ffb74d; }
+.sp-type-major     { border-left: 3px solid #b08968; }
 .sp-type-character { border-left: 3px solid #f48fb1; }
 .sp-type-world     .sp-type-badge { color: #4fc3f7; }
-.sp-type-major     .sp-type-badge { color: #ffb74d; }
+.sp-type-major     .sp-type-badge { color: #b08968; }
 .sp-type-character .sp-type-badge { color: #f48fb1; }
+.sp-point-adult-badge { display: inline-flex; align-items: center; padding: 1px 4px; border-radius: 3px; font-size: var(--sp-fs-62); font-weight: 700; color: #8a6500; background: #f4d77a; line-height: 1.1; }
+.sp-event.sp-event-pinned.sp-type-world     { border-left-color: #287fa3; }
+.sp-event.sp-event-pinned.sp-type-major     { border-left-color: #76583f; }
+.sp-event.sp-event-pinned.sp-type-character { border-left-color: #a85f78; }
 
 .sp-event-title { font-size: var(--sp-fs-88); font-weight: 500; color: var(--sp-on-surface); line-height: 1.35; }
 .sp-event-time  { font-family: 'Roboto Mono', monospace; font-size: var(--sp-fs-73); color: var(--sp-subtle); min-width: 0; overflow-wrap: anywhere; }
@@ -2353,6 +2587,35 @@ select.sp-input { appearance: none; cursor: pointer; }
     text-overflow: ellipsis;
     white-space  : nowrap;
 }
+.sp-outline-wrap .sp-beat-meta {
+    display    : flex;
+    align-items: center;
+    gap        : 6px;
+    flex       : 0 1 auto;
+    min-width  : 0;
+    max-width  : 100%;
+    overflow   : hidden;
+}
+.sp-outline-wrap .sp-beat-meta .sp-beat-time {
+    flex       : 1 1 auto;
+    width      : max-content;
+    min-width  : 0;
+    max-width  : 100%;
+    overflow   : hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.sp-outline-wrap .sp-beat-meta .sp-beat-type {
+    flex       : 0 0 auto;
+    min-width  : 0;
+    max-width  : 100%;
+    overflow   : hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.sp-outline-wrap .sp-beat-meta .sp-beat-time:empty {
+    display: none;
+}
 .sp-line-card .sp-beat-type {
     flex-basis: auto;
     max-width : 8em;
@@ -2444,6 +2707,12 @@ select.sp-input { appearance: none; cursor: pointer; }
     max-width    : 100%;
     box-sizing   : border-box;
     overflow-wrap: anywhere;
+}
+.sp-line-card .sp-beat-scene {
+    padding      : 0;
+    background   : transparent;
+    border-radius: 0;
+    border-left  : none;
 }
 .sp-beat-subtext {
     font-size   : var(--sp-fs-80);
@@ -2771,6 +3040,11 @@ select.sp-input { appearance: none; cursor: pointer; }
     color       : inherit;
     font        : inherit;
     box-sizing  : border-box;
+}
+.sp-root .sp-chat-msg-editor {
+    min-height: 7em;
+    max-height: calc(100dvh - 120px);
+    overflow-y: auto;
 }
 .sp-chat-msg-actions.sp-chat-msg-editing {
     opacity   : 1;
@@ -3335,6 +3609,45 @@ select.sp-input { appearance: none; cursor: pointer; }
     flex-direction: column;
     gap           : 10px;
 }
+.sp-dialog-editor-sheet {
+    background-color: var(--sp-sheet-bg-legacy);
+    background-image: linear-gradient(var(--sp-sheet-bg), var(--sp-sheet-bg));
+    width     : min(680px, calc(100vw - 40px));
+    max-height: calc(100dvh - 40px);
+    overflow-y: auto;
+}
+.sp-dialog-editor-sheet .sp-dialog-custom-input,
+.sp-dialog-editor-sheet .sp-dialog-input {
+    background-color: var(--sp-sheet-bg-legacy);
+    background-image: linear-gradient(var(--sp-sheet-bg), var(--sp-sheet-bg));
+}
+.sp-dialog-editor-sheet .sp-dialog-custom-input {
+    min-height: 120px;
+    resize    : vertical;
+    overflow-y: auto;
+}
+.sp-dialog-editor-fields {
+    display       : flex;
+    flex-direction: column;
+}
+.sp-dialog-editor-fields .sp-dialog-field {
+    display       : flex;
+    flex-direction: column;
+    min-width     : 0;
+    gap           : 6px;
+}
+.sp-dialog-editor-fields .sp-dialog-field > span { font-size: var(--sp-fs-92); }
+.sp-dialog-editor-fields .sp-dialog-divider {
+    height    : 1px;
+    margin    : 14px 0;
+    background: var(--sp-divider);
+}
+@media (max-width: 640px) {
+    .sp-dialog-editor-sheet {
+        width     : 100%;
+        max-height: calc(100dvh - 20px);
+    }
+}
 .sp-dialog-head {
     font-size  : var(--sp-fs-95);
     font-weight: 600;
@@ -3836,7 +4149,6 @@ select.sp-input { appearance: none; cursor: pointer; }
 
 /* 锁定态卡片：左边框改用主色调、轻微底色区分，一眼看出"保命线" */
 .sp-line-card.sp-line-pinned {
-    border-left-color: var(--sp-primary) !important;
     background       : rgba(125, 125, 235, 0.05);
 }
 
@@ -3871,7 +4183,6 @@ select.sp-input { appearance: none; cursor: pointer; }
 /* 锁定态点卡片：左内边框主色 + 轻微底色，一眼看出"保留项" */
 .sp-event.sp-event-pinned {
     background : rgba(125, 125, 235, 0.06);
-    box-shadow: inset 3px 0 0 var(--sp-primary);
 }
 /* Only the FIRST .sp-panel-refresh should absorb margin-left:auto —
    the header already sets that. Sibling refresh buttons stack next to it. */
@@ -4058,6 +4369,11 @@ select.sp-input { appearance: none; cursor: pointer; }
     resize     : vertical;
     line-height: 1.5;
     font-family: var(--sp-font);
+}
+.sp-root .sp-theater-textarea {
+    min-height: 180px;
+    max-height: 50dvh;
+    overflow-y: auto;
 }
 .sp-theater-input-area .sp-theater-btn-row {
     display        : flex;
@@ -4385,6 +4701,11 @@ body.sp-anchor-fs-lock { overflow: hidden; }
     line-height: 1.5;
     font-family: var(--sp-font);
 }
+.sp-root .sp-theater-cfg-textarea {
+    min-height: 140px;
+    max-height: 45dvh;
+    overflow-y: auto;
+}
 /* ── Template manager (settings) ── */
 .sp-theater-tpl-mgr {
     display       : flex;
@@ -4476,6 +4797,11 @@ body.sp-anchor-fs-lock { overflow: hidden; }
     resize     : vertical;
     line-height: 1.5;
     font-family: var(--sp-font);
+}
+.sp-root .sp-theater-tpl-add-row textarea {
+    min-height: 120px;
+    max-height: 40dvh;
+    overflow-y: auto;
 }
 .sp-theater-tpl-add-row #sp-theater-tpl-add { align-self: flex-end; }
 
@@ -5974,7 +6300,9 @@ body.sp-anchor-fs-lock { overflow: hidden; }
     background    : color-mix(in oklab, var(--SmartThemeQuoteColor, #6bb6d6) 12%, rgba(128,128,128,0.06));
     border        : 1px solid color-mix(in oklab, var(--SmartThemeQuoteColor, #6bb6d6) 22%, rgba(128,128,128,0.12));
 }
-.sp-dash-today-md   { font-size: var(--sp-fs-115); font-weight: 800; line-height: 1.1; letter-spacing: 0.01em; }
+.sp-dash-today-md   { min-width: 0; max-width: 100%; display: flex; flex-direction: column; align-items: center; font-weight: 800; line-height: 1.1; letter-spacing: 0.01em; }
+.sp-dash-today-month { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--sp-fs-68); }
+.sp-dash-today-day   { font-size: var(--sp-fs-115); white-space: nowrap; }
 .sp-dash-today-wd   { font-size: var(--sp-fs-68); opacity: 0.7; margin-top: 1px; }
 .sp-dash-today-meta { font-size: var(--sp-fs-72); margin-top: 2px; opacity: 0.85; display: flex; align-items: center; justify-content: center; gap: 3px; max-width: 100%; }
 .sp-dash-today-wx   { flex: 0 0 auto; }
