@@ -1,4 +1,4 @@
-// store.js — 构画统一存储层（点/线/面/间 → chat_metadata）
+// store.js — 构画统一存储层（点/线/面/间/虚线/历/历法/日期锚 → chat_metadata）
 //
 // 背景：点(schedule)/线(lines)/面(outline)/面讨论(creative-chat)/间(space-chat) 原本散落在
 // localStorage（key = sp-cache-{chatId}-{kind}-{scope}，见 state.js），换浏览器/清缓存就丢，
@@ -19,6 +19,9 @@
 //       'dashed-user'        : { items: [ { id, text, createdAt, locked }, ... ], ts },
 //       'creative-chat-user' : [ { role, content }, ... ],
 //       'space-chat-user'    : [ ... ],
+//       'almanac-user'       : { items: [ ... ], ts },
+//       'caldesc-user'      : { raw, ts }, 'caldesc-fallback-user': { raw, ts },
+//       'date-anchor-user'  : { raw, ts },
 //     }
 //   }
 //
@@ -33,7 +36,7 @@ const SCHEMA_VERSION = 1;
 // 构画自己拥有的 chat_metadata 顶层 key。面板据此区分"构画 vs 别的插件"，也是 clearOwnKey 的白名单。
 export const OWN_KEYS = ['sp-store', 'sp-memory', 'sp-theater', 'sp-ledger'];
 
-// 收进 sp-store 的 7 类数据（theater-draft 是设备相关的草稿，留 localStorage，不在此列）。
+// sp-store 收纳用户可清理数据与 internal 数据；theater-draft 是设备相关草稿，留 localStorage。
 // dashed（虚线·冷知识）与 almanac（历）都不分视角，运行时固定走 user scope（子键恒为 dashed-user / almanac-user）。
 // 顺序无所谓，但注意没有任何一个是另一个的前缀——子键解析(usageByKind/clearKind)依赖这点。
 export const KINDS = ['schedule', 'outline', 'lines', 'creative-chat', 'space-chat', 'dashed', 'almanac', 'caldesc', 'caldesc-fallback', 'date-anchor'];
@@ -159,34 +162,10 @@ export function writeBatch(entries) {
     return true;
 }
 
-function _clone(value) { return value === undefined ? undefined : JSON.parse(JSON.stringify(value)); }
 function _applyBatch(list) {
     const s = store(true); if (!s) return false;
     for (const it of list) { const key = subKey(it.kind, it.view, it.charName); if (it.value == null) delete s.data[key]; else s.data[key] = it.value; }
     return true;
-}
-
-export function stageBatch(entries, { expectedChatId } = {}) {
-    if (expectedChatId == null || getContext?.()?.chatId !== expectedChatId) return null;
-    const list = Array.isArray(entries) ? entries.filter(it => it?.kind) : [];
-    const s = store(true); if (!s || !list.length) return null;
-    const before = list.map(it => { const key = subKey(it.kind, it.view, it.charName); return { key, existed: Object.prototype.hasOwnProperty.call(s.data, key), value: _clone(s.data[key]) }; });
-    if (!_applyBatch(list)) return null;
-    return { token: `store-${Date.now()}-${Math.random()}`, chatId: expectedChatId, before, entries: list.map(it => ({ ...it })), staged: true };
-}
-
-export function verifyBatch(token) {
-    if (!token?.staged || getContext?.()?.chatId !== token.chatId) return false;
-    const s = store(false); if (!s) return false;
-    return token.entries.every(it => { const key = subKey(it.kind, it.view, it.charName); return JSON.stringify(s.data[key] ?? null) === JSON.stringify(it.value ?? null); });
-}
-
-export function restoreBatch(token) {
-    if (!token?.staged || getContext?.()?.chatId !== token.chatId) return { ok: false, reason: 'chat-mismatch' };
-    const s = store(false); if (!s) return { ok: false, reason: 'no-store' };
-    for (const item of token.before) { if (JSON.stringify(s.data[item.key] ?? null) !== JSON.stringify(token.entries.find(it => subKey(it.kind, it.view, it.charName) === item.key)?.value ?? null)) return { ok: false, reason: 'content-mismatch' }; }
-    for (const item of token.before) { if (item.existed) s.data[item.key] = _clone(item.value); else delete s.data[item.key]; }
-    return { ok: true };
 }
 
 export function removeData(kind, view = 'user', charName = '') {
@@ -206,7 +185,7 @@ export function writeRaw(subKeyStr, value) {
 }
 
 // char 视角最近填过的名字（每卡一份：随 sp-store 进 chat_metadata，换卡即换一份）。
-// 存原始子键 'charnames-recent'——不属于 6 类 kind，kindOfSubKey 返回 null，故用量统计/按 kind 清理
+// 存原始子键 'charnames-recent'——不属于 KINDS，kindOfSubKey 返回 null，故用量统计/按 kind 清理
 // 都会跳过它，只在整个 sp-store 被清时一起没（符合"边角便利、跟着聊天走"定位）。
 const CHARNAMES_SUBKEY = 'charnames-recent';
 export function readRecentCharNames() {
@@ -233,7 +212,7 @@ export function pushRecentCharName(name, max = 3) {
 // 查看任意角色（含 NPC/反派）都不占槽；想固定才主动 addPinnedChar，满 PIN_CAP 就拒绝加。
 // 同存原始子键 'char-pins'——不属 KINDS，用量统计/按 kind 清理都跳过，只随整份 sp-store 清空。
 const CHARPINS_SUBKEY = 'char-pins';
-export const PIN_CAP = 3;
+export const PIN_CAP = 5;
 export function readPinnedChars() {
     const s = store();
     if (!s) return [];
@@ -292,7 +271,7 @@ export function isStorageDataKeyClearable(dataKey) {
     return String(dataKey || '') === 'almanac-user';
 }
 
-// 本 chat 各 kind 用量：{ schedule, outline, lines, 'creative-chat', 'space-chat' } → 字节数。
+// 本 chat 各 KINDS 项用量 → 字节数。
 export function usageByKind() {
     const out = {};
     for (const k of KINDS) out[k] = 0;
@@ -357,15 +336,15 @@ export async function clearKindAsync(kind) {
     }
 }
 
-// 某个构画自有顶层 key（sp-store / sp-memory / sp-theater）当前占用字节。
+// 某个构画自有顶层 key（如 sp-store / sp-memory / sp-theater / sp-ledger）当前占用字节。
 export function ownKeyBytes(key) {
     const cm = getContext?.()?.chatMetadata;
     if (!cm || cm[key] == null) return 0;
     return valueBytes(cm[key]) + String(key).length * 2;
 }
 
-// 整体删掉一个构画自有 key（面板"清空本聊天全部点线面间 / 清空记忆 / 清空棱永久"用）。
-// 安全阀：只允许 OWN_KEYS 里的 key，别的插件的数据一律拒删。
+// 整体删掉一个构画自有顶层 key（由存储管理面板按白名单调用）。
+// 安全阀：只允许 OWN_KEYS 里的独立顶层 key，别的插件的数据一律拒删；不会清空 sp-store 内部数据。
 export function clearOwnKey(key) {
     if (!OWN_KEYS.includes(key) || key === STORE_KEY) return false;
     const cm = getContext?.()?.chatMetadata;

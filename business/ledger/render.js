@@ -1,6 +1,6 @@
 // ─── 刻度（ledger）域 · 渲染 / 编辑 / 批量交互 ────────────────────────────────
-// 从 index.js 迁入「暗账页」（历面板第三 sheet）整套：条目行/内联编辑窗/批量条/暗账列表。
-// 按 Lead 裁定 Option B 独立成 ledger 渲染子模块；ledger 数据层位于同域 repository.js。
+// 从 index.js 迁入「轴面板刻度页」整套：条目行/内联编辑窗/批量条/暗账列表。
+// 按 Option B 独立成 ledger 渲染子模块；ledger 数据层位于同域 repository.js。
 // axis 编排器（axis/panel 的 renderAlmanacPanel）经本模块导出的 renderLedgerSheet/renderLedgerEditor 调用；
 // 本模块反向经 env 调 renderAlmanacPanel（避免与 axis/panel 形成 ESM 循环 import）。
 //
@@ -263,6 +263,7 @@ export function renderLedgerControls() {
     return `<div class="sp-ledger-ctrl">
         <button type="button" class="sp-mini-btn sp-ledger-pill sp-ledger-capture-now${busy ? ' sp-ledger-capture-busy' : ''}" title="${busy ? '再次点击可中止当前标注' : '立即标注一次'}" aria-busy="${busy ? 'true' : 'false'}" aria-disabled="false">${busy ? (progress ? `中止标注（${progress.done}/${progress.total} 批）` : '中止标注') : '标注'}</button>
         <button type="button" class="sp-mini-btn sp-ledger-pill sp-ledger-judge-now" title="立即判定一次（更新现状 / 了结）" ${judging ? 'disabled' : ''}>${judging ? '更新中…' : '更新'}</button>
+        ${_batchScope === 'ledger-active' ? '' : batchBarHtml('ledger-active', ledger.listEntries().length, '批量归档', false)}
     </div>`;
 }
 
@@ -288,5 +289,6 @@ export function renderLedgerSheet({ includeControls = true } = {}) {
             : `暂无活跃刻度条目。聊几楼后${on ? '自动标注' : '（先勾上「自动标注」）'}，或点右上「立即标注」。`;
         return (includeControls ? renderLedgerControls() : '') + `<div class="sp-ledger-empty">${hint}</div>` + archive;
     }
-    return (includeControls ? renderLedgerControls() : '') + batchBarHtml('ledger-active', entries.length, '批量归档', false) + `<div class="sp-ledger-list">${entries.map(e => ledgerRowHtml(e, cal)).join('')}</div>` + archive;
+    const activeBatch = _batchScope === 'ledger-active' ? batchBarHtml('ledger-active', entries.length, '批量归档', false) : '';
+    return (includeControls ? renderLedgerControls() : '') + activeBatch + `<div class="sp-ledger-list">${entries.map(e => ledgerRowHtml(e, cal)).join('')}</div>` + archive;
 }

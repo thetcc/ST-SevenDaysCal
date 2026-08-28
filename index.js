@@ -38,8 +38,8 @@ import {
 } from './time-travel.js';
 import { escapeHtml, escapeAttr, autoGrowTextarea, cleanText } from './utils/dom.js';
 import { _cnToNumber, _CN_MONTH_ALIAS, extractDayFromTime } from './utils/cn-date.js';
-import { weatherGlyph, weatherChipHtml, fmtAnchorTs, maskKey } from './utils/format.js';
-import { getSettings, parseExcludeParams, loadCfg, loadUtilityCfg, saveCfg, loadApiPresets, genPresetId, upsertApiPreset, deleteApiPreset, renameApiPreset, fabEnabled, pluginEnabled, injectEnabled, getLinesInterval, saveLinesInterval, getLinesMode, saveLinesMode } from './runtime/settings.js';
+import { weatherGlyph, maskKey } from './utils/format.js';
+import { getSettings, parseExcludeParams, loadCfg, loadUtilityCfg, saveCfg, loadApiPresets, upsertApiPreset, deleteApiPreset, renameApiPreset, fabEnabled, pluginEnabled, injectEnabled, getLinesInterval, saveLinesInterval, getLinesMode, saveLinesMode } from './runtime/settings.js';
 import { postChatCompletion, callCustomApi, callMemoryApi, callTheaterApi, bindApiClient, GEN_TEMPERATURE } from './api/client.js';
 import { normalizeApiUrl } from './api/sse.js';
 import { safeDiagnosticLog, diagnosticMessage, makeDiagnosticError, shouldNotifyGeneration, classifyGenerationError } from './api/diagnostics.js';
@@ -61,26 +61,19 @@ import {
     ALM_CHAT_SCAN_LIMIT,
     almDayOfYear,
     ALM_WEEKDAYS,
-    parseWeekdayToken,
-    _WEEKDAY_ADJ_RE,
-    weekdayAdjacent,
     validRealDate,
     almMonthDayFromDoy,
     almEndMonthDay,
     almItemCoversDoy,
     getCalDescInjectText,
-    almMapType,
     parseAlmanacWidget,
     parseEraWidget,
     almDedupKey,
     mergeAlmanac,
     loadCalDesc,
     getCalDescKey,
-    normalizeCalDesc,
     saveCalDesc,
-    ALM_DAYS_IN_MONTH,
     DEFAULT_CAL,
-    _cal,
     calYearLen,
     calMonthCount,
     calMonthDays,
@@ -93,10 +86,8 @@ import {
     loadCalendarTemplates,
     saveCalendarTemplates,
     calendarTemplateId,
-    renameCalendarTemplate,
     calendarTemplateBindings,
     sortCalendarTemplatesForCurrent,
-    almDateFromChat,
 } from './business/axis/data.js';
 import {
     calendarSummary,
@@ -106,7 +97,7 @@ import {
 // 轴锚点/周几/距今/将至排序已抽出到 business/axis/anchor.js；index.js 内部跨域读取器经 bindAxisAnchor 注入。
 import {
     bindAxisAnchor,
-    almTodayAnchor, almDaysUntil, almDaysBetweenFull, almWeekdayRef, almWeekdayFor, sortAlmanacUpcoming,
+    almTodayAnchor, almDaysUntil, almDaysBetweenFull, almWeekdayRef, almWeekdayFor,
 } from './business/axis/anchor.js';
 // 历注入文本构造（纯函数，仅依赖 data.js/anchor.js）已抽出到 business/axis/inject.js。
 import { getAlmanacInjectText } from './business/axis/inject.js';
@@ -114,7 +105,7 @@ import { createAxisPanel } from './business/axis/panel.js';
 import { renderAxisToolbar } from './business/axis/toolbar.js';
 import { renderAxisUpcoming } from './business/axis/upcoming.js';
 import { renderAxisCalendar } from './business/axis/calendar.js';
-import { openAxisEditor, closeAxisEditor, setAxisSheet, selectAxisDay, navigateAxisMonth, createAxisEditorController, renderAxisEditor, renderAxisWeekdayHint } from './business/axis/editor.js';
+import { openAxisEditor, closeAxisEditor, setAxisSheet, navigateAxisMonth, createAxisEditorController, renderAxisEditor, renderAxisWeekdayHint } from './business/axis/editor.js';
 import { createCalendarManager, calendarCards, calendarBindingKey, calendarBoundTemplateId, setCalendarBinding, calendarBindingCandidates } from './business/axis/manager.js';
 import { createAxisUi } from './business/axis/ui.js';
 import { createAxisItemUi } from './business/axis/item-ui.js';
@@ -130,7 +121,7 @@ import { createAxisPromptBuilder } from './business/axis/prompts.js';
 import { createAxisDateContext } from './business/axis/date-context.js';
 import { resolveAlmanacContextText, sanitizeGenerationContextText } from './runtime/generation-context.js';
 import { bindStoryClock, parseStoryClock as parseStoryClockPure, parseJudgedDate as parseJudgedDatePure, latestStoryClock as latestStoryClockPure, storyClockDate as storyClockDatePure, storyWeekdayRef as storyWeekdayRefPure, completeStoryClock as completeStoryClockPure, storyClockNarrativeBody, buildStoryClockPrompt, STORY_CLOCK_KEY, createStoryClockController } from './business/axis/story-clock.js';
-import { createWeekdayConsumerContext, weekdayContextForPoint } from './business/axis/weekday-coordinator.js';
+import { createWeekdayConsumerContext } from './business/axis/weekday-coordinator.js';
 import { buildDateJudgePrompt as buildDateJudgePromptPure } from './business/axis/date-detection.js';
 import { createDateDetectionController } from './business/axis/date-detection.js';
 
@@ -142,7 +133,7 @@ const TERMINAL_STAGES = TERMINAL_LINE_STAGES;
 // ─── 点（日程）域：状态 / 解析 / 提示词 / 渲染 ────────────────────────────────
 // point 业务域已从本文件抽出到 business/point/*，此处仅按需导入（机械迁移，不改行为）。
 import { pointState } from './business/point/state.js';
-import { parseCalendar, validateGeneratedCalendar, bindPointAdultTickets, parsePointEventRecord, firstPointEventBlock, replacePointEventBlock, buildPointInjectText, numberedPointList, mergePinnedPoints, forceStartDate, serializeCalendar } from './business/point/parse.js';
+import { parseCalendar, validateGeneratedCalendar, bindPointAdultTickets, parsePointEventRecord, firstPointEventBlock, replacePointEventBlock, buildPointInjectText, numberedPointList, mergePinnedPoints, forceStartDate } from './business/point/parse.js';
 import { isGregorian as isGregorianCalendar } from './business/calendar/date.js';
 import { buildPrompt } from './business/point/prompt.js';
 import { bindPointRender, renderSchedule, scheduleDayCtx, scheduleDayLabel, TYPE_META } from './business/point/render.js';
@@ -154,7 +145,7 @@ import { createPointController } from './business/point/controller.js';
 import { createPointInlineRenderer } from './business/point/inline.js';
 import { pointTicketPlan } from './business/point/adult.js';
 // ledger 检索前置选择器（纯逻辑三件套）已抽出到 business/ledger/select.js；到期/距今口径经 bindLedgerSelect 注入。
-import { bindLedgerSelect, scoreLedgerEntry, isLedgerSalient, selectLedgerForInject } from './business/ledger/select.js';
+import { bindLedgerSelect, selectLedgerForInject } from './business/ledger/select.js';
 import { bindLedgerDate, ledgerDaysSince, ledgerDueInfo, listJudgeableLedger, fmtLedgerForJudge } from './business/ledger/date.js';
 import { bindLedgerSchema, splitCnList, normGist, parseLedgerCapture as parseLedgerCaptureSchema, parseLedgerJudge as parseLedgerJudgeSchema } from './business/ledger/schema.js';
 import { createLedgerInjectionController } from './business/ledger/inject.js';
@@ -183,13 +174,11 @@ import { createAdvanceStrategy } from './business/lines/strategy.js';
 import { createLinesFeature } from './business/lines/feature.js';
 import { syncVectorGlyphTheme } from './business/lines/vectors/glyph.js';
 import { createOutlineFeature } from './business/outline/feature.js';
-import { editLineDescription } from './business/lines/mutations.js';
-import { editOutlineScene } from './business/outline/schema.js';
 import { createSpaceFeature } from './business/space/feature.js';
 import { getSpaceChatPlaceholder } from './business/space/prompts.js';
-import { makeChatAnchor, normalizeChatAnchor, createChatAnchorRepository, DATE_ANCHOR_STORE_KEY } from './runtime/chat-date-anchor.js';
+import { createChatAnchorRepository } from './runtime/chat-date-anchor.js';
 
-// 坐标唯一 runtime；旧 anchor facade 继续保留兼容导出。
+// 坐标与楼内框各自持有唯一 runtime 句柄。
 let coordinateRuntime = null;
 let inlineFeature = null;
 
@@ -208,15 +197,15 @@ import {
     bindLedgerRender,
     batchReset, resetLedgerRenderState,
     getBatchScope, setBatchScope, getBatchSelected,
-    isLedgerArchiveOpen, toggleLedgerArchiveOpen, getLedgerEditor,
-    ledgerTypeClass, fmtLedgerAnchorDate, ledgerRowHtml,
-    openLedgerEditor, closeLedgerEditor, ledgerMdToInput, renderLedgerEditor,
-    ledgerReadMd, saveLedgerEditor,
+    toggleLedgerArchiveOpen, getLedgerEditor,
+    ledgerTypeClass,
+    openLedgerEditor, closeLedgerEditor, renderLedgerEditor,
+    saveLedgerEditor,
     batchBarHtml, BATCH_SCOPES, batchScopeIds, execBatch, renderLedgerSheet, renderLedgerControls,
 } from './business/ledger/render.js';
 import { formatLedgerList } from './business/ledger/inline.js';
 
-// Ledger 正式事务只走固定聊天目标的 integrity/commitState saver；初始化失败时保持不可用，禁止回退到吞错 saveMetadata。
+// Ledger 优先使用固定聊天目标的 integrity/commitState saver；不支持时回退 best-effort saver，均不支持才保持不可用。
 const ledgerMetadataSaverReady = (() => {
     const advanced = createTargetMetadataSaver({ coreModule: scriptCore });
     return advanced?.supported ? advanced : createBestEffortMetadataSaver({ context: getContext });
@@ -315,9 +304,9 @@ bindApiClient({
     buildMessages,
 });
 
-// 点渲染回调注入：render.js 的 scheduleDayCtx/scheduleDayLabel/renderEvent 需访问本文件的
+// 点渲染回调注入：render.js 的点日期上下文、标签与辅助渲染函数需访问本文件的
 // almTodayAnchor/almWeekdayRef/almWeekdayFor/makeInjectBtn，经 bindPointRender 注入以避免反向依赖（循环引用）。
-bindPointRender({ almTodayAnchor, almWeekdayRef, almWeekdayFor, makeInjectBtn });
+bindPointRender({ almTodayAnchor, almWeekdayRef, almWeekdayFor, makeInjectBtn, settings: getSettings });
 bindPointRepository({ keyDesc, readStore, renderSchedule, loadCalendar: loadCalDesc });
 const pointActions = createPointActions({
     inShadow: $inAll,
@@ -497,7 +486,7 @@ const ledgerJudgeController = createLedgerJudgeController({
     context: getContext,
     target: getLedgerTarget,
     charKey: charStableKey,
-    listJudgeable: () => listJudgeableLedger(),
+    listJudgeable: options => listJudgeableLedger(options),
     fmtLedger: fmtLedgerForJudge,
     config: loadCfg,
     calendar: loadCalDesc,
@@ -516,6 +505,7 @@ const ledgerJudgeController = createLedgerJudgeController({
     dayOfYear: almDayOfYear,
     monthDayFromDoy: almMonthDayFromDoy,
     bridge: bridgeAbortSignal,
+    setFabBusy,
     settings: getSettings,
     toast: showToast,
     refreshInject: refreshLedgerInjection,
@@ -547,8 +537,6 @@ const ledgerSnapshotBridge = createLedgerSnapshotBridge({
     echo: () => ledgerInjectionController.echo,
     write: (id, value) => snapshot.writeSnapshot(id, value),
 });
-const captureSnapshot = () => ledgerSnapshotBridge.capture();
-const captureRecallSnapshot = () => ledgerSnapshotBridge.captureRecall();
 const freezeSnapshotToFloor = mesId => ledgerSnapshotBridge.freeze(mesId);
 const ledgerActions = createLedgerActions({
     get: id => ledger.getEntry(id), lock: id => ledger.lockEntry(id), unlock: id => ledger.unlockEntry(id),
@@ -572,7 +560,7 @@ bindAxisAnchor({
 });
 
 // ledger 暗账页渲染注入：render.js 的行/编辑/批量需本文件宿主的 shadow 查询/提示/确认/主楼同步/
-// 面板重绘/标注间隔与忙碌态。isCapturingLedger/isJudgingLedger 是实时可变 let，传 getter 以读当前值。
+// 面板重绘/标注间隔与忙碌态。isCapturingLedger/isJudgingLedger 经 controller getter 读取实时状态。
 bindLedgerRender({
     $in,
     showToast,
@@ -1136,70 +1124,95 @@ const ST_BASE  = new URL('../../../../../', import.meta.url).href;   // ST 站�
 const PEN_ICON_SVG = '<svg class="sp-pen-icon" viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M1.25 12C1.25 6.063 6.063 1.25 12 1.25a.75.75 0 0 1 0 1.5A9.25 9.25 0 1 0 21.25 12a.75.75 0 0 1 1.5 0c0 5.937-4.813 10.75-10.75 10.75S1.25 17.937 1.25 12m15.52-9.724a3.503 3.503 0 0 1 4.954 4.953l-6.648 6.649c-.371.37-.604.604-.863.806a5.3 5.3 0 0 1-.987.61c-.297.141-.61.245-1.107.411l-2.905.968a1.492 1.492 0 0 1-1.887-1.887l.968-2.905c.166-.498.27-.81.411-1.107q.252-.526.61-.987c.202-.26.435-.492.806-.863zm3.893 1.06a2.003 2.003 0 0 0-2.832 0l-.376.377q.032.145.098.338c.143.413.415.957.927 1.469a3.9 3.9 0 0 0 1.807 1.025l.376-.376a2.003 2.003 0 0 0 0-2.832m-1.558 4.391a5.4 5.4 0 0 1-1.686-1.146a5.4 5.4 0 0 1-1.146-1.686L11.218 9.95c-.417.417-.58.582-.72.76a4 4 0 0 0-.437.71c-.098.203-.172.423-.359.982l-.431 1.295l1.032 1.033l1.295-.432c.56-.187.779-.261.983-.358q.378-.18.71-.439c.177-.139.342-.302.759-.718z" clip-rule="evenodd"/></svg>';
 
 
-// 模块介绍：内容标题旁「?」点开的小气泡文案。键对应侧栏 data-view。每段控制在 200 字内、面向使用者。
+// 模块介绍：内容标题旁「?」点开的小气泡文案。键对应侧栏 data-view，面向使用者讲清用途与真实操作。
 // 想改文字直接改这里即可（纯展示，不入库、不注入 AI）。
 // 小百科·图标图例：模块介绍气泡内容。lede（这模块干嘛的·一句话）+ 若干「真 FontAwesome 图标 + 名称 + 一句话」，
 // 图标与界面所见一致，用户对号入座即知每个钮啥意思。渲染端用 .html() 注入（内容全为作者手写、无用户输入，无注入面）。精简为主。
 const _iLede = t => `<p class="sp-intro-lede">${t}</p>`;
 const _iSub  = t => `<div class="sp-intro-sub">${t}</div>`;
 const _iKey  = (icon, name, desc) => `<div class="sp-intro-key"><i class="fa-solid ${icon}"></i><b>${name}</b><span>${desc}</span></div>`;
+const _iSvgKey = (svg, name, desc) => `<div class="sp-intro-key">${svg}<b>${name}</b><span>${desc}</span></div>`;
+const _coordinateIntroSvg = '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 3.5 L6 18 L20.5 18"/><circle cx="14" cy="9.4" r="1.9" fill="currentColor" stroke="none"/></svg>';
 
 const MODULE_INTROS = {
     schedule:
-        _iLede('「点」＝当前视角（我／TA）的近期待办与状态卡片：读剧情自动推断某人此刻在做什么、心情、所在地。日期月日按历法步进；时间戳是全局时间锚点并负责星期判定，缺少时不猜现实星期。') +
-        _iKey('fa-rotate-right', '生成／刷新', '按最新剧情重算卡片') +
-        _iKey('fa-lock',         '锁定',       '这条重算时保留不动') +
-        _iKey('fa-thumbtack',    '固定 TA',    '把某人钉进 TA▾ 抽屉常驻') +
-        _iKey('fa-xmark',        '删除',       '移除这张卡'),
+        _iLede('「点」从故事里的“今天”开始，为我／TA 安排接下来 3 天的事项，并把更远的事另列在“未来”；它不是人物此刻状态卡。时间戳是全局时间锚点，也负责星期判定，由主楼 AI 随回复输出，构画只读取、解析和展示，不会自行生成；是否出现、格式完整与时间合理取决于模型是否遵循提示词和主楼剧情质量，缺失或不完整时无法凭空补出可靠时间，可能让时间判断失真；没有可靠记录时不猜现实星期。') +
+        _iSub('默认不会随日期变化自动重排，也不会潜伏注入主楼 AI。想更新就手动刷新；若要“今天”变化后后台重排，可在设置 → 推进设置 → 日期与点开启“点：后台自动跟随「今天」”（会额外调用 API）。') +
+        _iKey('fa-rotate-right', '生成／刷新', '按最新剧情重做未锁事项；新结果会覆盖旧的未锁数据') +
+        _iKey('fa-thumbtack',    '固定 TA',    '只把当前 TA 留在 TA▾ 抽屉，方便下次查看；不是锁定事项') +
+        _iKey('fa-ellipsis-vertical', '⋮ 菜单', '每条点的操作都收在这里') +
+        _iKey('fa-pen',          '编辑',       '手动修改这条事项') +
+        _iKey('fa-lock',         '锁定',       '刷新时保住同名事项不被删除；时间、说明等仍可能随新剧情推进') +
+        _iKey('fa-arrow-right-to-bracket', '注入', '把这条点写进输入框，供你确认或修改后发送；不是后台注入') +
+        _iKey('fa-trash',        '删除',       '移除这条事项'),
     almanac:
-        _iLede('「轴」＝这个世界的历法＋节日日历，并内嵌「刻度（时间账）」。月历固定周一至周日七列；时间戳是全局时间锚点并负责星期判定，缺少时不猜现实星期，日期仍按故事历法相对顺推。') +
+        _iLede('「轴」有“即将到来”“日历”“刻度”三页：前两页管理节日、生日、纪念日与故事历法；刻度页跟踪伤情、约定、周期等会随时间变化的账。时间戳是全局时间锚点，也负责星期判定，由主楼 AI 随回复输出，构画只读取、解析和展示，不会自行生成；主楼未输出或格式不完整时无法凭空补出可靠时间，可能让时间判断失真；没有可靠记录时不猜现实星期。') +
         _iSub('节日 · 历法') +
-        _iKey('fa-wand-magic-sparkles', '生成节日', 'AI 按世界观逐月考虑，按素材生成') +
-        _iKey('fa-heart-circle-plus', '补录纪念日', '只增补新里程碑，不重铺、不动现有日历') +
-        _iKey('fa-plus',          '添加',     '手动录节日／生日／纪念日') +
-        _iKey('fa-calendar-days', '历法管理', '定义月份、天数、纪年名') +
-        _iKey('fa-lock',          '锁定',     '重新生成时保留此条') +
-        _iKey('fa-pen',           '编辑',     '改名／改日期／改说明') +
+        _iKey('fa-plus',          '添加',       '手动录入节日／生日／纪念日；手动项生成时会保留') +
+        _iKey('fa-wand-magic-sparkles', '生成节日', '按世界观重做一整年：保留手动项和锁定项，替换未锁的旧 AI 日期') +
+        _iKey('fa-heart-circle-plus', '补录纪念日', '只追加剧情中新出现的重大里程碑，可能没有结果；新增项自动锁定') +
+        _iKey('fa-calendar-days', '历法管理',   '查看、编辑月份／天数／纪年和历法模板；换历法遇到无效日期时会先让你选择取消、删除或自动修正') +
+        _iKey('fa-lock',          '锁定',       '以后生成节日时保留这条') +
+        _iKey('fa-pen',           '编辑',       '修改名称、日期、说明等') +
+        _iKey('fa-trash',         '删除',       '移除这条日期') +
         _iSub('刻度 · 时间账') +
-        _iLede('从正文自动打捞「此时·此事·此状态」，按天数推算现状、悄悄提醒主楼（你不用手算）。分<b>持续状态／约定待办／周期</b>三类；楼内「标注池」顶部［标注］手动捞新条、［更新］按时间刷现状。每条：') +
-        _iKey('fa-lock',        '锁定',     'AI 判定车不再改动此条') +
-        _iKey('fa-bell',        '暂停埋入', '暂不注入主楼、但仍在账上跟进（再点恢复）') +
-        _iKey('fa-check',       '了结',     '从活跃移除、归档（可捞回）') +
-        _iKey('fa-pen',         '编辑',     '手动改现状／字段') +
-        _iKey('fa-rotate-left', '捞回',     '归档区：把了结条拉回活跃') +
-        _iKey('fa-trash',       '彻底删',   '归档区：不可恢复地删除'),
+        _iLede('刻度分持续状态／约定待办／周期三类。自动标注默认关闭；也可在刻度页或楼内“标注池”点［标注］捞取新条、点［更新］按时间刷新现状。潜伏注入也默认关闭，并且必须同时开启“允许潜伏注入主楼 AI（线 / 面 / 刻度）”总开关和刻度自己的“潜伏注入主楼 AI”才生效。') +
+        _iKey('fa-pen',         '编辑',     '手动改字段；保存后自动成为用户锁') +
+        _iKey('fa-lock',        '锁定',     'AI 更新不再改这条；与是否注入主楼是两回事') +
+        _iKey('fa-bell',        '暂停埋入', '暂不注入主楼，但仍留在活跃账上继续跟进；再点恢复') +
+        _iKey('fa-check',       '了结',     '从活跃区移到归档，之后仍可捞回') +
+        _iKey('fa-rotate-left', '捞回',     '归档区：让已了结条目回到活跃区') +
+        _iKey('fa-trash',       '彻底删除', '归档区：不可恢复地删除'),
     lines:
-        _iLede('「线」＝追踪剧情伏笔与暗线：那些已埋下、还没收束的悬念。随对话按你设的节奏推进，可隐形注入正文提醒 AI 别忘。') +
-        _iKey('fa-rotate-right', '重新生成', '推翻重排全部线') +
-        _iKey('fa-forward',      '推进',     '在已有线上继续往下推演') +
-        _iKey('fa-lock',         '锁定',     '重点线不被冲掉') +
-        _iKey('fa-xmark',        '删除',     '移除这条线'),
+        _iLede('「线」有“平行事件”和“冷知识”两页。平行事件追踪仍在发展的伏笔、人物行动与局势；冷知识要先在设置 → 注入与内容设置 → 功能与内容开关开启“冷知识”，才会参与生成和显示。') +
+        _iSub('线可按回合数自动推进、在故事日期变化时推进，或只接受手动推进；策略在设置 → 推进设置 → 线。潜伏注入必须同时开启总开关和线自己的“潜伏注入主楼 AI”。') +
+        _iKey('fa-rotate-right', '重新生成', '重做未锁定的线；锁定线保留') +
+        _iKey('fa-forward',      '推进',     '更新已有线，并可能新增少量真正独立的事件') +
+        _iKey('fa-plus',         '新增冷知识', '在“冷知识”页选择主题生成；只在冷知识开关开启后可用') +
+        _iKey('fa-ellipsis-vertical', '⋮ 菜单', '每条平行事件的操作都收在这里') +
+        _iKey('fa-pen',          '编辑',     '手动修改这条线') +
+        _iKey('fa-lock',         '锁定',     '重新生成时保留这条线；AI 不能替你创建用户锁') +
+        _iKey('fa-arrow-right-to-bracket', '注入', '把单条线写进输入框，供你确认后发送') +
+        _iKey('fa-trash',        '删除',     '移除这条线'),
     outline:
-        _iLede('「面」＝整段故事的大纲／节拍表：拆成若干节点、标出现在演到哪、下一步去哪。开注入后隐形引导 AI 顺大纲走。') +
-        _iKey('fa-location-crosshairs', '狙击当前点', '手选剧情游标（再点取消）') +
-        _iKey('fa-rotate-right',        '重新生成',   '按剧情重排节拍表'),
+        _iLede('「面」左侧是一整份剧情大纲，右侧是只针对这份面的 AI 讨论。［重新生成］会替换整份旧面，不是只补一个节点；讨论里的回复只有成功解析出至少一个有效节点时，才会出现可用的“应用此面”。') +
+        _iSub('自动判断会按设置的间隔识别故事演到哪，只会向后推进，不会自动倒退。大纲潜伏注入必须同时开启总开关、面自己的“大纲自动注入”，并且已经设有当前节点。') +
+        _iKey('fa-rotate-right',        '重新生成',   '按最新剧情重做并覆盖整份面') +
+        _iKey('fa-paper-plane',         '发送讨论',   '在右侧向 AI 讨论、修改或索要一版新面') +
+        _iKey('fa-broom',               '清空讨论',   '只清右侧讨论记录，不删除左侧现有面') +
+        _iKey('fa-ellipsis-vertical',   '⋮ 菜单',     '每个节点的操作都收在这里') +
+        _iKey('fa-pen',                 '编辑',       '手动修改这个节点') +
+        _iKey('fa-location-crosshairs', '设为当前',   '把这个节点标成正在进行；已是当前时显示“取消当前”') +
+        _iKey('fa-arrow-right-to-bracket', '注入',    '把单个节点写进输入框，供你确认后发送') +
+        _iKey('fa-copy',                '复制',       '复制这个节点的文字') +
+        _iKey('fa-trash',               '删除',       '只删除这个节点'),
     space:
-        _iLede('「间」＝局外创作顾问：跳出角色扮演，直接和 AI 聊剧情、设定、人物、世界观，聊出的结论还能<b>整理成卡片、一键落地</b>到点／线／轴／历法。这里的对话不进正式剧情、也不影响角色。') +
-        _iKey('fa-paper-plane',    '发送',            '向创作顾问发问') +
-        _iKey('fa-broom',          '清空',            '清掉这段局外对话') +
-        _iKey('fa-plus',           '应用到点／线／轴',  '把顾问给的日程／事件线／节日卡一键写进对应模块') +
-        _iKey('fa-calendar-check', '应用历法',         '把顾问拟的历法（月份／纪年）一键换上'),
+        _iLede('「间」是局外创作顾问：可以聊剧情、设定、人物和世界观，也能把 AI 给出的结构化卡片落到其他模块。这里不会写入正式角色扮演楼层，也不会直接推进剧情。发送新问题时会先清理较旧记录；一轮完整问答结束后，最多可能暂时显示 21 条间内消息。') +
+        _iSub('落地规则：新点追加到“未来”且不会自动锁；改点会替换指定条目。新线追加后自动锁定，改已有线则保留它原来的锁态。轴日期只做去重追加并自动锁定。应用历法会换掉当前月份／天数／纪年；若现有日期不适用，会先让你选择取消、删除冲突日期或自动修正。') +
+        _iKey('fa-paper-plane',    '发送',       '把问题发给局外创作顾问') +
+        _iKey('fa-pen',            '编辑并重发', '只在你的消息上出现；会从这里截断后续记录并重新提问') +
+        _iKey('fa-copy',           '复制',       '只复制这条消息的普通文字；结构化卡片不会随消息一起复制') +
+        _iKey('fa-trash',          '删除',       '删除单条间内消息') +
+        _iKey('fa-broom',          '清空',       '清掉当前聊天的全部间内记录') +
+        _iKey('fa-plus',           '应用到点／线／轴', '按上面的规则写入对应模块') +
+        _iKey('fa-calendar-check', '应用历法',    '确认冲突处理后换用这套历法'),
     theater:
-        _iLede('「棱」＝小剧场：基于当前故事背景写一段独立短篇／番外（「如果……会怎样」）。点「生成小剧场」出初稿，产出不进正式对话、纯当素材。') +
-        _iKey('fa-shuffle', '随机', '从模板库抽一个直接生成') +
-        _iKey('fa-expand',  '全屏浏览', '铺满视口、便于截图'),
+        _iLede('「棱」＝小剧场：按当前故事背景写独立短篇／番外，结果不进入正式角色扮演楼层。可直接填写要求，也可从模板起草；模板库在设置 → 数据设置 → 小剧场模板库。') +
+        _iKey('fa-shuffle', '随机',     '只从模板库随机填入一份模板；确认或修改输入后，还要点“生成小剧场”') +
+        _iKey('fa-file-lines', '模板内容', '查看这次生成实际使用的模板文字') +
+        _iKey('fa-expand',  '全屏浏览', '铺满视口阅读；再次点击或按 Esc 退出') +
+        _iSub('［重新生成］沿用当前小剧场的主题／模板再生成一版。可先改标题再点［永久保存］存到本对话；草稿最多 10 条，新稿会挤掉最旧草稿。草稿和永久稿列表里的［删除］只删除对应稿件。'),
     anchor:
-        _iLede('「坐标」＝楼层收藏夹：把喜欢的楼层连同当时的样式快照一键收藏，按角色／聊天归档，日后随时回看名场面。') +
-        _iKey('fa-star',   '收藏',     '楼层角色名旁点星收藏') +
-        _iKey('fa-tags',   '标签管理', '给收藏分类') +
-        _iKey('fa-expand', '全屏浏览', '便于截图') +
-        _iKey('fa-trash',  '删除收藏', '移除这条收藏'),
+        _iLede('「坐标」收藏的是 AI 楼层正文的副本，方便以后回看，不是完整样式快照。入口受设置 → 通用设置 → 显示与通知管理里的“收藏此楼入口”控制，只会出现在 AI 楼；收藏后可立即选择标签，再点同一枚按钮会取消收藏。') +
+        _iSub('收藏夹按角色 → 聊天 → 楼层分组，可用标签筛选和管理。删除收藏只删副本，不会删除或改动原楼层。') +
+        _iSvgKey(_coordinateIntroSvg, '坐标形收藏', 'AI 楼上的这枚坐标形按钮：点击收藏，再次点击取消收藏') +
+        _iSub('［标签管理］可新建、改名、改色或删除标签，删标签不会删收藏。收藏全文右上角的［⛶］进入全屏，［×］删除这份收藏副本。'),
 };
 
 let lastDebugPayload = null;
 
 
-// 存储描述符 {kind, view, charName}：5 个 getXxxKey() 都返回它，喂给 store.readData/writeData/removeData。
+// 存储描述符 {kind, view, charName}：getCacheKey 是 schedule key alias，其余 key 已归入对应模块。
 // 无 chat 时返回 null（保留旧 getter「无 chat → null」语义，各处 if(!key) 守卫照旧生效）。
 
 // view: 'user' | 'char'   charName: confirmed char name
@@ -1454,7 +1467,7 @@ const spaceFeature = createSpaceFeature({
 });
 let theaterMode          = false;
 // 暗历内联编辑态/归档折叠态/批量模式已随 ledger 渲染层迁入 business/ledger/render.js
-// （经 getLedgerEditor/isLedgerArchiveOpen/getBatchScope 等访问器 + resetLedgerRenderState 复位）。
+// （经 getLedgerEditor、归档/批量 actions 与 resetLedgerRenderState 复位）。
 const _injectTexts      = {};
 let   _injectIdSeq      = 0;
 let viewportSyncBound   = false;
@@ -1689,7 +1702,7 @@ jQuery(async () => {
         ledgerLastJudgedMsgId = (getContext().chat?.length ?? 0) - 1;
         ledgerJudgeCounter = 0;
         ledgerJudgeController.reset();
-        _autoRegenSchedAbort?.abort(); _autoRegenSchedAbort = null;   // 中断进行中的「同步到点」后台生成
+        _autoRegenSchedAbort?.abort(); _autoRegenSchedAbort = null;   // 中断进行中的点后台跟随/时旅点重排任务
         spaceMode = false;
         theaterMode = false;
         // theater 已在插件关闭早退前统一 reset，避免旧 owner 占住 busy。
@@ -1795,7 +1808,7 @@ jQuery(async () => {
         coordinateRuntime?.feature?.onCharacterRendered({ messageId: Number(messageId), type });
         // 锚收藏入口独立于线：不受 linesEnabled 影响，新楼渲染后补按钮
         setTimeout(() => coordinateRuntime?.feature?.scanButtons(), 150);
-        // 历·七天条：独立于线主开关，每次楼层渲染都把七天条补挂到最新 AI 楼（只读，无生成）
+        // 轴日历块：独立于线主开关，刷新当前渲染窗口（最新 AI 楼读活态，历史楼读快照；只读，无生成）
         syncLatestAlmanacBlock();
         syncLatestScheduleBlock();   // 点·日程条：同上，随新楼补挂（只读）
         // Master switch: linesEnabled=false disables auto-advance + inline block
@@ -1823,7 +1836,7 @@ jQuery(async () => {
     if (_stListeners.swiped) eventSource.removeListener?.(event_types.MESSAGE_SWIPED, _stListeners.swiped);
     _stListeners.swiped = async (mesId, info) => {
         if (!pluginEnabled()) return;   // 插件总关
-        // 历·七天条：swipe 可能改动剧情内时间锚点 → 按现锚点重建（只读，无生成，独立于线主开关）
+        // 轴日历块：swipe 可能改动剧情内时间锚点 → 按现锚点刷新当前渲染窗口（只读，无生成）
         // 戳优先·先落地：滑到的变体戳可能不同（如 920→919），先把锚点追到活戳再重建，否则轴仍读旧锚。
         // pendingGeneration 的 swipe 此刻新回复还没好、正文无新戳，跳过（等它的 CMR 再落地）。
         if (!info?.pendingGeneration) relandStoryClockAnchor();
@@ -1850,7 +1863,7 @@ jQuery(async () => {
         linesFeature.onSent({ insertAt });
     };
     eventSource.on(event_types.MESSAGE_SENT, _stListeners.sent);
-    // 生成态闸（防楼内块流式频闪）：ST 流式每 token 重写末楼 .mes_text 会冲掉线块/七天条，observer 若在流式间隙补块就「补→被冲→再补」肉眼频闪。
+    // 生成态闸（防楼内块流式频闪）：ST 流式每 token 重写末楼 .mes_text 会冲掉线块/轴日历块，observer 若在流式间隙补块就「补→被冲→再补」肉眼频闪。
     // 用「流式活跃截止时间戳」自愈闸而非布尔闸：GENERATION_ENDED 只在停止按钮显示过时才发（script.js hideStopButton），
     // quiet/后台生成不显示停止按钮却照发 GENERATION_STARTED —— 布尔闸会被这类生成置真后永不清零、observer 从此罢工、楼内块全失。
     // 时间戳闸靠「最近流式 token 时间」续期、到点自动失效，绝不卡死。
@@ -1903,7 +1916,7 @@ jQuery(async () => {
         dateCoordinator.runOnce(renderKey, ({ signal }) => runJudgeDateStep({ messageId, signal }));   // fire-and-forget；runOnce 兼并发去重
     };
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.almanacJudge);
-    // 点不再独立判定日期、也无独立跟随开关：任何一处改「今天」锚点都经 runAnchorAftermath → 顺手把点重排到今天，点纯下游连带跟随。
+    // 点不单独判定日期；共享善后刷新楼内窗口/轴面板/线日期，只有 scheduleAutoDetect 开启且未被时旅抑制时才后台重排点。
     // 暗账·标注：每 N 楼从正文捞新事件写库。独立开关(ledgerCaptureEnabled)/间隔/单调闸；默认关。
     if (_stListeners.ledgerCapture) eventSource.removeListener?.(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.ledgerCapture);
     _stListeners.ledgerCapture = async (messageId) => {
@@ -2009,12 +2022,11 @@ jQuery(async () => {
 
 // 机械任务分流用 cfg：仅供「记忆摘要 / 大纲推进判定」这类机械调用。
 // 设了 utilityPresetId 且该预设有 url+key → 用该预设快照；否则退回主 cfg（loadCfg）。
-// 生成类调用不走这里，始终 loadCfg()。空/无效即与旧版完全一致。
+// 其他生成类调用按各自调用方读取配置；空/无效时遵循现行默认路径。
 
 
 // ─── API 存储快切：预设仓库 ────────────────────────────────────────────────────
-// 预设是「整套 API 配置的命名快照」。存的是当前输入框里的这套（含未点保存的改动），
-// 切换只把某个预设填回输入框，不直接改生效配置——用户核对后点「保存设置」才落地。
+// 预设是「整套 API 配置的命名快照」。切换后立即填入并应用该快照。
 
 
 // 把一套 cfg（loadCfg 形状）存成预设。有 id 且已存在→覆盖(改名+更新内容)，否则新建。
@@ -2025,9 +2037,9 @@ jQuery(async () => {
 
 
 // ─── 插件总开关（③）───────────────────────────────────────────────────────────
-// pluginEnabled 关 = 全隐身；injectEnabled 关 = 只掐线/面潜伏注入（受 pluginEnabled 统辖）。
+// pluginEnabled 关 = 全隐身；injectEnabled 关 = 掐线/面/刻度潜伏注入（受 pluginEnabled 统辖）。
 
-// 一键中断所有在飞的后台判定与生成（点/线/虚线/面/间/棱/历 + 三路日期判定 + 同步到点），并清 re-entry 闸，
+// 一键中断所有在飞的后台判定与生成（各域 controller 及日期检测/点后台任务），并清 re-entry 闸，
 // 让重新开启后能干净重跑。照 CHAT_CHANGED 的中断序列集中一处。
 function _abortAllBackground() {
     memory.abortAll();
@@ -2056,8 +2068,8 @@ function _abortAllBackground() {
 }
 
 // 插件总开关落地。关：藏悬浮球、清所有楼内块与坐标入口（由各 feature 内部闸兜底）、
-// 断所有后台任务、撤两路潜伏注入。不关面板——用户往往正站在设置里切它，留着好即时切回。
-// 开：按各子开关恢复——显示悬浮球、重挂楼内块与两路注入、补锚点入口。事件监听不注销，靠各 listener 的 pluginEnabled() 闸空转。
+// 断所有后台任务、撤各域潜伏注入。不关面板——用户往往正站在设置里切它，留着好即时切回。
+// 开：按各子开关恢复——显示悬浮球、重挂楼内块与线/面/故事时钟/刻度注入、补锚点入口。事件监听不注销，靠各 listener 的 pluginEnabled() 闸空转。
 function applyPluginEnabled(on) {
     const ctx = getContext();
     if (on) {
@@ -2093,7 +2105,7 @@ function applyPluginEnabled(on) {
 // ─── In-game day-change detection (桥接到历·almTodayAnchor) ───────────────────
 // days 模式（跟随局内时间）的推进检测：从历的权威「今天」取 {月-日}，变化即推进。
 // 历史上这里读柏宝书 state.time，现已改为桥接 almTodayAnchor
-// 六层兜底源——柏宝书没装也能靠记忆/线/点/正文推进，且与历共用同一个「今天」。
+// 兜底来源按现行 anchor 优先级解析；柏宝书未安装时仍可由其他可用上下文推进，并与历共用同一个「今天」。
 // extractDayFromTime / _cnToNumber / _CN_* 仍被 almTodayAnchor、parseJudgedDate 复用，保留。
 
 
@@ -2117,13 +2129,9 @@ function applyPluginEnabled(on) {
 // readOnly=false（最新楼）：summary 带「标注/更新」两文字胶囊、每条带「锁定/归档了结」；true（历史楼）：纯只读。
 // 空池 → 返回 ''（该楼不挂此段；与线/点/历子块空态、及旧「空回显不挂」一致，默认开关下不冒空条）。
 // 字段照标注池闭环：类型胶囊(上色) + 事由 + 起始/周期/终止 + 标签；不显现状（现状归「召回」框）。
-// Remove inline lines block from ALL AI messages — enforces "only the latest floor holds it".
+// 统一楼内块由当前渲染窗口控制；历史楼保留各自快照，最新楼读活态。
 // 虚线冷知识已折进 .sp-lines-inline 的 body（合并成一个楼内块），清线块即连虚线一并清；
 // 仍带上 .sp-dashed-inline 兜底，扫掉合并前旧版本残留在 DOM 里的独立虚线块。
-function _removeAllInlineBlocks() {
-    document.querySelectorAll('#chat .sp-lines-inline, #chat .sp-dashed-inline').forEach(el => el.remove());
-}
-
 // 新楼层挂线块 + （可选）首次推进生成。渲染改由 refreshInlineWindow() 统一负责；
 // 入口保留唯一真副作用——首次推进的线生成，以及推进前后的即时刷窗。
 // Back-fill：切聊天/初始化/主开关切换时的入口。渲染交给窗口控制器；保留潜伏注入 refresh 真副作用。
@@ -2144,7 +2152,7 @@ function syncLatestInlineBlock(expectedChatId = null) {
     refreshInlineWindow(true);  // 线数据变 → 立即重算渲染窗口（最新楼会冻快照+全功能重挂，历史楼各自快照）
 }
 
-// ─── 历·楼内七天条（只读，反映历+锚点，无生成）─────────────────────────────────
+// ─── 历·楼内日历块（只读，反映历+锚点，无生成）─────────────────────────────────
 // 与线块平行、共存于最新 AI 楼。外壳（标题条）仿线：一个 <details>，收起时是扁扁的
 // 「历 · N个日程」条，点整条即展开——配色/圆角/边框全走线的 .sp-inline-* 类。
 // 展开后的内容是历自己的「往后六天」条：6 格（周X + M/D，从明天起，今天已在大头日期块里、
@@ -2182,6 +2190,7 @@ inlineFeature = createInlineFeature({
     formatStoryClockHeadParts, storyClockEnabled, latestStoryClock, parseJudgedDate, readStore,
     getLinesCacheKey, parseLines, linesFeature, snapshot, keyDesc, createWeekdayConsumerContext,
     storyWeekdayRefPure, ALM_CHAT_SCAN_LIMIT, pointInlineRenderer, axisInlineRenderer, $, _buildLedgerBlockHtml,
+    buildUserRecall: _buildUserRecallBoxHtml,
     pluginEnabled, documentRef: document, windowRef: window,
     freezeSnapshot: freezeSnapshotToFloor,
     readSnapshot: id => snapshot.readSnapshot(id),
@@ -2191,7 +2200,6 @@ inlineFeature = createInlineFeature({
         current: loadCalDesc(),
     }),
     chatMessage: floor => getContext()?.chat?.[floor]?.mes || '', parseStoryClock: parseStoryClockPure,
-    buildUserRecall: _buildUserRecallBoxHtml,
     coordinateChanged: () => coordinateRuntime?.feature?.onChatDomChanged?.(),
     isStreaming: () => linesFeature.isStreaming(),
     syncTheme: () => syncVectorGlyphTheme(document, currentTheme, (getSettings().themeMode || 'auto') !== 'auto'),
@@ -2202,7 +2210,6 @@ if (document.querySelector('#chat')) inlineFeature.init();
 // 让主楼 AI「心里有数」、把伏笔当暗流自然缓慢推进；聊天记录里不显示。默认关（opt-in）——
 // 改 AI 行为且增加 token。刷新时机跟内联块同步（见 sync/backfill + 开关 handler）。
 const LINES_INJECT_KEY   = 'sp_lines_latent';
-const LINES_INJECT_DEPTH = 4;
 // 重设潜伏注入。读当前视角活跃线；关闭或无活跃线时清空。幂等，可随处多调。
 function refreshLinesInjection() {
     return linesFeature.injection?.refresh?.();
@@ -2237,7 +2244,7 @@ function getLedgerJudgeInterval() {
     return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 4;
 }
 
-// ─── 时间戳·时间锚点体系（第一片：注入 + 回读 + 只读显示）─────────────────────────
+// ─── 时间戳·时间锚点体系（注入 + 结构化回读 + 只读显示）─────────────────────────
 // 目标：给整个构画一个「跟着剧情走」的坚固时间源。做法＝强制注入一段提示词，让主楼 AI
 // 每楼正文首尾各打一个 HTML 注释时间戳（<!-- SDC-start … --> / <!-- SDC-end … -->），
 // 我们再从 chat 末尾往回扫读回。HTML 注释酒馆天然不渲染，无需像柏宝书那样加隐藏正则；
@@ -2246,21 +2253,20 @@ function getLedgerJudgeInterval() {
 //   ① 起止双界——一楼是一段区间不是一个点，故首尾两个戳；
 //   ② 标签留正文——绝不删，靠它让下楼继承基准，增量在模型脑内、输出成绝对值；
 //   ③ 往回扫 + 兜底——读「当前时间」从末楼往前扫第一条可解析的（end 优先），漏了也不崩。
-// 本片只做「注入 + 回读 + 历面板只读显示一行」，**不**改 almTodayAnchor 的 {month,day}
-// 数据形状、**不**解析成结构、**不**接权威今天——那是后续片（数据结构扩年/时）的活。
-// 首尾注释的正则（宽松容错：允许注释内外多余空白；内容自由，不强制格式，本片只回显原文）。
+// 当前链路会将时间戳注入、解析为结构化日期，并在完整戳存在时优先落入共享锚；缺失时按设置走 API 兜底。
+// 首尾注释的正则（宽松容错：允许注释内外多余空白；内容自由，不强制格式）。
 
 // 时间戳总开关（不受 injectEnabled 统辖，只受 pluginEnabled + 本开关；见 refreshStoryClockInjection）。默认开——用户定：这是全插件时间地基，值得常驻。
-// storyClockEnabled 已迁至轴控制器；保留旧注释位置以便阅读历史分片。
+// storyClockEnabled 已迁至轴控制器。
 
 // 自写提示词（吸收柏宝书三套路：拔高到系统强制 / 以上楼 end 为基准推进 / 禁用「某天」敷衍；
-// 措辞、示例、标签名全原创，绝不照搬）。粒度到小时，年份可写可略（本片不校验、不解析）。
+// 措辞、示例、标签名全原创，绝不照搬）。粒度到小时，年份可写可略。
 
 // 取生效的强注词：用户在设置里二改了(非空)就整段用他的；留空用内置默认（默认词随插件更新）。
 // 重设时间戳注入。关闭时清空。幂等，可随处多调。照 refreshLinesInjection 套路。
 // refreshStoryClockInjection 已迁至 storyClockController。
 
-// 从单楼正文解析首尾戳。返回 { start, end }（各为去空白后的原文字符串，缺失=null）。本片不解析成结构。
+// 从单楼正文解析首尾戳，并供结构化日期解析使用。返回 { start, end }（各为去空白后的原文字符串，缺失=null）。
 // 从 chat 末尾往回扫，取最近一楼「可解析出至少一个戳」的 AI 楼。end 优先作「当前时间」。
 // 漏了/坏了不崩：某楼无戳就继续往上找；全无 → 返回 null（显示层据此不显示这一行）。
 // latestStoryClock 已迁至 story-clock.js。
@@ -2273,8 +2279,8 @@ function getLedgerJudgeInterval() {
 
 // ═══ 暗账·标注 ═════════════════════════════════════════════════════════════════
 // 构画 AI 从最近正文里捞「需按时间追踪」的新事件，标注入 sp-ledger（此时·此物·此状态）。
-// 起始锚 = 此刻楼层 + 历「今天」(almTodayAnchor)，钉死不改；判定/注入是后续切片。
-// 触发：每 N 楼自动车(runLedgerCaptureStep 无参) + 历面板「暗账」页手动「立即标注」(manual=true)。
+// 起始锚 = 此刻楼层 + 历「今天」(almTodayAnchor)，钉死不改；判定与注入由同域流程负责。
+// 触发：每 N 楼自动车(runLedgerCaptureStep 无参) + 轴面板「刻度」页手动「立即标注」(manual=true)。
 // capture 窗口与来源批次大小由 business/ledger/capture.js 统一提供。
 
 // ═══ 暗历③·判定·刷现状 ═══════════════════════════════════════════════════════
@@ -2290,9 +2296,9 @@ function getLedgerJudgeInterval() {
 // 最近 N 楼 AI 正文拼成一段（去标记）。供场景加权命中判断；只读、无副作用。
 // ─── 共享锚点善后 ───────────────────────────────────────────────────────────
 // 任何一处改「今天」锚点（自动判定 applyDetectedDate / 历面板 ±1天·改·恢复自动）后都走这里，统一善后：
-//   1) 刷楼内历条 / 点条、历面板；2) 点恒跟随今天——把点重排到今天（点纯下游连带，无独立开关）。
+//   1) 刷当前渲染窗口与轴面板；2) 仅在 scheduleAutoDetect 开启且未被时旅抑制时后台重排点。
 // 点连带走 syncPointToToday(true)：其自带「点没生成过就 no-op」「_almSyncingPoint 重入合并」「pointState.isGenerating/
-// chatId/abort」守卫，fire-and-forget 安全；不占前台 pointState.isGenerating 锁。故这里无脑调、由它自己判断要不要真重生成。
+// chatId/abort」守卫，fire-and-forget 安全；不占前台 pointState.isGenerating 锁。外层仅在 scheduleAutoDetect 开启且未被时旅抑制时调用。
 function runAnchorAftermath() {
     syncLatestAlmanacBlock();
     syncLatestScheduleBlock();
@@ -2310,11 +2316,7 @@ function runAnchorAftermath() {
     }
 }
 
-// 方案 B·点随「今天」按钮同步（历面板「同步到点」键触发，非自动）：
-// schedulePointNeedsSync() —— 判定当前视角的点是否落后于共享「今天」，历面板据此决定要不要在今天条冒出「同步到点」键。
-//   条件：当前视角已生成过点 + 点的 StartDate 月/日 ≠ 今天。refresh-only：空白页不算「需同步」。
-//   与「点·自动检测」开关解耦：不论点自动检测开没开，只要点落后今天就给这枚手动补的入口——
-//   点关+历开时历自己推进今天、点原地不动，正是靠它手动追上；点开时它作为自动跟随的兜底也会短暂出现。
+// schedulePointNeedsSync() —— 判断后台跟随/时旅流程是否仍有 pending follow-up 需要补同步。
 function schedulePointNeedsSync() {
     const cacheKey = getCacheKey(currentView, charViewName);
     if (!cacheKey) return false;
@@ -2327,8 +2329,7 @@ function schedulePointNeedsSync() {
     return !(parseInt(sdMatch[1], 10) === today.month && parseInt(sdMatch[2], 10) === today.day);
 }
 
-// syncPointToToday() —— 用户在历面板点「同步到点」触发：后台把当前视角的点重生成，StartDate 强钉到「今天」，
-// 让「点」从今天起排 7 天、与「历」同一天。反馈全在历（按钮态「同步中…」+ toast），结果落在点。
+// syncPointToToday() —— 自动跟随、时旅及 pending follow-up 共用的控制器 facade；将当前视角点重排到共享「今天」。
 // 绝不占用 pointState.isGenerating（前台 UI 锁，sidebar 切换靠它挡）——后台占了会把整个面板卡死；防 race 靠自带 abort + 落地前重查。
 let _autoRegenSchedAbort = null;
 async function syncPointToToday(auto = false, travelContext = null) { return pointController.syncPointToToday(auto, travelContext); }
@@ -2404,7 +2405,7 @@ function setExtBtnState(state) {
     const $fab = $(`#${FAB_ID} .sp-fab-btn`);
     $fab.removeClass('sp-btn-generating sp-btn-done');
     if (state) $fab.addClass(`sp-btn-${state}`);
-    // 点生成中只锁「我/TA」子切换（本次生成绑定当前视角，中途换视角无意义，另有 .sp-view-btn 里 3207 JS 守卫兜底）；
+    // 点生成中只锁「我/TA」子切换（本次生成绑定当前视角，中途换视角无意义，另有 .sp-view-btn 守卫兜底）；
     // 侧栏模块 tab(历/线/面/棱/锚) 绝不锁——切模块随时可用（点正文按状态重建，见 .sp-view-btn 处理器 schedule 分支）。
     $in('.sp-sub-toggle').toggleClass('sp-locked', state === 'generating');
 }
@@ -2606,7 +2607,7 @@ function injectModal() {
                                     <input type="checkbox" id="sp-storyclock-enabled" ${getSettings().storyClockEnabled !== false ? 'checked' : ''}>
                                     <span>时间戳</span>
                                 </label>
-                                <p class="sp-cfg-hint">全局时间锚点，包含星期判定。关闭后可能导致插件的时间判断失真。</p>
+                                <p class="sp-cfg-hint">全局时间锚点，包含星期判定。由主楼 AI 随回复输出，构画只读取、解析和展示，不会自行生成；是否出现、格式完整与时间合理取决于模型是否遵循提示词和主楼剧情质量，缺失或不完整时无法凭空补出可靠时间，可能让时间判断失真。</p>
                             </div>
 
                             <!-- ═══════════ 通用设置 ═══════════ -->
@@ -2684,6 +2685,11 @@ function injectModal() {
                                         </div>
                                     </details>
 
+                                    <div class="sp-preset-actions" id="sp-preset-actions">
+                                        <button id="sp-preset-update" class="sp-save-btn" type="button"></button>
+                                        <span id="sp-preset-sync-state" class="sp-cfg-hint" aria-live="polite"></span>
+                                    </div>
+
                                     <hr class="sp-mem-divider">
                                     <label class="sp-cfg-group">机械任务分流</label>
                                     <!-- 机械任务分流：把「记忆摘要 / 大纲推进判定」这类机械调用可选路由到某个预设（如便宜小模型）；生成类始终走上面主 API。选项即时生效落 settings.json，无需点保存。留空=不分流 -->
@@ -2756,15 +2762,6 @@ function injectModal() {
                                     </div>
                                     <div id="sp-mem-database-status" class="sp-cfg-hint" style="display:none"></div>
 
-                                    <hr class="sp-mem-divider">
-                                    <label class="sp-cfg-group">容量</label>
-                                    <div class="sp-mode-opt">
-                                        <span>记忆块 token 上限</span>
-                                        <input id="sp-mem-maxtokens" class="sp-input sp-interval-input" type="number" min="0" step="1000" value="60000">
-                                        <span>（0=不限）</span>
-                                    </div>
-                                    <p class="sp-cfg-hint">超出则压缩再注入：点 / 线 / 面 / 间取近景，轴全程等距节选（不漏日期）；不超原样。防长故事撑爆 token。</p>
-
                                     <div id="sp-mem-internal">
                                     <hr class="sp-mem-divider">
                                     <label class="sp-cfg-group">自动记忆</label>
@@ -2818,6 +2815,10 @@ function injectModal() {
                                 <summary class="sp-settings-section-title">显示与通知管理</summary>
                                 <div class="sp-settings-section-body">
                                     <label class="sp-cfg-group">显示</label>
+                                    <label class="sp-mode-opt" style="margin-top:10px">
+                                        <input type="checkbox" id="sp-adult-blur-enabled" ${getSettings().adultBlurEnabled !== false ? 'checked' : ''}>
+                                        <span>默认模糊成人内容</span>
+                                    </label>
                                     <label class="sp-mode-opt">
                                         <input type="checkbox" id="sp-anchor-inline-btn" ${getSettings().anchorInlineBtn !== false ? 'checked' : ''}>
                                         <span>收藏此楼入口</span>
@@ -3147,8 +3148,8 @@ function injectModal() {
         const t = ev.target;
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) ev.stopPropagation();
     });
-    // shadow 内第一层 wrapper 必须带 sp-root + 主题类：style.css 里 13 处 `.sp-root ...`
-    // 前缀选择器、.sp-night/.sp-day 色板、.sp-forced-* 强制主题覆盖全靠它匹配
+    // shadow 内第一层 wrapper 必须带 sp-root + 主题类：style.css 的 `.sp-root ...` 前缀选择器、
+    // .sp-night/.sp-day 色板、.sp-forced-* 强制主题覆盖全靠它匹配
     // （applyTheme 同步它的主题类）。display:contents 不产生布局盒子，fixed 语义
     // 仍由 .sp-sheet 承担；host 无 transform/filter，内部 position:fixed 相对视口不变。
     root.innerHTML = `
@@ -3288,6 +3289,16 @@ function injectModal() {
         const idx = Number($(this).attr('data-line-idx'));
         if (Number.isInteger(idx)) linesFeature.actions.pin(idx);
     });
+    const revealAdult = function (e) {
+        const node = $(this); const root = node.closest('.sp-line-card, .sp-inline-line, .sp-event, .sp-sch-drawer-item');
+        if (root.hasClass('sp-adult-revealed')) return;
+        e.preventDefault(); e.stopPropagation(); root.addClass('sp-adult-revealed');
+        root.find('.sp-adult-sensitive').removeAttr('role tabindex aria-label title').find('[aria-hidden="true"]').removeAttr('aria-hidden');
+    };
+    const revealAdultKey = function (e) { if (e.key !== 'Enter' && e.key !== ' ') return; revealAdult.call(this, e); };
+    $in('#sp-lines-wrap').off('click.spAdultReveal keydown.spAdultReveal', '.sp-adult-sensitive').on('click.spAdultReveal', '.sp-adult-sensitive', revealAdult).on('keydown.spAdultReveal', '.sp-adult-sensitive', revealAdultKey);
+    $in('#sp-body').off('click.spAdultReveal keydown.spAdultReveal', '.sp-adult-sensitive').on('click.spAdultReveal', '.sp-adult-sensitive', revealAdult).on('keydown.spAdultReveal', '.sp-adult-sensitive', revealAdultKey);
+    $('#chat').off('click.spAdultReveal keydown.spAdultReveal', '.sp-adult-sensitive').on('click.spAdultReveal', '.sp-adult-sensitive', revealAdult).on('keydown.spAdultReveal', '.sp-adult-sensitive', revealAdultKey);
     $inAll('#sp-body, #sp-lines-wrap, #sp-outline-wrap').on('click.spManualActionMenu', '.sp-action-menu-toggle', function (e) {
         e.stopPropagation(); const menu = $(this).closest('.sp-action-menu').get(0); const open = !$(menu).hasClass('sp-action-menu-open'); closeActionMenus(menu); $(menu).toggleClass('sp-action-menu-open', open).find('.sp-action-menu-list').attr('hidden', !open).end().find('.sp-action-menu-toggle').attr('aria-expanded', String(open));
     }).on('click.spManualActionMenu', '.sp-action-menu-item', function (e) {
@@ -3304,16 +3315,12 @@ function injectModal() {
         if (action === 'outline-edit') return outlineFeature.actions.editScene(idx - 1);
         if (action === 'outline-current') return outlineFeature.actions.toggleCursor(idx);
         if (action === 'outline-inject') return injectToST(outlineFeature.ui.getInjectText(menu.attr('data-iid')));
-        if (action === 'outline-copy') return copyPlainText(outlineFeature.ui.getCopyText(menu.attr('data-cid')));
+        if (action === 'outline-copy') {
+            const text = outlineFeature.ui.getCopyText(menu.attr('data-cid'));
+            void copyPlainText(text).then(ok => showToast(ok ? '已复制' : '复制失败', null, !ok));
+            return;
+        }
         if (action === 'outline-delete') return outlineFeature.actions.deleteBeat(idx - 1);
-    });
-    // Per-point lock/unlock toggle (schedule panel only; pin 存 raw、机制对齐线，无楼内块)。
-    $in('#sp-body').on('click', '.sp-point-pin-toggle', function (e) {
-        e.stopPropagation();
-        const day = $(this).attr('data-day');
-        const idx = Number($(this).attr('data-ev'));
-        if (!Number.isInteger(idx)) return;
-        triggerTogglePointPin(day === 'future' ? 'future' : Number(day), idx);
     });
     // Per-point delete (× on each event, 点面板 + 楼内块抽屉；对齐线的 .sp-line-del-one 双绑 #sp-lines-list/#chat)。
     $in('#sp-body').on('click', '.sp-sch-del-one', function (e) {
@@ -3371,8 +3378,8 @@ function injectModal() {
         batch: { scopes: BATCH_SCOPES, scope: getBatchScope, setScope: setBatchScope, selected: getBatchSelected, reset: batchReset, ids: batchScopeIds, exec: execBatch },
         toast: showToast, resetCapture: () => { ledgerCaptureCounter = 0; },
     });
-    // 历面板「今天」栏：±1天 / 改（内联月日） / 自动（清锚） / 同步到点。前三者经 runAnchorAftermath 共享善后
-    // （刷两条只读条 + 历面板）；改今天不再自动烧点，点要跟随由「同步到点」键显式触发（历点共用这枚今天锚点）。
+    // 轴面板「今天」栏：±1天 / 改（内联月日） / 自动（清锚）等操作经 runAnchorAftermath 共享善后；
+    // 点后台是否重排由 scheduleAutoDetect 决定。
     $almanac.on('click', '.sp-alm-today-prev', function () { almNudgeToday(-1); });
     $almanac.on('click', '.sp-alm-today-next', function () { almNudgeToday(1); });
     $almanac.on('click', '.sp-alm-today-edit', function () {
@@ -3825,7 +3832,7 @@ function injectModal() {
         saveSettingsDebounced();
         refreshInlineWindow(true);
     });
-    // 历·七天条开关：立刻生效。段开关变 → 重算所有窗内楼（每层楼的历段随之显/隐）。
+    // 轴日历块开关：立刻生效。段开关变 → 刷新当前渲染窗口（每层楼的轴日历段随之显/隐）。
     $in('#sp-almanac-inline-enabled').on('change', function () {
         getSettings().almanacInlineEnabled = this.checked;
         saveSettingsDebounced();
@@ -3835,6 +3842,17 @@ function injectModal() {
     $in('#sp-schedule-inline-enabled').on('change', function () {
         getSettings().scheduleInlineEnabled = this.checked;
         saveSettingsDebounced();
+        refreshInlineWindow(true);
+    });
+    $in('#sp-adult-blur-enabled').on('change', function () {
+        getSettings().adultBlurEnabled = this.checked;
+        saveSettingsDebounced();
+        if (linesMode) linesFeature.refreshPanel();
+        if (!outlineMode && !linesMode && !spaceMode) {
+            const saved = readStore(getCacheKey());
+            pointState.cachedSchedule = saved?.raw ? renderSchedule(saved.raw, saved.userName || '用户', currentView, loadCalDesc()) : null;
+            if (pointState.cachedSchedule) setBody(pointState.cachedSchedule);
+        }
         refreshInlineWindow(true);
     });
     // 标注池·显隐开关（AI 楼）：只控这只读回显框显/隐，与注入 ledgerInject 解耦（关它注入照旧、只是不回显）。
@@ -4009,8 +4027,8 @@ function injectModal() {
     $in('#sp-model-list-items').on('click', '.sp-model-list-item', function () {
         const model = $(this).attr('data-model');
         $in('#sp-cfg-model').val(model);
-        getSettings().apiModel = String(model || '').trim();
-        saveSettingsDebounced();
+        $in('#sp-cfg-model').trigger('change');
+        syncPresetState();
         $inAll('.sp-model-list-item').removeClass('sp-model-list-item-active');
         $(this).addClass('sp-model-list-item-active');
     });
@@ -4020,13 +4038,13 @@ function injectModal() {
     });
     $in('#sp-cfg-key')
         .on('focus', () => { const r = $in('#sp-cfg-key').data('real'); if (r) $in('#sp-cfg-key').val(r); })
-        .on('input', function () { getSettings().apiKey = this.value.trim(); saveSettingsDebounced(); })
-        .on('blur', function () { const r = $in('#sp-cfg-key').val().trim(); $in('#sp-cfg-key').data('real', r).val(r ? maskKey(r) : ''); getSettings().apiKey = r; saveSettingsDebounced(); });
-    $in('#sp-cfg-url').on('input change', function () { getSettings().apiUrl = this.value.trim().replace(/\/$/, ''); saveSettingsDebounced(); });
-    $in('#sp-cfg-model').on('input change', function () { getSettings().apiModel = this.value.trim(); saveSettingsDebounced(); });
-    $in('#sp-cfg-exclude').on('input change', function () { getSettings().apiExcludeParams = parseExcludeParams(this.value); saveSettingsDebounced(); });
-    $in('#sp-cfg-timeout').on('input change', function () { const n = Number(this.value); if (!Number.isInteger(n) || n < 5 || n > 600) return; getSettings().apiTimeoutSec = n; saveSettingsDebounced(); });
-    $in('#sp-cfg-stream').on('change', function () { getSettings().apiStream = this.checked; saveSettingsDebounced(); });
+        .on('input', function () { const value = this.value.trim(); $in('#sp-cfg-key').data('real', value); getSettings().apiKey = value; saveSettingsDebounced(); syncPresetState(); })
+        .on('blur', function () { const r = $in('#sp-cfg-key').val().trim(); $in('#sp-cfg-key').data('real', r).val(r ? maskKey(r) : ''); getSettings().apiKey = r; saveSettingsDebounced(); syncPresetState(); });
+    $in('#sp-cfg-url').on('input change', function () { getSettings().apiUrl = this.value.trim().replace(/\/$/, ''); saveSettingsDebounced(); syncPresetState(); });
+    $in('#sp-cfg-model').on('input change', function () { getSettings().apiModel = this.value.trim(); saveSettingsDebounced(); syncPresetState(); });
+    $in('#sp-cfg-exclude').on('input change', function () { getSettings().apiExcludeParams = parseExcludeParams(this.value); saveSettingsDebounced(); syncPresetState(); });
+    $in('#sp-cfg-timeout').on('input change', function () { const raw = String(this.value ?? '').trim(); const n = Number(raw); syncPresetState(); if (!raw || !Number.isInteger(n) || n < 5 || n > 600) return; getSettings().apiTimeoutSec = n; saveSettingsDebounced(); });
+    $in('#sp-cfg-stream').on('change', function () { getSettings().apiStream = this.checked; saveSettingsDebounced(); syncPresetState(); });
     $in('#sp-lines-interval').on('input change', function () { const n = Number(this.value); if (!Number.isInteger(n) || n < 1) return; saveLinesInterval(n); this.value = String(n); });
 
     $in('#sp-body').on('click', '.sp-tab', function () {
@@ -4289,8 +4307,8 @@ function refreshCharPinIcon() {
 
 // ─── Open / close ─────────────────────────────────────────────────────────────
 
-// 面板每次打开都回到「点」首页：清掉上次残留的子视图（历/线/面/间/棱/坐标）+ 内联编辑器，
-// 避免换聊天后重开还停在旧窗、内容残留。只复位视图，不 abort 生成、不动数据缓存。
+// 面板打开时先重置到点首页作为干净基线，再恢复同聊天上次的 lastMainView；切聊天时该值已复位为点。
+// 清掉上次残留的子视图（历/线/面/间/棱/坐标）+ 内联编辑器，不 abort 生成、不动数据缓存。
 // 无条件隐藏所有非点 wrap（不靠 mode 标志守卫）：CHAT_CHANGED 在面板隐藏时会把标志清成
 // false 却不动 DOM，若这里再按标志判断就会漏隐藏 → 出现「点 + 坐标」同屏。故一律硬隐藏。
 function resetPanelToScheduleHome() {
@@ -4596,15 +4614,10 @@ function loadingHtml(baseText, abortId) {
 
 // ─── Generation ───────────────────────────────────────────────────────────────
 
-function cleanupManualOwner(owner) {
-    return pointController.cleanupManualOwner(owner);
-}
-
 async function triggerGenerate() {
     return pointController.triggerGenerate();
 }
 
-async function runGenerate(travelContext = null, owner = null) { return pointController.runGenerate(travelContext, owner); }
 // 前置阶段（世界书组装等）不可打断，若只 abort 不即时复位界面，用户点"中止"会觉得没反应。
 // 被中止的旧管线随后走各自 run* 的身份守卫（controller !== myCtrl）静默丢弃，不覆盖界面。
 function abortScheduleGen() {
@@ -4625,7 +4638,7 @@ async function generate(ctx, userName, charName, perspective = 'user', signal = 
     const cfg = loadCfg();
     if (!cfg.url || !cfg.key) {
         if (!settingsOpen) toggleSettings();
-        throw new Error('请先在设置中填写自定义 API 的 URL 和 Key');
+        throw makeDiagnosticError('config-missing');
     }
     const prompt = appendTravelPromptContext(buildPrompt(userName, charName, perspective, pinned, loadCalDesc(), { mode: adultMode, tickets: pointTicketPlan(adultMode, 11) }), travelContext);
     const apiOpts = travelContext?.feedback === 'time-travel' ? { fullMemory: true, ...travelContext } : (travelContext || {});
@@ -4736,12 +4749,8 @@ function setWiExcluded(bookName, excluded) {
     saveSettingsDebounced();
 }
 
-// Manual/auto "today" anchor for 历 + 点 (per-character). Stores {month, day}
-// (year is meaningless in RP). Two writers: the user pinning a date by hand, and
-// the auto-confirm judge writing the date it detected from recent floors. Read as
-// the highest-priority tier in almTodayAnchor (before 柏宝书) so a pinned/confirmed
-// date always wins over the slower passive sources. Keyed by card avatar like
-// wiFilter (reason see charStableKey). Clearing (null) reverts to full auto.
+// 当前聊天共享的历/点日期锚（{month, day}），可含人工校准；pending/unresolved 不是有效锚。
+// 完整故事时间戳在恢复自动后可重新接管日期来源。
 function getDateAnchor(charKey) {
     if (!charKey) return null;
     const local = chatAnchorRepository.get();
@@ -4780,7 +4789,7 @@ function setDateAnchor(charKey, month, day, source = 'explicit', options = {}) {
 // ─── Per-character narrative scale ──────────────────────────────────────────
 // Controls the granularity of storyline events. 'auto' means the LLM decides
 // from card context; explicit values override that.
-// Stored: extension_settings[PLUGIN_ID].scale = { [characterId]: 'auto'|'macro'|'meso'|'micro' }
+// Stored: extension_settings[PLUGIN_ID].scale = { [charStableKey/avatar]: 'auto'|'macro'|'meso'|'micro' }
 const SCALE_VALUES = ['auto', 'macro', 'meso', 'micro'];
 const SCALE_LABELS = {
     auto : '自动（由 AI 依据剧情判断）',
@@ -4897,8 +4906,7 @@ function getChatWorldNames(ctx) {
 // (the live editable copy), NOT ctx.characters[].data.character_book (stale snapshot).
 // Fallback to character_book if no linked world book exists.
 // Each item: { key, uid, label, preview, content, source, embedded, scope }
-//   scope = 'char'  → came from card's linked/embedded book
-//         = 'global' → came from ST's global world info selection
+//   scope = 'char'/'chat'/'persona'/'global' → 角色卡、当前聊天、用户 persona 或全局世界书来源
 async function getCharBookEntries(ctx) {
     const items = [];
     const seen = new Set();
@@ -5011,7 +5019,7 @@ async function getCharBookEntries(ctx) {
         } catch { /* ignore individual load failure */ }
     }
 
-    // 4. 用户/persona 世界书：ST「人物设定」页给当前 persona 链接的世界书（power_user.persona_description_lorebook）。
+    // 5. 用户/persona 世界书：ST「人物设定」页给当前 persona 链接的世界书（power_user.persona_description_lorebook）。
     //    与角色卡书同源读法（loadWorldInfo 取活状态），scope='persona' 供设置面板单列一栏、可逐条开关。
     //    已作为角色卡书 / 全局书收录过的同名书跳过，避免重复。
     const personaBook = String(ctx.powerUserSettings?.persona_description_lorebook || '').trim();
@@ -5054,7 +5062,6 @@ async function getCharBookEntries(ctx) {
 async function buildRecentChatContext(ctx, floorCount = 6, perMessageChars = 800) {
     const chat = ctx?.chat;
     if (!Array.isArray(chat) || !chat.length) return '';
-    const userName = ctx.name1 || '用户';
     const charName = ctx.name2 || '角色';
     const s = getSettings();
     const stripOpts = { keepTags: s.keepTags, extraTags: s.extraTags };
@@ -5133,11 +5140,43 @@ function worldInfoActivationEntries(result, mode) {
     return values;
 }
 
+const WORLD_INFO_TOKEN_BUDGET = 60000;
+let lastWorldInfoFailureNoticeKey = '';
+
+async function countWorldInfoTokens(text) {
+    const value = String(text || '');
+    try {
+        const counter = getContext()?.getTokenCountAsync;
+        if (typeof counter === 'function') {
+            const total = Number(await counter.call(getContext(), value));
+            if (Number.isFinite(total) && total >= 0) return { tokens: total, exact: true };
+        }
+    } catch {}
+    let bytes = 0;
+    if (typeof TextEncoder === 'function') bytes = new TextEncoder().encode(value).length;
+    else for (let i = 0; i < value.length; i++) {
+        const code = value.charCodeAt(i);
+        if (code <= 0x7f) bytes++;
+        else if (code <= 0x7ff) bytes += 2;
+        else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) { bytes += 4; i++; }
+        else bytes += 3;
+    }
+    return { tokens: bytes, exact: false };
+}
+
+function notifyWorldInfoActivationFailure(ctx) {
+    const key = `${String(ctx?.chatId || ctx?.chatMetadata?.chat_id_hash || 'default')}:${Math.floor(Date.now() / 2000)}`;
+    if (lastWorldInfoFailureNoticeKey === key) return;
+    lastWorldInfoFailureNoticeKey = key;
+    try { showToast('世界书激活失败，本次未注入世界书', null, true); } catch {}
+}
+
 async function resolveWorldInfoActivation(ctx, coreChat) {
     const maxContext = worldInfoMaxContext(ctx);
     const includeNames = worldInfoCore.world_info_include_names !== false;
     const globalScanData = worldInfoGlobalScanData(ctx);
     const simulate = ctx?.simulateWorldInfoActivation;
+    let lukerFailed = false;
     if (typeof simulate === 'function') {
         try {
             const result = await simulate.call(ctx, {
@@ -5152,8 +5191,8 @@ async function resolveWorldInfoActivation(ctx, coreChat) {
             if (!entries) throw new Error('invalid Luker world-info activation result');
             return { supported: true, keys: new Set(entries.map(entry => worldInfoCandidateKey(entry?.world, entry?.uid)).filter(Boolean)) };
         } catch (error) {
-            console.warn('[构画] Luker 世界书激活失败，回退兼容模式', error);
-            return { supported: false, keys: new Set() };
+            console.warn('[构画] Luker 世界书激活失败，回退兼容模式', safeDiagnosticLog('world-info', 'activation', error));
+            lukerFailed = true;
         }
     }
     const check = worldInfoCore.checkWorldInfo;
@@ -5169,10 +5208,10 @@ async function resolveWorldInfoActivation(ctx, coreChat) {
             if (!entries) throw new Error('invalid native world-info activation result');
             return { supported: true, keys: new Set(entries.map(entry => worldInfoCandidateKey(entry?.world, entry?.uid)).filter(Boolean)) };
         } catch (error) {
-            console.warn('[构画] 原生世界书激活失败，回退兼容模式', error);
+            console.warn('[构画] 原生世界书激活失败，回退兼容模式', safeDiagnosticLog('world-info', 'activation', error));
         }
     }
-    return { supported: false, keys: new Set() };
+    return { supported: false, failed: true, keys: new Set(), lukerFailed };
 }
 
 async function buildWorldInfoContext(ctx) {
@@ -5183,11 +5222,59 @@ async function buildWorldInfoContext(ctx) {
         return String(message.mes ?? message.content ?? '').trim().length > 0;
     }) : [];
     const activation = await resolveWorldInfoActivation(ctx, coreChat);
-    const kept = entries
+    if (activation.failed) {
+        notifyWorldInfoActivationFailure(ctx);
+        console.warn('[构画] 世界书激活失败诊断', {
+            ...safeDiagnosticLog('world-info', 'activation', null),
+            candidateCount: entries.length,
+            lukerAvailable: typeof ctx?.simulateWorldInfoActivation === 'function',
+            nativeAvailable: typeof worldInfoCore.checkWorldInfo === 'function',
+        });
+        return '';
+    }
+    const candidates = entries
         .filter(e => !disabledKeys.has(e.key))
-        .filter(e => !activation.supported || activation.keys.has(worldInfoCandidateKey(e.source, e.uid)))
+        .filter(e => activation.keys.has(worldInfoCandidateKey(e.source, e.uid)))
         .map(e => e.content)
         .filter(Boolean);
+    if (!candidates.length) return '';
+
+    const kept = [];
+    let skipped = 0;
+    const titleCount = await countWorldInfoTokens('【世界书】\n');
+    const separatorCount = await countWorldInfoTokens('\n\n');
+    let estimatedTokens = titleCount.tokens;
+    let exactCount = titleCount.exact && separatorCount.exact;
+    for (const content of candidates) {
+        const counted = await countWorldInfoTokens(content);
+        const nextTokens = estimatedTokens + counted.tokens + (kept.length ? separatorCount.tokens : 0);
+        estimatedTokens = nextTokens;
+        exactCount = exactCount && counted.exact;
+        if (nextTokens > WORLD_INFO_TOKEN_BUDGET) {
+            skipped++;
+            estimatedTokens -= counted.tokens + (kept.length ? separatorCount.tokens : 0);
+            continue;
+        }
+        kept.push(content);
+    }
+    let finalCount = await countWorldInfoTokens(`【世界书】\n${kept.join('\n\n')}`);
+    while (finalCount.tokens > WORLD_INFO_TOKEN_BUDGET && kept.length) {
+        const removed = kept.pop();
+        skipped++;
+        estimatedTokens -= (await countWorldInfoTokens(removed)).tokens + (kept.length ? separatorCount.tokens : 0);
+        finalCount = await countWorldInfoTokens(`【世界书】\n${kept.join('\n\n')}`);
+    }
+    if (skipped) {
+        console.warn('[构画] 世界书预算跳过条目诊断', {
+            candidateCount: candidates.length,
+            activatedCount: activation.keys.size,
+            finalEntryCount: kept.length,
+            estimatedTokens: finalCount.tokens,
+            exactCount: finalCount.exact && exactCount,
+            skippedCount: skipped,
+            budget: WORLD_INFO_TOKEN_BUDGET,
+        });
+    }
     if (!kept.length) return '';
     return `【世界书】\n${kept.join('\n\n')}`;
 }
@@ -5379,21 +5466,17 @@ async function getMemText(opts = {}) {
     try { return await _capMemText(raw, !!opts.full); }
     catch (err) { console.warn('[7dayscal] 记忆预算封顶出错，回退原文', safeDiagnosticLog('memory', 'request', err, { background: true })); return raw; }
 }
-function getMemMaxTokens() {
-    const v = parseInt(getSettings().memMaxTokens, 10);
-    return Number.isFinite(v) ? v : 60000;
-}
+const MEMORY_TOKEN_BUDGET = 60000;
 async function _capMemText(text, full) {
     const t = String(text || '');
     if (!t.trim()) return t;
-    const budget = getMemMaxTokens();
-    if (budget <= 0) return t;                              // 0/负 = 关闭封顶
+    const budget = MEMORY_TOKEN_BUDGET;
     let total;
     try { total = await getContext().getTokenCountAsync(t); }
     catch { total = Math.ceil(t.length / 2); }             // 分词器够不着 → 粗估 2 字/token
     if (total <= budget) return t;                         // 没超 → 原样返回
     // 填充按 95% 预算算，留 5% 余量：按块估 token 会漏掉块间 '\n\n'、省略标记、以及「单块内计数 vs 整体计数」的舍入差，
-    // 不留余量会以约 1% 幅度轻微超顶。budget 是用户设的舒适上限，压到 95% 以内更稳。
+    // 不留余量会以约 1% 幅度轻微超顶。固定预算压到 95% 以内更稳。
     const eff = Math.floor(budget * 0.95);
     const ratio = total / t.length;                        // token/字，用于按块长估算
     const blocks = t.split(/\n{2,}/).map(b => b.trim()).filter(Boolean);
@@ -5464,13 +5547,13 @@ async function buildMessages(ctx, prompt, userName, charName, historyLimit = 3, 
         ? `【故事记忆库】以下由本插件在对话过程中自动生成的客观摘要，反映从最早到近期的关键事件与伏笔。请**优先信任记忆库描述**，即使它与角色卡/世界书中较早的描述冲突（因为记忆库记录了事件后的最新状态）。${memPerspective ? `点视角优先关注对${memPerspective}有意义的信息。` : '请按当前聊天主角色上下文理解，不继承点的 TA 视角。'}\n\n${memText}`
         : '';
 
-    // 历（本世界观重要日期）：历自己不进主楼，只在这里作为数据源反哺点/线/大纲。
+    // 历（本世界观重要日期）：供构画生成与讨论上下文使用，不做主楼常驻注入。
     const almanacText = resolveAlmanacContextText(opts, getAlmanacInjectText);
     const almanacBlock = almanacText
         ? `【本世界观·重要日期（历）】以下是这个世界的既定节日、生日、纪念日等重要日子，已按「当前剧情日期」标注倒计时；每条冒号后的「说明」是该日子的既定设定（由来、涉及人物阵营、习俗活动、持续天数等），是背景事实。\n${almanacText}\n\n★ 推演点/线/大纲时：凡列在【近期将至】里的日子（未来数日内或进行中），应**主动**把它纳入近期剧情——依据其「说明」里的设定生成与之相关的铺垫、筹备、事件或人物动向，让故事顺着该世界的历法自然推进；【全年其他重要日子】作为背景，时间线接近时再纳入考量。\n★ 务必尊重每条「说明」里的既定设定，据此展开合理、可延续的剧情；说明里没写到的细节可以合理补完，但**不得编造与既定设定冲突的内容**。`
         : '';
 
-    // 历法（纪年/月份结构）：内置公历返回空、无需告知；自定义历法则反哺点/线/大纲，免得套用公历月份/天数。
+    // 历法（纪年/月份结构）：供构画生成与讨论上下文使用，不做主楼常驻注入；避免自定义历法被公历月份/天数覆盖。
     const calDescText = getCalDescInjectText();
     const calDescBlock = calDescText
         ? `【本世界观·现行历法（纪年）】${calDescText}\n推演点/线/大纲涉及日期时，一律以此历法为准（月份数、每月天数、纪年名），不要默认套用公历的 12 月 / 31 日。`
@@ -5753,7 +5836,7 @@ function storageRow(label, bytesText, btnHtml = '', extraClass = '') {
     </div>`;
 }
 
-// 渲染四层用量到 #sp-storage-body。异步（坐标要读服务器索引）。
+// 渲染三层用量到 #sp-storage-body。异步（坐标要读服务器索引）。
 async function renderStorageUsage() {
     const $body = $in('#sp-storage-body');
     if (!$body.length) return;
@@ -6079,15 +6162,14 @@ const SP_JUMP_HINT_LINES = `<div class="sp-jump-hint">想调整这些线？<butt
 // ─── 历（日历 / 历法）─────────────────────────────────────────────────────────
 // 独立模块，与点/线/面共通但存储隔离：点是 AI 每轮重算的易失数据，历要稳，
 // 单独存 chat_metadata（kind='almanac'，不分我/TA，固定 user scope，抄 dashed）。
-// 历自己不注入主楼——只在 buildMessages 里作为「本世界观重要日期」喂点/线/大纲，
-// 跟随它们已有的注入进主楼。数据形状：{ items:[{id,name,type,month,day,displayDate,note,pin,source}], ts }
+// 历数据供构画生成与讨论上下文使用，不作为主楼常驻注入。数据形状：{ items:[{id,name,type,month,day,displayDate,note,pin,source}], ts }
 
 
 
 
 
 
-// 历「当前日期」锚点体系（almTodayAnchor/almDaysUntil/almWeekdayRef/almWeekdayFor/sortAlmanacUpcoming）
+// 历「当前日期」锚点体系（almTodayAnchor/almDaysUntil/almWeekdayRef/almWeekdayFor 及日期差 helpers）
 // 已抽出到 business/axis/anchor.js（纯数据层从 data.js/叶子模块 import，跨域读取器经 bindAxisAnchor 注入）。
 
 // 历注入文本构造 getAlmanacInjectText 已抽出到 business/axis/inject.js（纯函数，仅依赖 data.js/anchor.js）。
@@ -6097,7 +6179,7 @@ const SP_JUMP_HINT_LINES = `<div class="sp-jump-hint">想调整这些线？<butt
 // AI 输出解析：<almanac_widget> 内 Item: name|type|month|day|days|displayDate|note
 
 // 解析间落地的 <era_widget>（纪年/历法描述符）：一行可选 Era: 纪年名 + N 行 Month: 月名|天数。
-// 交给 normalizeCalDesc 统一校验裁剪（月名≤12字、天数1-60、月数≤60、年长≤2000），无 Month 行/校验不过 → null。
+// 交给现行历法 parse/validate/manager/actions 链校验；无有效月份描述时返回空结果。
 
 // 重算合并：保留所有已锁 + 所有自填(user)，丢弃未锁 AI 项，再并入新 AI 项（按名+月日去重）。
 
@@ -6170,17 +6252,11 @@ function almSetSheet(sheet) {
 function almNavMonth(delta) {
     navigateAxisMonth(delta, () => calMonthCount(loadCalDesc()), almCalMonth, renderAlmanacPanel);
 }
-function almSelectDay(day) {
-    selectAxisDay(day, renderAlmanacPanel);
-}
-
 // ── 生成 ──
 async function triggerGenerateAlmanac() { return axisGenerationController.trigger(false); }
-async function runGenerateAlmanac() { return axisGenerationController.run(false); }
 
-// 跑补录：照 runGenerateAlmanac 的骨架（共用 isGeneratingAlmanac / almanacAbortController 互斥同一 store），
+// 跑补录：复用 axisGenerationController（由 axisState.isGeneratingAlmanac 维护互斥），
 // 但合并阶段走**纯追加去重**（非 mergeAlmanac）+ pin=true，且补 0 条时给出「没有够格」的正常态提示、不报错。
-async function runSupplementAnniversary() { return axisGenerationController.run(true); }
 async function triggerSupplementAnniversary() { return axisGenerationController.trigger(true); }
 // ── 手动新增 / 编辑（内联窗，不用弹窗）──
 // 用户明确怕浮层弹窗出问题（会盖住/卡住），故表单直接渲进 #sp-almanac-wrap 里，
@@ -6225,12 +6301,6 @@ function toggleAlmanacPin(id) {
     }
 }
 // 日历详情↔网格联动：把某条目在当前月覆盖到的日子高亮到上方网格（直接改 class，不重渲）。
-function almHiliteCells(it) {
-    for (const day of axisActions.highlight(it)) $in(`#sp-almanac-wrap .sp-alm-cell[data-day="${day}"]`).addClass('sp-alm-cell-linked');
-}
-function almClearHilite() {
-    axisActions.clearHighlight();
-}
 async function deleteAlmanacItem(id) {
     await axisActions.remove(id);
 }
@@ -6319,7 +6389,7 @@ function toggleSettings() {
         renderAdultRow();
         renderMemorySection();   // memory status + settings sync
         renderTheaterSection();  // 棱 settings + cache usage + template manager
-        renderStorageUsage();    // 存储管理面板：四层用量统计（含坐标收藏占用）
+        renderStorageUsage();    // 存储管理面板：本聊天、坐标收藏、本机缓存三层用量统计
         $overlay.stop(true).css({ display: 'flex', opacity: 0 }).animate({ opacity: 1 }, 180);
     } else {
         $overlay.stop(true).animate({ opacity: 0 }, 150, function () { $(this).css('display', 'none'); });
@@ -6434,7 +6504,6 @@ function renderMemorySection() {
     $in('#sp-mem-l0').val(Number.isFinite(+s.memoryL0Group) ? +s.memoryL0Group : 5);
     $in('#sp-mem-l1').val(Number.isFinite(+s.memoryL1Group) ? +s.memoryL1Group : 10);
     $in('#sp-mem-skipshort').val(Number.isFinite(+s.memorySkipShort) ? +s.memorySkipShort : 50);
-    $in('#sp-mem-maxtokens').val(Number.isFinite(+s.memMaxTokens) ? +s.memMaxTokens : 60000);
     refreshMemoryStatus();
 }
 
@@ -6567,15 +6636,6 @@ function bindMemoryHandlers() {
         this.value = v;
         saveSettingsDebounced();
     });
-    $in('#sp-mem-maxtokens').on('change', function () {
-        // 0 = 不限；否则给个下限防手滑填极小值把记忆压没（1000 tk 起）
-        let v = parseInt(this.value, 10);
-        if (!Number.isFinite(v) || v < 0) v = 60000;
-        if (v > 0 && v < 1000) v = 1000;
-        getSettings().memMaxTokens = v;
-        this.value = v;
-        saveSettingsDebounced();
-    });
     // Tag sanitizer inputs — sanitize (bare tag names, comma-separated), save.
     // Applies to future reads; existing L0 summaries built with old rules keep
     // their hash and stay valid — new content read after change uses new rules.
@@ -6588,7 +6648,7 @@ function bindMemoryHandlers() {
         return normalizeTagNames(cleaned.join(',')).join(',');
     }
     function bindTagField(sel, key) {
-        // sel 是 #sp-mem-* 选择器串（设置区在 shadow 内，同 11820 的 $in 读取）→ 必须 $in 绑定，否则不落存
+        // sel 是 #sp-mem-* 选择器串（设置区在 shadow 内）→ 必须 $in 绑定，否则不落存
         $in(sel).on('input', function () {
             getSettings()[key] = sanitizeTagList(this.value);
             saveSettingsDebounced();
@@ -6738,6 +6798,15 @@ function renderAdultRow() {
 // Render world-info entry checklist for the current character into #sp-wi-list.
 // Perf: builds one HTML string + inserts once, uses event delegation on the list root.
 let _wiEntryCache = new Map();   // key → entry object, for eye-button popup lookup
+let _wiListRevision = 0;
+
+function _wiListIdentity(ctx) {
+    return JSON.stringify({
+        chatId: String(ctx?.chatId ?? ''),
+        characterId: String(ctx?.characterId ?? ''),
+        characterKey: charStableKey(ctx),
+    });
+}
 
 // Nearest scrollable ancestor — used to keep the viewport steady across a
 // re-render (adding/removing an extra book rebuilds the whole list).
@@ -6754,6 +6823,9 @@ function _wiScrollParent(el) {
 async function renderWiList() {
     const ctx = getContext();
     const $list = $in('#sp-wi-list');
+    const revision = ++_wiListRevision;
+    const identity = _wiListIdentity(ctx);
+    const isCurrent = () => revision === _wiListRevision && identity === _wiListIdentity(getContext());
 
     // Snapshot the current expand + scroll state BEFORE the loading placeholder
     // wipes the DOM, so a re-render doesn't spring every <details> group back open
@@ -6776,17 +6848,20 @@ async function renderWiList() {
     try {
         entries = await getCharBookEntries(ctx);
     } catch (err) {
+        if (!isCurrent()) return;
         $list.html(`<span class="sp-cfg-hint">加载失败：${escapeHtml(diagnosticMessage(err))}</span>`);
         return;
     }
+    if (!isCurrent()) return;
 
     // Cache entries for the eye-button popup
+    if (!isCurrent()) return;
     _wiEntryCache = new Map(entries.map(e => [e.key, e]));
 
     const disabledKeys = getDisabledKeys(ctx);
 
-    // Two-level group: scope (char / persona / global) → source (book name) → entries.
-    // Preserves entry order within each source; char first, then persona, then global.
+    // Two-level group: scope (char / chat / persona / global) → source (book name) → entries.
+    // Preserves entry order within each source: char, chat, persona, then global.
     const scopes = new Map([['char', new Map()], ['chat', new Map()], ['persona', new Map()], ['global', new Map()]]);
     for (const e of entries) {
         const scopeGroup = scopes.get(e.scope) || scopes.get('char');
@@ -6849,6 +6924,7 @@ async function renderWiList() {
     }
 
     // Single DOM write
+    if (!isCurrent()) return;
     $list[0].innerHTML = parts.join('');
 
     // Event delegation — one handler for the whole list, regardless of entry count
@@ -7051,14 +7127,52 @@ function toggleKeyVisibility() {
 // 从当前输入框读出这一套 API 配置（含未点保存的改动、Key 取 data('real') 真值）。
 function readApiInputs() {
     const $k = $in('#sp-cfg-key');
+    const rawTimeout = String($in('#sp-cfg-timeout').val() ?? '').trim();
+    const timeout = Number(rawTimeout);
+    const timeoutValid = rawTimeout !== '' && Number.isInteger(timeout) && timeout >= 5 && timeout <= 600;
     return {
         url          : $in('#sp-cfg-url').val().trim().replace(/\/$/, ''),
         key          : ($k.data('real') || $k.val() || '').trim(),
         model        : $in('#sp-cfg-model').val().trim(),
         excludeParams: parseExcludeParams($in('#sp-cfg-exclude').val()),
-        timeoutSec   : parseInt($in('#sp-cfg-timeout').val(), 10) || 180,
+        timeoutSec   : timeoutValid ? timeout : null,
+        timeoutValid,
         stream       : $in('#sp-cfg-stream').is(':checked'),
     };
+}
+
+function apiPresetSnapshotKey(cfg) {
+    return JSON.stringify({
+        url: cfg?.url || '', key: cfg?.key || '', model: cfg?.model || '',
+        excludeParams: Array.isArray(cfg?.excludeParams) ? cfg.excludeParams : [],
+        timeoutSec: Number.isInteger(Number(cfg?.timeoutSec)) ? Number(cfg.timeoutSec) : null, stream: cfg?.stream === true,
+    });
+}
+
+function activeApiPreset() {
+    const id = getSettings().apiPresetActiveId || '';
+    return id ? loadApiPresets().find(p => p.id === id) || null : null;
+}
+
+function apiInputsDirty() {
+    const p = activeApiPreset();
+    return !!p && apiPresetSnapshotKey(readApiInputs()) !== apiPresetSnapshotKey(p);
+}
+
+function apiInputsSaveable(cfg) {
+    return cfg?.timeoutValid !== false && Number.isInteger(Number(cfg?.timeoutSec)) && Number(cfg.timeoutSec) >= 5 && Number(cfg.timeoutSec) <= 600;
+}
+
+function saveCurrentAsPreset() {
+    const cur = readApiInputs();
+    if (!apiInputsSaveable(cur)) { showPresetHint('请求超时必须填写 5–600 秒，未保存预设'); return null; }
+    if (!cur.url && !cur.key) { showPresetHint('先填 API 再保存预设'); return null; }
+    const name = autoPresetName(cur.url);
+    upsertApiPreset(name, cur, null);
+    renderApiPresetList();
+    renderUtilityPresetList();
+    showPresetHint(`已存为预设「${name}」`);
+    return name;
 }
 
 // 把一套预设填回输入框。Key 走 maskKey 遮罩 + data('real') 存真值。
@@ -7081,10 +7195,11 @@ function renderApiPresetList() {
     const list = loadApiPresets();
     const activeId = getSettings().apiPresetActiveId || '';
     $list.html(list.length
-        ? list.map(p => `<div class="sp-preset-item-row" data-id="${escapeAttr(p.id)}"><button type="button" class="sp-preset-item${p.id === activeId ? ' sp-preset-item-active' : ''}" data-id="${escapeAttr(p.id)}">${escapeHtml(p.name)}</button><button type="button" class="sp-preset-rename" data-id="${escapeAttr(p.id)}" title="编辑这条预设（名字 / 模型）"><i class="fa-solid fa-pen"></i></button></div>`).join('')
+        ? list.map(p => `<div class="sp-preset-item-row" data-id="${escapeAttr(p.id)}"><button type="button" class="sp-preset-item${p.id === activeId ? ' sp-preset-item-active' : ''}" data-id="${escapeAttr(p.id)}">${escapeHtml(p.name)}</button><button type="button" class="sp-preset-rename" data-id="${escapeAttr(p.id)}" title="仅修改这条预设的名称"><i class="fa-solid fa-pen"></i></button></div>`).join('')
         : `<div class="sp-preset-empty">暂无预设，填好 API 后点右侧＋存一个</div>`);
     $in('#sp-preset-del').prop('disabled', !activeId);
     syncPresetLabel();
+    syncPresetState();
 }
 
 // 「假框」显示当前选中预设名（无原生 select，直接按 activeId 回显）
@@ -7103,6 +7218,43 @@ function showPresetHint(msg) {
     showPresetHint._t = setTimeout(() => $h.fadeOut(200), 2600);
 }
 
+function syncPresetState() {
+    const $btn = $in('#sp-preset-update');
+    const $state = $in('#sp-preset-sync-state');
+    if (!$btn.length) return;
+    const p = activeApiPreset();
+    if (p) {
+        const dirty = apiInputsDirty();
+        const valid = apiInputsSaveable(readApiInputs());
+        $btn.text(`更新「${p.name}」`).prop('disabled', !dirty || !valid);
+        $state.text(!valid ? '请求超时需填写 5–600 秒' : dirty ? '尚未更新到预设' : '已与预设同步').toggle(!valid || !!dirty);
+    } else {
+        const valid = apiInputsSaveable(readApiInputs());
+        $btn.text('另存为新预设').prop('disabled', !valid);
+        $state.text(valid ? '' : '请求超时需填写 5–600 秒').toggle(!valid);
+    }
+}
+
+async function confirmPresetSwitch(nextPreset) {
+    const current = activeApiPreset();
+    if (!current || !apiInputsDirty()) return 'switch';
+    const choice = await customDialog.choose({
+        title: '当前预设有未保存改动',
+        body: `要如何切换到「${nextPreset.name}」？`,
+        choices: [
+            { value: 'save', label: '保存并切换', primary: true },
+            { value: 'switch', label: '直接切换' },
+            { value: 'cancel', label: '取消' },
+        ],
+    });
+    if (choice === 'save') {
+        const currentCfg = readApiInputs();
+        if (!apiInputsSaveable(currentCfg)) { showPresetHint('请求超时必须填写 5–600 秒，未保存预设'); return 'cancel'; }
+        upsertApiPreset(current.name, currentCfg, current.id);
+    }
+    return choice || 'cancel';
+}
+
 function bindApiPresetEvents() {
     // 点假框 → 就地展开/收起内联预设列表（在流内，非原生弹窗）
     $in('#sp-preset-box').on('click', function (e) {
@@ -7111,48 +7263,47 @@ function bindApiPresetEvents() {
         $(this).toggleClass('sp-preset-box-open');
     });
     // 选某预设 → 填入输入框并立即应用，收起列表
-    $in('#sp-preset-list').on('click', '.sp-preset-item', function () {
+    $in('#sp-preset-list').on('click', '.sp-preset-item', async function () {
         const id = $(this).attr('data-id');
-        getSettings().apiPresetActiveId = id;
         const p = loadApiPresets().find(x => x.id === id);
-        renderApiPresetList();
+        if (!p || p.id === (getSettings().apiPresetActiveId || '')) return;
+        const decision = await confirmPresetSwitch(p);
+        if (decision === 'cancel') return;
+        getSettings().apiPresetActiveId = id;
         $in('#sp-preset-list').slideUp(120);
         $in('#sp-preset-box').removeClass('sp-preset-box-open');
         if (!p) return;
         fillApiInputs(p);
         saveCfg(readApiInputs());
+        renderApiPresetList();
+        syncPresetState();
         showPresetHint(`已填入并应用「${p.name}」`);
     });
 
-    // 编辑一条预设（内联，无弹窗）：点 ✎ → 顺手把这条填进输入框并选中它，名字就地变输入框。
-    // 用户可改名，或去下方模型栏换模型（输入框已是这条，换模型只动这条）。Enter / ✓ 提交，Esc 取消。
-    // 提交 = 把「名字 + 当前输入框整套(含模型)」写回这条预设；走 upsertApiPreset，**不碰生效配置**（脱钩）。
+    // 编辑一条预设（内联，无弹窗）：点 ✎ 只改名字，不选择预设，也不覆盖当前 API 草稿。
     const commitPresetEdit = ($row) => {
         const $inp = $row.find('.sp-preset-rename-input');
         if (!$inp.length) return;
         const id = $row.attr('data-id');
         const p = loadApiPresets().find(x => x.id === id);
         const name = $inp.val().trim() || (p ? p.name : '');
-        upsertApiPreset(name, readApiInputs(), id);   // 名字+模型(整套)写回这条；不动 s.apiModel 等生效配置
+        renameApiPreset(id, name);
         renderApiPresetList();       // 回到按钮态（名字/模型已更新）
         renderUtilityPresetList();   // 机械预设列表同名同步
-        showPresetHint(`已更新预设「${name}」（名字 / 模型）`);
+        showPresetHint(`已改名为「${name}」`);
     };
     $in('#sp-preset-list').on('click', '.sp-preset-rename', function (e) {
         e.preventDefault(); e.stopPropagation();
         const id = $(this).attr('data-id');
         const p = loadApiPresets().find(x => x.id === id);
         if (!p) return;
-        getSettings().apiPresetActiveId = id;   // 进编辑=顺手选中这条
-        fillApiInputs(p);                        // 把这条填进输入框，保证「去下方模型栏换模型」只动这条
-        syncPresetLabel();
         const $row = $(this).closest('.sp-preset-item-row');
         $row.addClass('sp-preset-item-row-edit').html(
             `<input type="text" class="sp-input sp-preset-rename-input" value="${escapeAttr(p.name)}" maxlength="40" spellcheck="false">` +
-            `<button type="button" class="sp-preset-rename-ok" title="保存到这条预设（名字 / 模型）"><i class="fa-solid fa-check"></i></button>`
+            `<button type="button" class="sp-preset-rename-ok" title="保存预设名称"><i class="fa-solid fa-check"></i></button>`
         );
         $row.find('.sp-preset-rename-input').trigger('focus').trigger('select');
-        showPresetHint(`编辑「${p.name}」：可改名，或去下方模型栏换模型，改完点 ✓ 存回这条`);
+        showPresetHint(`编辑「${p.name}」名称；当前 API 输入不会改变`);
     });
     $in('#sp-preset-list').on('click', '.sp-preset-rename-ok', function (e) {
         e.preventDefault(); e.stopPropagation();
@@ -7166,13 +7317,21 @@ function bindApiPresetEvents() {
     // ＋新增 → 把当前输入框这套存成新预设，名字先按 URL 域名自动生成（同名自动加序号）；
     // 存好后可在列表里点 ✎ 就地改名。覆盖内容仍是「删掉重存」。零弹窗。
     $in('#sp-preset-save').on('click', function () {
+        saveCurrentAsPreset();
+    });
+
+    $in('#sp-preset-update').on('click', function () {
+        const p = activeApiPreset();
         const cur = readApiInputs();
-        if (!cur.url && !cur.key) { showPresetHint('先填 API 再点新增'); return; }
-        const name = autoPresetName(cur.url);
-        upsertApiPreset(name, cur, null);   // 内部已把 apiPresetActiveId 设为新 id
-        renderApiPresetList();
-        renderUtilityPresetList();          // 新预设也进机械分流候选
-        showPresetHint(`已存为预设「${name}」，点它右侧 ✎ 可改名`);
+        if (p) {
+            if (!apiInputsSaveable(cur)) { showPresetHint('请求超时必须填写 5–600 秒，未更新预设'); return; }
+            upsertApiPreset(p.name, cur, p.id);
+            renderApiPresetList();
+            renderUtilityPresetList();
+            showPresetHint(`已更新预设「${p.name}」`);
+        } else {
+            saveCurrentAsPreset();
+        }
     });
 
     // 删除当前选中预设 —— 内联二次确认（图标变红勾，再点才删；3 秒无操作复原），零弹窗

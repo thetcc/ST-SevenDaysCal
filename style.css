@@ -116,28 +116,28 @@ q::after {
     --sp-chat-bg-legacy: #1e2028;
 }
 .sp-day {
-    --sp-sheet-bg-legacy    : #F6F4E8;
-    --sp-surface-legacy     : #E5EEE4;
-    --sp-surface-high-legacy: #C0E1D2;
-    --sp-primary-legacy     : #DC9B9B;
-    --sp-on-primary   : #3e1f1f;
-    --sp-on-surface-legacy  : #2c2e2a;
-    --sp-subtle-legacy      : #7a8078;
-    --sp-divider-legacy     : rgba(0,0,0,0.08);
+    --sp-sheet-bg-legacy    : #FAF9F6;
+    --sp-surface-legacy     : #F0F3F5;
+    --sp-surface-high-legacy: #DCEAF3;
+    --sp-primary-legacy     : #457892;
+    --sp-on-primary   : #FFFFFF;
+    --sp-on-surface-legacy  : #27323A;
+    --sp-subtle-legacy      : #6E7980;
+    --sp-divider-legacy     : rgba(39,50,58,0.11);
     --sp-shadow       : 0 8px 40px rgba(0,0,0,0.12), 0 2px 10px rgba(0,0,0,0.07);
     --sp-card-shadow  : 0 1px 4px rgba(0,0,0,0.09);
-    --sp-chip-bg      : rgba(220,155,155,0.22);
-    --sp-spinner-color: #DC9B9B;
-    --sp-hover-bg-legacy    : rgba(220,155,155,0.10);
-    --sp-char-color   : #5C9EA0;
-    --sp-chip-char-bg : rgba(92,158,160,0.15);
+    --sp-chip-bg      : rgba(69,120,146,0.16);
+    --sp-spinner-color: #457892;
+    --sp-hover-bg-legacy    : rgba(69,120,146,0.09);
+    --sp-char-color   : #6F8794;
+    --sp-chip-char-bg : rgba(111,135,148,0.14);
     /* Day mode: bubbles stay close to surface tokens (they already contrast
        fine with dark text) */
-    --sp-chat-user-bg : #C0E1D2;
-    --sp-chat-ai-bg   : #E5EEE4;
+    --sp-chat-user-bg : #DCEAF3;
+    --sp-chat-ai-bg   : #ECEFF1;
     /* Chat scroll-area background — same warm cream ST usually gives us,
        hard-coded so transparent-ST-theme users don't fall through to blank. */
-    --sp-chat-bg-legacy: #D2C1B6;
+    --sp-chat-bg-legacy: #F7F8F8;
 }
 
 /* ─── ST theme cascade — ST var 优先，fallback 到上面的 -legacy 值 ──────────── */
@@ -186,6 +186,9 @@ q::after {
     --sp-hover-bg    : var(--sp-hover-bg-legacy);
     --sp-chat-bg     : var(--sp-chat-bg-legacy);
 }
+.sp-forced-day {
+    --sp-sheet-bg-legacy: #FBFCFC;
+}
 
 /* 只跟随酒馆「配色」，不继承酒馆的「文字阴影」。酒馆核心 style.css 在全局 *
    选择器上加了 text-shadow（--shadowWidth / --SmartThemeShadowColor），会渗进
@@ -198,7 +201,6 @@ q::after {
 .sp-root, .sp-root *,
 .sp-inline-box, .sp-inline-box *,
 .sp-anchor-btn, .sp-anchor-btn *,
-.sp-tagpicker, .sp-tagpicker *,
 .sp-toast, .sp-toast * {
     text-shadow: none !important;
 }
@@ -217,7 +219,6 @@ q::after {
 .sp-ledger-inline,
 .sp-recall-box,
 .sp-anchor-btn,
-.sp-tagpicker,
 .sp-toast {
     font-size: var(--sp-fs-100);
 }
@@ -803,34 +804,9 @@ q::after {
     white-space: nowrap;
 }
 
-/* ─── Model select ───────────────────────────────────────────────────────────── */
-/* Kept for backward compat but no <select> uses .sp-input anymore. */
 select.sp-input { appearance: none; cursor: pointer; }
 
-/* Model dropdown after fetchModels: match .sp-input geometry, but let the
-   browser keep its native dropdown arrow — users need the visual affordance
-   and the native picker is the most reliable cross-platform experience.
-   min-width: 0 is critical: <select> defaults to intrinsic (longest option)
-   width and would otherwise blow past the flex row, pushing the fetch button
-   off screen and making the whole panel scroll horizontally. */
-.sp-model-select {
-    flex         : 1;
-    min-width    : 0;
-    max-width    : 100%;
-    padding      : 7px 11px;
-    background   : var(--sp-sheet-bg);
-    border       : 1px solid var(--sp-divider);
-    border-radius: 8px !important;   /* !important overrides ST global select rule + any theme */
-    color        : var(--sp-on-surface);
-    font-size    : var(--sp-fs-85);
-    font-family  : var(--sp-font);
-    outline      : none;
-    box-sizing   : border-box;
-    cursor       : pointer;
-    transition   : border-color 0.15s;
-}
-.sp-model-select:focus { border-color: var(--sp-primary); }
-
+/* ─── Model select ───────────────────────────────────────────────────────────── */
 /* ─── Inline model list (self-drawn, no popup) ──────────────────────────────
    Renders directly in the settings body. No overlay, no z-index, no lifecycle
    — just DOM. Works in every browser/WebView that can render <button>. */
@@ -1098,11 +1074,6 @@ select.sp-input { appearance: none; cursor: pointer; }
 }
 .sp-settings-layer[open] > .sp-settings-layer-title::before { transform: rotate(90deg); }
 .sp-settings-layer-title:hover { background: var(--sp-divider); }
-.sp-settings-layer-static > .sp-settings-layer-title {
-    cursor: default;
-}
-.sp-settings-layer-static > .sp-settings-layer-title::before { display: none; }
-.sp-settings-layer-static > .sp-settings-layer-title:hover { background: var(--sp-hover-bg); }
 .sp-settings-layer-body { padding: 0; }
 .sp-settings-subsection {
     margin: 6px 0;
@@ -1258,8 +1229,6 @@ select.sp-input { appearance: none; cursor: pointer; }
 
 /* 字体组与后续显示/通知设置之间使用统一 divider token。 */
 .sp-settings-display-divider { margin: 4px 0 2px; }
-.sp-settings-compat-group { display: contents; }
-
 /* 推进四项和提示词各项均按同一 section 层级对齐。 */
 #sp-settings-pace > .sp-settings-layer-body > .sp-settings-section-title,
 #sp-settings-pace > .sp-settings-layer-body > .sp-settings-section > .sp-settings-section-title {
@@ -2000,6 +1969,9 @@ select.sp-input { appearance: none; cursor: pointer; }
 .sp-type-major     .sp-type-badge { color: #b08968; }
 .sp-type-character .sp-type-badge { color: #f48fb1; }
 .sp-point-adult-badge { display: inline-flex; align-items: center; padding: 1px 4px; border-radius: 3px; font-size: var(--sp-fs-62); font-weight: 700; color: #8a6500; background: #f4d77a; line-height: 1.1; }
+.sp-adult-sensitive { display: inline; filter: blur(5px); opacity: 0.62; user-select: none; cursor: pointer; transition: filter 0.15s ease, opacity 0.15s ease; }
+.sp-adult-revealed .sp-adult-sensitive { filter: none; opacity: 1; user-select: text; }
+@media (prefers-reduced-motion: reduce) { .sp-adult-sensitive { transition: none; } }
 .sp-event.sp-event-pinned.sp-type-world     { border-left-color: #287fa3; }
 .sp-event.sp-event-pinned.sp-type-major     { border-left-color: #76583f; }
 .sp-event.sp-event-pinned.sp-type-character { border-left-color: #a85f78; }
@@ -2502,45 +2474,6 @@ select.sp-input { appearance: none; cursor: pointer; }
     flex-shrink: 0;
     margin-left: auto;
 }
-/* 手选当前剧情点：仿 .sp-inject-btn，hover 卡片才显形；当前节点(.sp-beat-setcur-on)常亮 */
-.sp-beat-setcur {
-    width          : var(--sp-btn-22);
-    height         : var(--sp-btn-22);
-    border         : none;
-    background     : transparent;
-    color          : var(--sp-subtle);
-    cursor         : pointer;
-    border-radius  : 4px;
-    display        : flex;
-    align-items    : center;
-    justify-content: center;
-    font-size      : var(--sp-fs-68);
-    flex-shrink    : 0;
-    opacity        : 0;
-    transition     : opacity 0.15s, color 0.15s, background 0.15s;
-}
-.sp-beat:hover .sp-beat-setcur   { opacity: 1; }
-.sp-beat-setcur:hover            { color: var(--sp-primary); background: var(--sp-surface-high); }
-.sp-beat-setcur-on               { opacity: 1; color: var(--sp-primary); }
-/* 面·逐 step 复制钮：仿 .sp-beat-setcur/.sp-inject-btn，hover 节点卡片才显形 */
-.sp-beat-copy {
-    width          : var(--sp-btn-22);
-    height         : var(--sp-btn-22);
-    border         : none;
-    background     : transparent;
-    color          : var(--sp-subtle);
-    cursor         : pointer;
-    border-radius  : 4px;
-    display        : flex;
-    align-items    : center;
-    justify-content: center;
-    font-size      : var(--sp-fs-68);
-    flex-shrink    : 0;
-    opacity        : 0;
-    transition     : opacity 0.15s, color 0.15s, background 0.15s;
-}
-.sp-beat:hover .sp-beat-copy { opacity: 1; }
-.sp-beat-copy:hover          { color: var(--sp-primary); background: var(--sp-surface-high); }
 .sp-beat-index {
     width          : 20px;
     height         : 20px;
@@ -3404,24 +3337,6 @@ select.sp-input { appearance: none; cursor: pointer; }
 }
 
 /* ─── Agency badge (player/world SVG icons) + stall marker ───────────────────── */
-.sp-agency-badge {
-    display        : inline-flex;
-    align-items    : center;
-    justify-content: center;
-    width          : 18px;
-    height         : 18px;
-    margin-left    : 4px;
-    color          : var(--sp-subtle);
-    opacity        : 0.85;
-    flex-shrink    : 0;
-}
-.sp-agency-badge .sp-agency-icon { width: 100%; height: 100%; display: block; }
-.sp-agency-player { color: var(--sp-primary); }
-.sp-agency-world  { color: var(--sp-subtle); opacity: 0.7; }
-
-/* Inline block: smaller badge to match tiny inline layout */
-.sp-inline-head .sp-agency-badge { width: 13px; height: 13px; margin-left: 3px; opacity: 0.7; }
-
 /* Stall marker */
 .sp-line-stall-tag {
     display      : inline-flex;
@@ -4089,8 +4004,7 @@ select.sp-input { appearance: none; cursor: pointer; }
 /* 线 / 冷知识的单条删除 × —— 放在 head 行内，紧挨其他操作并排、保持同尺寸。
    不用 absolute，避免跟常驻显示的注入按钮重叠、互相遮挡点击（楼内尤甚）。 */
 .sp-line-del-one,
-.sp-lines-dashed-delete,
-.sp-beat-delete {
+.sp-lines-dashed-delete {
     width          : var(--sp-btn-22);
     height         : var(--sp-btn-22);
     padding        : 0;
@@ -4109,11 +4023,9 @@ select.sp-input { appearance: none; cursor: pointer; }
 }
 /* 面板：跟注入按钮一样，hover 卡片才浮现 */
 .sp-beat:hover .sp-line-del-one,
-.sp-beat:hover .sp-lines-dashed-delete,
-.sp-beat:hover .sp-beat-delete { opacity: 1; }
+.sp-beat:hover .sp-lines-dashed-delete { opacity: 1; }
 .sp-line-del-one:hover,
-.sp-lines-dashed-delete:hover,
-.sp-beat-delete:hover { color: #d94545; background: rgba(217, 69, 69, 0.12); }
+.sp-lines-dashed-delete:hover { color: #d94545; background: rgba(217, 69, 69, 0.12); }
 /* 楼内：移动端无 hover，默认淡显（对齐注入按钮的 0.55 逻辑） */
 .sp-inline-line .sp-line-del-one { opacity: 0.55; color: inherit; }
 .sp-inline-line:hover .sp-line-del-one,
@@ -4147,38 +4059,23 @@ select.sp-input { appearance: none; cursor: pointer; }
 .sp-line-card.sp-line-pinned .sp-line-pin-toggle,
 .sp-lines-dashed-item.sp-lines-dashed-pinned .sp-lines-dashed-lock { opacity: 0.85; color: var(--sp-primary); }
 
+/* 日间主题的重点态使用低饱和蓝灰；未命中这些日间作用域时，保留夜间基线紫色。 */
+.sp-day .sp-beat-current { background: color-mix(in oklab, var(--sp-primary) 10%, transparent); }
+.sp-day .sp-beat-current:hover { background: color-mix(in oklab, var(--sp-primary) 14%, transparent); }
+.sp-day .sp-beat-next { box-shadow: inset 3px 0 0 color-mix(in oklab, var(--sp-primary) 35%, transparent); }
+.sp-day .sp-beat-badge-next { background: color-mix(in oklab, var(--sp-primary) 16%, transparent); border-color: color-mix(in oklab, var(--sp-primary) 50%, transparent); }
+.sp-day .sp-beat-type { background: color-mix(in oklab, var(--sp-primary) 15%, transparent); }
+.sp-day .sp-inline-ledger-lock:hover { background: color-mix(in oklab, var(--sp-primary) 12%, transparent); }
+.sp-day .sp-ledger-inline-row.sp-line-pinned { background: color-mix(in oklab, var(--sp-primary) 5%, transparent); }
+.sp-day .sp-line-pin-toggle:hover,
+.sp-day .sp-lines-dashed-lock:hover { background: color-mix(in oklab, var(--sp-primary) 12%, transparent); }
+.sp-day .sp-line-card.sp-line-pinned { background: color-mix(in oklab, var(--sp-primary) 5%, transparent); }
+.sp-day .sp-event.sp-event-pinned { background: color-mix(in oklab, var(--sp-primary) 6%, transparent); }
+
 /* 锁定态卡片：左边框改用主色调、轻微底色区分，一眼看出"保命线" */
 .sp-line-card.sp-line-pinned {
     background       : rgba(125, 125, 235, 0.05);
 }
-
-/* 点·锁定切换按钮 —— 仿 .sp-line-pin-toggle / .sp-inject-btn：hover 点卡片才浮现，已锁常驻亮出 */
-.sp-point-pin-toggle {
-    width          : var(--sp-btn-22);
-    height         : var(--sp-btn-22);
-    padding        : 0;
-    border         : none;
-    background     : transparent;
-    color          : var(--sp-subtle);
-    cursor         : pointer;
-    border-radius  : 4px;
-    display        : flex;
-    align-items    : center;
-    justify-content: center;
-    font-size      : var(--sp-fs-68);
-    flex-shrink    : 0;
-    opacity        : 0;
-    transition     : opacity 0.15s, color 0.15s, background 0.15s;
-}
-.sp-event:hover .sp-point-pin-toggle { opacity: 1; }
-.sp-point-pin-toggle:hover { color: var(--sp-primary); background: rgba(125, 125, 235, 0.12); }
-/* 已锁定：不必 hover 也常驻亮出，一眼看清锁没锁 */
-.sp-event.sp-event-pinned .sp-point-pin-toggle { opacity: 0.85; color: var(--sp-primary); }
-
-/* 点·操作三钮收拢：注入/锁/删挤在一起（对齐 .sp-beat-actions 的 2px），
-   只收钮间距、不动徽章↔标题↔时间的 7px。注入钮带 margin-left:auto 仍把整簇推到最右。 */
-.sp-event-head .sp-point-pin-toggle,
-.sp-event-head .sp-sch-del-one { margin-left: -5px; }
 
 /* 锁定态点卡片：左内边框主色 + 轻微底色，一眼看出"保留项" */
 .sp-event.sp-event-pinned {
@@ -4547,6 +4444,7 @@ body.sp-theater-fs-lock { overflow: hidden; }
     background-color: var(--sp-sheet-bg-legacy);
     background-image: linear-gradient(var(--sp-sheet-bg), var(--sp-sheet-bg));
 }
+#sp-anchor-body.sp-anchor-fs-on .sp-anchor-back { display: none; }
 body.sp-anchor-fs-lock { overflow: hidden; }
 /* 缩放角标：仅坐标全屏态 + 桌面显示（手机全屏不允许拖拽，靠媒体查询天然隐藏）。 */
 .sp-anchor-fs-resize { display: none; }
@@ -4832,17 +4730,10 @@ body.sp-anchor-fs-lock { overflow: hidden; }
 .sp-anchor-btn.sp-anchor-busy  { opacity: 0.35; pointer-events: none; }
 
 /* 跳回来源楼层的高亮脉冲（作用于 #chat 里的 .mes → 全局） */
-.mes.sp-anchor-flash { animation: sp-anchor-flash 1.6s ease-out; }
-@keyframes sp-anchor-flash {
-    0%, 100% { background-color: transparent; }
-    18%      { background-color: color-mix(in oklab, var(--SmartThemeQuoteColor, #d0bcff) 22%, transparent); }
-}
-
 /* 面板本体 */
 #sp-anchor-wrap     { overflow: hidden; }
 .sp-anchor-body     { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .sp-anchor-scroll   { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px 16px; }
-.sp-anchor-loading  { flex: 1; display: flex; align-items: center; justify-content: center; padding: 40px; }
 
 /* 角色层 / 聊天桶 / 缩略卡片 共用列容器 */
 .sp-anchor-char-list, .sp-anchor-chat-list, .sp-anchor-item-list { display: flex; flex-direction: column; gap: 8px; }
@@ -5020,18 +4911,6 @@ body.sp-anchor-fs-lock { overflow: hidden; }
 }
 .sp-anchor-ftag-new .sp-anchor-ftag-name { flex: 1 1 100%; }
 .sp-anchor-ftag-new .sp-tagmgr-swatches  { flex: 1; }
-.sp-anchor-ftag-swatch {
-    padding      : 0;
-    background   : transparent;
-    border       : 2px solid transparent;
-    border-radius: 999px;
-    cursor       : pointer;
-    line-height  : 0;
-    transition   : border-color 0.12s, transform 0.12s;
-}
-.sp-anchor-ftag-swatch:hover              { transform: scale(1.08); }
-.sp-anchor-ftag-swatch .sp-anchor-tagchip { pointer-events: none; }
-.sp-anchor-ftag-swatch.sp-tp-swatch-on    { border-color: var(--sp-primary); }
 .sp-anchor-ftag-foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; white-space: nowrap; }
 
 /* 第三层：全文（Shadow host 外壳，内部样式由 Shadow DOM 隔离） */
@@ -5158,65 +5037,7 @@ body.sp-anchor-fs-lock { overflow: hidden; }
 .sp-tagmgr-confirm-text { flex: 1; font-size: var(--sp-fs-74); color: var(--sp-on-surface); }
 
 /* ─── 坐标 · 标签选择器（body 级 fixed 浮层，收藏时 & 全文编辑共用）──────── */
-.sp-tagpicker {
-    position     : fixed;
-    z-index      : 2000012;   /* 高于面板 2000001、确认框 2000002、小剧场全屏 2000011 */
-    width        : min(320px, calc(100vw - 24px));
-    max-height   : min(60vh, 480px);
-    overflow-y   : auto;
-    background-color: var(--sp-sheet-bg-legacy);
-    background-image: linear-gradient(var(--sp-sheet-bg), var(--sp-sheet-bg));
-    border       : 1px solid var(--sp-divider);
-    border-radius: 12px;
-    box-shadow   : var(--sp-shadow);
-    padding      : 12px;
-    color        : var(--sp-on-surface);
-    font-size    : var(--sp-fs-82);
-}
-.sp-tagpicker-title { font-size: var(--sp-fs-76); font-weight: 600; color: var(--sp-subtle); margin-bottom: 8px; }
-.sp-tagpicker-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-.sp-tagpicker-empty { font-size: var(--sp-fs-76); color: var(--sp-subtle); padding: 4px 0 10px; }
-.sp-tagpicker-chip {
-    padding      : 0;
-    background   : transparent;
-    border       : none;
-    cursor       : pointer;
-    line-height  : 0;
-    opacity      : 0.5;
-    transition   : opacity 0.12s;
-}
-.sp-tagpicker-chip:hover        { opacity: 0.82; }
-.sp-tagpicker-chip .sp-anchor-tagchip { pointer-events: none; }
-.sp-tagpicker-chip.sp-tp-chip-on { opacity: 1; }
-.sp-tagpicker-new {
-    display      : flex;
-    align-items  : center;
-    flex-wrap    : wrap;
-    gap          : 6px;
-    padding-top  : 10px;
-    border-top   : 1px solid var(--sp-divider);
-}
-.sp-tagpicker-new .sp-tagpicker-name { flex: 1 1 100%; }
-.sp-tagpicker-swatches { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; }
-.sp-tagpicker-swatch {
-    padding      : 0;
-    background   : transparent;
-    border       : 2px solid transparent;
-    border-radius: 999px;
-    cursor       : pointer;
-    line-height  : 0;
-    transition   : border-color 0.12s, transform 0.12s;
-}
-.sp-tagpicker-swatch:hover      { transform: scale(1.08); }
-.sp-tagpicker-swatch .sp-anchor-tagchip { pointer-events: none; }
-.sp-tagpicker-swatch.sp-tp-swatch-on { border-color: var(--sp-primary); }
-.sp-tagpicker-foot { display: flex; justify-content: flex-end; margin-top: 12px; }
-
 /* 空态 */
-.sp-anchor-empty-glyph { display: inline-flex; opacity: 0.3; }
-.sp-anchor-empty-svg   { width: calc(32px * var(--sp-scale)); height: calc(32px * var(--sp-scale)); }
-.sp-anchor-empty-hint  { font-size: var(--sp-fs-72) !important; color: var(--sp-subtle); opacity: 0.85; }
-
 /* ─── 虚线 · 冷知识 ─────────────────────────────────────────────────────────── */
 /* 通用文本列表仍供楼层内冷知识使用。 */
 .sp-dashed-list {
@@ -5379,7 +5200,8 @@ body.sp-anchor-fs-lock { overflow: hidden; }
     width        : max-content;
     max-width    : calc(100vw - 24px);
     padding      : 5px;
-    background   : var(--sp-sheet-bg);
+    background-color: var(--sp-sheet-bg-legacy);
+    background-image: linear-gradient(var(--sp-sheet-bg), var(--sp-sheet-bg));
     border       : 1px solid var(--sp-divider);
     border-radius: 8px;
     box-shadow   : var(--sp-shadow);
@@ -5462,32 +5284,6 @@ body.sp-anchor-fs-lock { overflow: hidden; }
 .sp-alm-clock-arrow { color: var(--sp-subtle); font-weight: 400; margin: 0 1px; }
 .sp-alm-clock-wait  { color: var(--sp-subtle); font-weight: 400; font-size: var(--sp-fs-72); }
 /* 「同步到点」CTA：改了今天后点落后时在今天条冒出的醒目胶囊；点一下后台把点重生成到今天。busy 态换成静默灰胶囊 */
-.sp-alm-today-sync {
-    display      : inline-flex;
-    align-items  : center;
-    gap          : 4px;
-    height       : 24px;
-    padding      : 0 10px;
-    border-radius: 12px;
-    font-size    : var(--sp-fs-72);
-    font-weight  : 600;
-    line-height  : 1;
-    white-space  : nowrap;
-}
-.sp-alm-today-sync-btn {
-    border    : none;
-    cursor    : pointer;
-    background : var(--sp-primary);
-    color     : var(--sp-on-primary);
-    transition: filter 0.15s ease;
-}
-.sp-alm-today-sync-btn:hover { filter: brightness(1.08); }
-.sp-alm-today-sync-busy {
-    background: color-mix(in oklab, var(--sp-primary) 18%, transparent);
-    color     : var(--sp-subtle);
-    cursor    : default;
-}
-
 .sp-alm-body {
     flex       : 1;
     min-height : 0;
@@ -5608,7 +5404,9 @@ body.sp-anchor-fs-lock { overflow: hidden; }
 .sp-ledger-ctrl {
     display      : flex;
     align-items  : center;
+    justify-content: flex-end;
     gap          : 8px;
+    flex-wrap    : nowrap;
     padding-bottom: 10px;
     margin-bottom: 10px;
     border-bottom: 1px solid var(--sp-divider);
@@ -5616,6 +5414,7 @@ body.sp-anchor-fs-lock { overflow: hidden; }
 .sp-ledger-ctrl-wrap { padding: 10px 12px 10px; }
 .sp-ledger-ctrl-wrap .sp-ledger-ctrl { margin-bottom: 0; }
 .sp-alm-body-ledger { padding-top: 0; }
+.sp-alm-body > .sp-batch-bar:not(.sp-batch-active) { padding-top: 0; }
 .sp-ledger-auto {
     display    : flex;
     align-items: center;
@@ -5625,7 +5424,14 @@ body.sp-anchor-fs-lock { overflow: hidden; }
     cursor     : pointer;
 }
 .sp-ledger-auto input[type="checkbox"] { cursor: pointer; }
-.sp-ledger-capture-now { margin-left: auto; flex-shrink: 0; }
+.sp-ledger-capture-now { flex-shrink: 0; }
+.sp-ledger-ctrl > .sp-batch-bar { padding: 0; flex-shrink: 0; }
+.sp-ledger-ctrl > .sp-batch-bar.sp-batch-active { margin-left: auto; }
+.sp-ledger-ctrl > .sp-batch-bar .sp-batch-enter { white-space: nowrap; }
+@media (max-width: 480px) {
+    .sp-ledger-ctrl { flex-wrap: wrap; }
+    .sp-ledger-ctrl > .sp-batch-bar.sp-batch-active { margin-left: auto; }
+}
 .sp-ledger-capture-busy {
     cursor: progress;
     opacity: 0.72;
@@ -6449,9 +6255,6 @@ body.sp-anchor-fs-lock { overflow: hidden; }
 .sp-sch-del-one:hover { color: #d94545; background: rgba(217, 69, 69, 0.12); opacity: 1; }
 /* 点·删除钮进主面板（renderEvent 的 .sp-event）：仿 .sp-point-pin-toggle —— 平时藏、hover 点卡片才浮现；
    楼内块抽屉里的 0.55 常显行为(.sp-sch-drawer-item)不受影响。 */
-.sp-event .sp-sch-del-one       { opacity: 0; color: var(--sp-subtle); }
-.sp-event:hover .sp-sch-del-one { opacity: 1; }
-
 /* 点/线面板 header 下方另起一行的「和间聊聊」引导；纯文字区（不自己画线，下方 tab-bar 已有分隔线），padding 上下对称、不与 header 下 padding 叠太厚 */
 .sp-jump-hint { padding: 2px 16px 8px; font-size: var(--sp-fs-75); color: var(--sp-subtle); flex-shrink: 0; }
 .sp-jump-link { border: 0; padding: 0; background: transparent; color: var(--sp-primary); cursor: pointer; font: inherit; }
