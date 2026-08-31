@@ -45,7 +45,7 @@ export function formatStoryClockMeta(meta, escape = value => String(value ?? '')
 
 // 楼内小时间条的纯组装 seam：index.js 仍负责挑最新楼/解析旧 stamp，本函数只统一最终月名显示。
 export function formatStoryClockHeadParts({ anchor, anchorWeekday, clockMeta = null, stampDate = null, rawStamp = '', calendar = null, monthName = (_cal, month) => `${month}月`, escapeHtml = value => String(value ?? ''), tip = '' } = {}) {
-    const today = (dateText, weekday = '', title = '') => `<span class="sp-dash-sum-today"${title ? ` title="${escapeHtml(title)}"` : ''}>今 ${escapeHtml(dateText)}${weekday ? ` ${escapeHtml(weekday)}` : ''}</span>`;
+    const today = (dateText, weekday = '', title = '') => `<span class="sp-dash-sum-today"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(dateText)}${weekday ? ` ${escapeHtml(weekday)}` : ''}</span>`;
     const dateText = value => formatCalendarDate(value, calendar, monthName);
     const fallbackWeekday = anchorWeekday || '星期未记录';
     const fallback = { todayHtml: today(dateText(anchor), fallbackWeekday), timeHtml: '' };
@@ -107,7 +107,7 @@ export function createAxisUi(env = {}) {
         if (!clock || (!clock.start && !clock.end)) value = '<span class="sp-alm-clock-wait">等待主楼 AI 打点…（发几楼后自动出现）</span>';
         else if (clock.start && clock.end && clock.start !== clock.end) value = `${formatStoryClockMeta(clock.startMeta, env.escapeHtml, env.calendar?.(), env.monthName)} <span class="sp-alm-clock-arrow">→</span> ${formatStoryClockMeta(clock.endMeta, env.escapeHtml, env.calendar?.(), env.monthName)}`;
         else value = formatStoryClockMeta(clock.endMeta || clock.startMeta, env.escapeHtml, env.calendar?.(), env.monthName);
-        return `<div class="sp-alm-clock" title="由主楼 AI 每楼打的隐形时间戳读回，精确到小时"><span class="sp-alm-clock-lbl"><i class="fa-regular fa-clock"></i>时间戳</span><span class="sp-alm-clock-val">${value}</span></div>`;
+        return `<div class="sp-alm-clock" title="由主楼 AI 每楼打的隐形时间戳读回，精确到小时"><span class="sp-alm-clock-lbl">当下时间</span><span class="sp-alm-clock-val">${value}</span></div>`;
     };
     return { actionMenuHtml, todayBarHtml, storyClockBarHtml };
 }
