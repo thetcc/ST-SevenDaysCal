@@ -4,6 +4,12 @@ export function createSpaceUi(host = {}) {
     const query = host.query || (() => null);
     const element = host.element || (() => null);
     const escape = value => host.escapeHtml?.(String(value ?? '')) ?? String(value ?? '');
+    const isMobileViewport = () => {
+        const injected = host.isMobile?.();
+        if (typeof injected === 'boolean') return injected;
+        const width = Number(globalThis.window?.innerWidth ?? globalThis.innerWidth);
+        return Number.isFinite(width) && width <= 640;
+    };
     const widgets = new Map();
     let widgetSeq = 0;
     let controllers = null;
@@ -81,14 +87,23 @@ export function createSpaceUi(host = {}) {
         if (!$root?.length) return;
         bound = true;
         $root.off('.spSpaceFeature');
-        $root.on('click.spSpaceFeature', '#sp-space-send', () => {
+        const sendInput = () => {
             const $input = query('#sp-space-input');
             const message = String($input?.val?.() || '').trim();
             if (!message || controllers.chat.busy) return;
             $input.val('');
             host.autoGrow?.($input[0]);
             void controllers.chat.send(message);
-        });
+        };
+        $root.on('click.spSpaceFeature', '#sp-space-send', sendInput);
+        if (!isMobileViewport()) {
+            $root.on('keydown.spSpaceFeature', '#sp-space-input', event => {
+                const nativeEvent = event.originalEvent;
+                if (event.key !== 'Enter' || event.shiftKey || event.isComposing || nativeEvent?.isComposing || event.repeat || nativeEvent?.repeat) return;
+                event.preventDefault();
+                sendInput();
+            });
+        }
         $root.on('input.spSpaceFeature', '#sp-space-input', function () { host.autoGrow?.(this); });
         $root.on('click.spSpaceFeature', '.sp-chat-msg-delete', function () {
             if (controllers.chat.busy) return;
