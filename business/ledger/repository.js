@@ -12,6 +12,9 @@
 // 无需本模块再接线（那两个函数按 key 字符串直读 chat_metadata，与本模块是否被 import 无关）。
 
 const { getContext = () => null } = await import('../../../../../extensions.js').catch(() => ({}));
+import { getChatRoot, persistExternalRoots, registerExternalStorageContext } from '../../runtime/external-chat-storage.js';
+
+registerExternalStorageContext(getContext);
 
 const LEDGER_KEY     = 'sp-ledger';
 const SCHEMA_VERSION = 1;
@@ -48,12 +51,9 @@ function freshMeta() {
 function ledger(create = false) {
     const ctx = getContext?.();
     if (!ctx || !ctx.chatId) return null;
-    const cm = ctx.chatMetadata;
-    if (!cm) return null;
-    let m = cm[LEDGER_KEY];
+    let m = getChatRoot(LEDGER_KEY, { create, factory: freshMeta });
     if (!m || typeof m !== 'object') {
-        if (!create) return null;
-        m = cm[LEDGER_KEY] = freshMeta();
+        return null;
     }
     if (!Array.isArray(m.entries)) m.entries = [];
     if (!Number.isFinite(+m.seq))  m.seq = 0;
@@ -70,6 +70,8 @@ function persist() {
     // 同步快照走 diff patch（无变化 no-op），当场写出、切档取消不掉。老版 ST 无此 API 时兜底防抖。
     const ctx = getContext?.();
     if (!ctx) return;
+    const external = persistExternalRoots();
+    if (external !== null) return external;
     const result = ctx.saveMetadata ? ctx.saveMetadata() : ctx.saveMetadataDebounced?.();
     // 旧同步 API 不改变签名；若宿主返回 Promise，吞掉其异步 reject，避免制造未处理 Promise。
     result?.catch?.(() => {});
@@ -77,6 +79,8 @@ function persist() {
 
 // 批量路径专用：等待官方 saveMetadata 返回的 Promise（若有）。ST 内部吞掉的磁盘错误不在此边界可观测。
 function persistAwaitable(boundContext = null, options = {}) {
+    const external = persistExternalRoots({ confirmed: true, ownerGuard: options.ownerGuard });
+    if (external !== null) return external;
     if (fixedMetadataPersistence) return fixedMetadataPersistence.commit?.(boundContext, options);
     const ctx = boundContext || getContext?.();
     if (!ctx) return Promise.resolve();
@@ -188,11 +192,18 @@ export async function addEntriesAtomic(items) {
     try {
         const prepared = list.map(obj => normalizeEntry(obj, `L${++m.seq}`));
         m.entries.push(...prepared);
-        await persistAwaitable();
+        const saved = await persistAwaitable();
+        if (saved && (saved.ok !== true || saved.commitState !== 'confirmed')) {
+            throw Object.assign(new Error(saved.reason || (saved.commitState === 'unknown' ? '外置写入结果未确认，请刷新后核实' : 'ledger-save-unconfirmed')), {
+                phase: 'save', commitState: saved.commitState || 'not-dispatched', saveResult: saved,
+            });
+        }
         return prepared;
     } catch (error) {
-        m.entries.length = oldLen;
-        m.seq = oldSeq;
+        if (error?.saveResult?.commitState !== 'unknown') {
+            m.entries.length = oldLen;
+            m.seq = oldSeq;
+        }
         throw error;
     }
 }

@@ -20,6 +20,9 @@ import { getContext } from '../../../extensions.js';
 import { eventSource, event_types } from '../../../../script.js';
 import { LITERAL_DOUBLE_BRACKET_RULE, normalizeTagRules, TAG_NAME_SOURCE } from './utils/tag-names.js';
 import { diagnosticMessage, safeDiagnosticLog } from './api/diagnostics.js';
+import { getChatRoot, persistExternalRoots, registerExternalStorageContext } from './runtime/external-chat-storage.js';
+
+registerExternalStorageContext(getContext);
 
 const MEMORY_KEY = 'sp-memory';
 const SCHEMA_VERSION = 3;   // v3 = tag-stripped floor text (v2 summaries included thinking/widget noise; requires rebuild)
@@ -84,14 +87,13 @@ function hashStr(s) {
 // ─── chat_metadata access ────────────────────────────────────────────────────
 function meta() {
     const ctx = getContext();
-    if (!ctx.chatMetadata[MEMORY_KEY]) {
-        ctx.chatMetadata[MEMORY_KEY] = freshMeta();
-    }
+    const root = getChatRoot(MEMORY_KEY, { create: true, factory: freshMeta });
+    if (!root) return null;
     // Version mismatch: wipe (hash algorithm changed with content sanitizer,
     // so old summaries can't be validated) but stash a migration notice for
     // the UI to surface once. Users see a toast on next chat switch / panel
     // open explaining why their summaries are reset.
-    const m = ctx.chatMetadata[MEMORY_KEY];
+    const m = root;
     if (m.version !== SCHEMA_VERSION) {
         const l0Count = m.L0 ? Object.keys(m.L0).length : 0;
         const l1Count = Array.isArray(m.L1) ? m.L1.length : 0;
@@ -101,10 +103,11 @@ function meta() {
         if (l0Count > 0 || l1Count > 0) {
             fresh._migration = { fromVersion: m.version ?? 1, l0Count, l1Count, ts: Date.now() };
         }
-        ctx.chatMetadata[MEMORY_KEY] = fresh;
+        for (const key of Object.keys(m)) delete m[key];
+        Object.assign(m, fresh);
         persist();
     }
-    return ctx.chatMetadata[MEMORY_KEY];
+    return m;
 }
 
 function freshMeta() {
@@ -122,6 +125,8 @@ function persist() {
     // 防抖那份记忆就丢——补全过程多次写入、全吊在最后一个防抖上，尤其危险。
     // rebuildAll 的新记忆必须整套完成后才能写入；期间任何路径都不能落盘半成品。
     if (_isRebuilding) return;
+    const external = persistExternalRoots();
+    if (external !== null) return external;
     const ctx = getContext();
     if (!ctx) return;
     if (ctx.saveMetadata) ctx.saveMetadata();
@@ -411,6 +416,7 @@ async function runL0(groupKey, { queueL1 = true } = {}) {
     if (!builtInMemoryEnabled()) return false;
     const lifecycleEpoch = _lifecycleEpoch;
     const m = meta();
+    if (!m) return false;
     const groups = getStableGroups();
     const group = groups.find(g => g.key === groupKey);
     if (!group) return false;
@@ -470,6 +476,7 @@ async function runL0(groupKey, { queueL1 = true } = {}) {
 
 function recordFailure(groupKey, err, phase = 'request') {
     const m = meta();
+    if (!m) return;
     const rec = m.failed[groupKey] || { count: 0 };
     rec.count += 1;
     rec.lastErr = diagnosticMessage(err, { phase });
@@ -489,6 +496,7 @@ function recordFailure(groupKey, err, phase = 'request') {
 // 模型失败区分，且**不触发全局暂停/consecutiveFails**——它不是模型的错，别让用户去调模型。
 function recordStrippedEmpty(groupKey) {
     const m = meta();
+    if (!m) return;
     m.failed[groupKey] = { count: 3, lastErr: '净化后正文几乎为空，请重查标签设置', stripped: true };
     m.system.lastError = '净化后正文几乎为空，请重查标签设置';
 }
@@ -496,6 +504,7 @@ function recordStrippedEmpty(groupKey) {
 // ─── L1 compression ──────────────────────────────────────────────────────────
 function maybeQueueL1() {
     const m = meta();
+    if (!m) return;
     const groups = getStableGroups();
     const l0Keys = groups.map(g => g.key).filter(k => m.L0[k]);
     const M = Math.max(2, +_getSettings().memoryL1Group || 10);
@@ -514,6 +523,7 @@ async function runL1(range) {
     if (!builtInMemoryEnabled()) return false;
     const lifecycleEpoch = _lifecycleEpoch;
     const m = meta();
+    if (!m) return false;
     const [startMid, endMid] = range;
     const startNum = parseInt(startMid, 10);
     const endNum   = parseInt(endMid, 10);
@@ -548,6 +558,7 @@ async function runL1(range) {
 // ─── Health report ───────────────────────────────────────────────────────────
 export function getHealthReport() {
     const m = meta();
+    if (!m) return { totalAi: 0, totalGroups: 0, withL0: 0, pending: 0, permaFailed: 0, strippedEmpty: 0, l1Chapters: 0, latestFloorPending: false, paused: true, lastError: '当前聊天的外置构画数据不可用', busy: false, unavailable: true };
     const groups = getStableGroups();
     const floors = getAiFloors();
     const totalGroups = groups.length;
@@ -584,6 +595,7 @@ export function isMemoryBusy() { return _running || _queue.length > 0; }
 // a non-null value.
 export function consumeMigrationNotice() {
     const m = meta();
+    if (!m) return null;
     const notice = m._migration || null;
     if (notice) {
         delete m._migration;
@@ -596,6 +608,7 @@ export function consumeMigrationNotice() {
 export function getMemoryContext() {
     if (_getSettings().useBaiBaiBook) return '';
     const m = meta();
+    if (!m) return '';
     const parts = [];
     if (m.L1.length) {
         parts.push('━ 早期章节 ━');
@@ -627,6 +640,7 @@ export async function fillMissing(onProgress) {
     // 若循环里还读模块级会 null 解引用崩掉；读本地 ctrl（同一对象、被 abort 过）稳。
     const ctrl = _abortController = new AbortController();   // 之前漏建 → 中止按钮对补漏完全无效；补上让 abortRebuild 能掐到
     const m = meta();
+    if (!m) throw new Error('当前聊天的外置构画数据不可用');
     m.system.paused = false;
     m.system.consecutiveFails = 0;
 
@@ -674,6 +688,7 @@ export async function rebuildAll(onProgress) {
     const ctrl = _abortController = new AbortController();   // 本地引用，防切聊天置空后 null 解引用（同 fillMissing）
     const lifecycleEpoch = _lifecycleEpoch;
     const m = meta();
+    if (!m) throw new Error('当前聊天的外置构画数据不可用');
     // 关键：先把旧记忆整体备份，再在**内存里**换成空壳开始重构，此刻**绝不落盘**。
     // 只有完整跑完才让新记忆算数（committed=true）；中途中止 / 异常 → finally 里整体还原旧记忆。
     // 这样"点了推翻重构、立刻中止"绝不会把之前的记忆清空。旧对象在重构期间从不被改动
@@ -736,10 +751,11 @@ export function abortAll(reason = 'reset') {
 // ─── Event handlers ──────────────────────────────────────────────────────────
 function onCharacterMessageRendered() {
     if (!builtInMemoryEnabled()) return;
-    if (meta().system.paused) return;
+    const current = meta();
+    if (!current || current.system.paused) return;
     // A new AI floor arrived: any stable group (not the newest) whose L0 is missing
     // gets queued. Delay-by-one is baked into getStableGroups().
-    const m = meta();
+    const m = current;
     const groups = getStableGroups();
     for (const g of groups) {
         const cur = m.L0[g.key];
@@ -754,6 +770,7 @@ function onMessageMutated(mesId) {
     if (!builtInMemoryEnabled()) return;
     // Any mutation invalidates any L0 whose range contains this mesid
     const m = meta();
+    if (!m) return;
     const midNum = parseInt(String(mesId), 10);
     let dirty = false;
     for (const [k, l0] of Object.entries(m.L0)) {
@@ -803,6 +820,7 @@ export function initMemory({ getSettings, callApi, onPause }) {
     _listeners.del = () => {
         if (!builtInMemoryEnabled()) return;
         const m = meta();
+        if (!m) return;
         const chat = getChat();
         const validMids = new Set(chat.map((_, i) => String(i)));
         for (const [k, l0] of Object.entries(m.L0)) {
@@ -822,6 +840,7 @@ export function initMemory({ getSettings, callApi, onPause }) {
 
 export function resumeSystem() {
     const m = meta();
+    if (!m) return false;
     m.system.paused = false;
     m.system.consecutiveFails = 0;
     m.system.lastError = null;

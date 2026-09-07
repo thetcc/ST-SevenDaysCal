@@ -22,6 +22,9 @@
 
 import { getContext } from '../../../extensions.js';
 import { isValidCalendarDescriptor, resolveSnapshotCalendar } from './runtime/chat-date-anchor.js';
+import { isExternalMode, isExternalReady, readExternalSnapshot, registerExternalStorageContext, writeExternalSnapshot } from './runtime/external-chat-storage.js';
+
+registerExternalStorageContext(getContext);
 
 // message.extra 上的键，带 gouhua_ 前缀防和别的扩展撞。
 const SNAP_KEY = 'gouhua_snapshot';
@@ -113,8 +116,14 @@ export function writeSnapshot(mesId, snap) {
     if (snap?.weekdayRef && Number.isInteger(+snap.weekdayRef.refDoy) && Number.isInteger(+snap.weekdayRef.refWd)) payload.weekdayRef = { refDoy: +snap.weekdayRef.refDoy, refWd: +snap.weekdayRef.refWd };
 
     // 幂等：内容没变就不写（ts 不参与比较，否则永远"变了"）。
-    const prev = msg.extra?.[SNAP_KEY];
+    const prev = isExternalMode() ? readExternalSnapshot(msg) : msg.extra?.[SNAP_KEY];
     if (prev && _sameSnapContent(prev, payload)) return false;
+
+    if (isExternalMode()) {
+        if (!isExternalReady()) return false;
+        void writeExternalSnapshot(msg, payload);
+        return true;
+    }
 
     if (!msg.extra || typeof msg.extra !== 'object') msg.extra = {};
     msg.extra[SNAP_KEY] = payload;
@@ -164,7 +173,7 @@ function _mirrorToCurrentSwipe(msg, payload) {
 // 返回 null = 该楼无快照（重构前的老楼 / 从未生成过）→ 渲染端据此决定不显块。
 export function readSnapshot(mesId) {
     const msg = messageAt(mesId);
-    const snap = msg?.extra?.[SNAP_KEY];
+    const snap = isExternalMode() ? readExternalSnapshot(msg) : msg?.extra?.[SNAP_KEY];
     if (!snap || typeof snap !== 'object') return null;
     // 容错归一：老/脏快照缺字段时补齐缺省，读取端拿到的形状恒定。
     const out = {

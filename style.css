@@ -6777,3 +6777,10 @@ body.sp-anchor-fs-lock { overflow: hidden; }
 .sp-theater-source-detail { width: 100%; box-sizing: border-box; margin-top: 6px; padding: 9px 10px; border: 1px solid var(--sp-divider); border-radius: 9px; background: color-mix(in oklab, var(--sp-primary) 4%, var(--sp-sheet-bg)); }
 .sp-theater-source-caption { margin-bottom: 5px; font-size: var(--sp-fs-72); color: var(--sp-subtle); }
 .sp-theater-source-detail pre { max-height: 340px; margin: 0; overflow: auto; white-space: pre-wrap; word-break: break-word; font: inherit; font-size: var(--sp-fs-75); color: var(--sp-on-surface); }
+.sp-storage-mode-card {
+    margin: 8px 0 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--sp-border, rgba(128, 128, 128, .28));
+    border-radius: 10px;
+    background: var(--sp-surface-soft, rgba(128, 128, 128, .08));
+}

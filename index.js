@@ -1,4 +1,4 @@
-import { getContext, extension_settings } from '../../../extensions.js';
+import { getContext, extension_settings, extensionNames } from '../../../extensions.js';
 import * as worldInfoCore from '../../../world-info.js';
 import { equalsIgnoreCaseAndAccents, getCharaFilename } from '../../../utils.js';
 import * as scriptCore from '../../../../script.js';
@@ -43,7 +43,19 @@ import { getSettings, parseExcludeParams, loadCfg, loadUtilityCfg, saveCfg, load
 import { postChatCompletion, callCustomApi, callMemoryApi, callTheaterApi, bindApiClient, GEN_TEMPERATURE } from './api/client.js';
 import { normalizeApiUrl } from './api/sse.js';
 import { safeDiagnosticLog, diagnosticMessage, makeDiagnosticError, shouldNotifyGeneration, classifyGenerationError } from './api/diagnostics.js';
-import { recordChatBoundary, shareRecentDiagnosticTrace, traceDiagnosticEvent } from './runtime/diagnostic-trace.js';
+import { readDiagnosticTrace, recordChatBoundary, shareRecentDiagnosticTrace, traceDiagnosticEvent } from './runtime/diagnostic-trace.js';
+import {
+    abortMigration,
+    bindExternalChatStorage,
+    buildCurrentChatDiagnosticPackage,
+    isExternalMode,
+    loadExternalChat,
+    migrateCurrentChat,
+    probeExternalBackend,
+    pruneExternalSnapshots,
+    refreshDiagnosticRetention,
+    storageStatus,
+} from './runtime/external-chat-storage.js';
 import { normalizeTagRules } from './utils/tag-names.js';
 import { ADULT_MODES, ADULT_MODE_LABELS, adultModeForCharacter } from './business/lines/adult.js';
 import { axisState } from './business/axis/state.js';
@@ -124,10 +136,12 @@ import { createAxisTransactionController } from './business/axis/transaction.js'
 import { createAxisPromptBuilder } from './business/axis/prompts.js';
 import { createAxisDateContext } from './business/axis/date-context.js';
 import { resolveAlmanacContextText, sanitizeGenerationContextText } from './runtime/generation-context.js';
-import { bindStoryClock, parseStoryClock as parseStoryClockPure, parseJudgedDate as parseJudgedDatePure, latestStoryClock as latestStoryClockPure, storyClockDate as storyClockDatePure, storyWeekdayRef as storyWeekdayRefPure, completeStoryClock as completeStoryClockPure, storyClockNarrativeBody, buildStoryClockPrompt, STORY_CLOCK_KEY, createStoryClockController } from './business/axis/story-clock.js';
+import { bindStoryClock, parseStoryClock as parseStoryClockPure, parseJudgedDate as parseJudgedDatePure, latestStoryClock as latestStoryClockPure, storyClockDate as storyClockDatePure, storyWeekdayRef as storyWeekdayRefPure, completeStoryClock as completeStoryClockPure, storyClockNarrativeBody, buildStoryClockPrompt, STORY_CLOCK_KEY, createStoryClockController, extensionStoryClockState } from './business/axis/story-clock.js';
 import { createWeekdayConsumerContext } from './business/axis/weekday-coordinator.js';
 import { buildDateJudgePrompt as buildDateJudgePromptPure } from './business/axis/date-detection.js';
 import { createDateDetectionController } from './business/axis/date-detection.js';
+
+bindExternalChatStorage({ getContext, coreModule: scriptCore, fetchImpl: (...args) => globalThis.fetch(...args) });
 
 // Must be initialized before the top-level bindAxisAnchor() wiring below.
 // Keeping this as a const preserves the shared terminal-stage semantics while
@@ -392,7 +406,11 @@ bindApiClient({
     buildMessages,
     getDiagnosticContext: () => {
         const ctx = getContext?.() || {};
-        const messageId = Array.isArray(ctx.chat) ? ctx.chat.length - 1 : null;
+        let messageId = null;
+        for (let i = (ctx.chat?.length || 0) - 1; i >= 0; i--) {
+            const message = ctx.chat[i];
+            if (message && !message.is_user && !message.is_system && !message.is_hidden && !message?.extra?.is_hidden && String(message.mes || '').trim()) { messageId = i; break; }
+        }
         return {
             chatId: ctx.chatId ?? null,
             chatRevision: pointTaskOwners.currentChatRevision(),
@@ -855,9 +873,27 @@ const storyClockController = createStoryClockController({
     pluginEnabled,
     enabled: () => getSettings().storyClockEnabled !== false,
     settings: getSettings,
+    peerState: () => extensionStoryClockState({ extensionNames, disabledExtensions: extension_settings.disabledExtensions, extensionSuffix: '/ST-QianQianJie', peerSettings: extension_settings.qianqianjie }),
 });
 const storyClockEnabled = () => getSettings().storyClockEnabled !== false;
-const refreshStoryClockInjection = () => storyClockController.refresh();
+const STORY_CLOCK_COORDINATION_EVENT = 'qqj-sdc-story-clock-settings-changed';
+const storyClockStatusCopy = state => ({
+    custom: '使用自定义时间戳提示词',
+    'adapted-peer-custom': '已适配千千结时间戳',
+    injected: '已调用构画时间戳',
+    cleared: '正文时间戳已关闭',
+    unavailable: '宿主暂不支持时间戳注入',
+})[state?.status] || '时间戳状态会在下一次正文生成前刷新';
+const announceStoryClockChange = () => {
+    try { if (typeof globalThis.CustomEvent === 'function') globalThis.dispatchEvent?.(new globalThis.CustomEvent(STORY_CLOCK_COORDINATION_EVENT, { detail: { owner: 'sdc' } })); } catch {}
+};
+const refreshStoryClockInjection = ({ announce = false } = {}) => {
+    const state = storyClockController.refresh();
+    try { $('#sp-storyclock-coordination').text(storyClockStatusCopy(state)); } catch {}
+    if (announce) announceStoryClockChange();
+    return state;
+};
+globalThis.addEventListener?.(STORY_CLOCK_COORDINATION_EVENT, event => { if (event?.detail?.owner !== 'sdc') refreshStoryClockInjection(); });
 const latestStoryClock = () => latestStoryClockPure(getContext(), ALM_CHAT_SCAN_LIMIT);
 const storyClockDate = () => storyClockDatePure(getContext(), parseJudgedDatePure, ALM_CHAT_SCAN_LIMIT);
 const dateDetectionController = createDateDetectionController({
@@ -1775,6 +1811,8 @@ export function parseFontFamilyFromCss(cssText) {
 }
 
 jQuery(async () => {
+    const initialStorageLoad = loadExternalChat({ force: true });
+    if (isExternalMode()) await initialStorageLoad;
     // 界面字号缩放：把持久化的 uiScale 写进 --sp-scale，令牌即刻按此缩放（早于注入 UI，防首帧闪错号）
     document.documentElement.style.setProperty('--sp-scale', String(Number(getSettings().uiScale) || 1));
     // 界面字体：按持久化的 uiFontUrl/uiFontFamily 挂 <link> + 写 --sp-font-user（早于注入 UI，防字体闪切）
@@ -1843,7 +1881,7 @@ jQuery(async () => {
     scheduleForChatBoundary(backfillLinesInlineBlocks, 800);
     // Reset view state and reload cache on chat switch
     if (_stListeners.chat) eventSource.removeListener?.(event_types.CHAT_CHANGED, _stListeners.chat);
-    _stListeners.chat = () => {
+    _stListeners.chat = async () => {
         // 切聊是构画的硬失败边界：先统一推进 epoch/revision，再无条件清掉所有聊天态任务。
         const previousChatId = activeChatBoundaryIdentity?.chatId ?? null;
         const previousBoundaryEpoch = chatBoundaryEpoch;
@@ -1909,6 +1947,9 @@ jQuery(async () => {
         axisCalendarManager.close();
         _lastMainView = 'schedule';
         coordinateRuntime?.feature?.onChatChanged({ chatId: getContext()?.chatId ?? null, chatMetadataRef: getContext()?.chatMetadata ?? null, enabled: pluginEnabled() });
+        const loadingChatId = String(getContext()?.chatId || '');
+        await loadExternalChat({ force: true });
+        if (String(getContext()?.chatId || '') !== loadingChatId) return;
         // 老用户升级：把本 chat 散在 localStorage 的点线面间**同步**搬进 chat_metadata，
         // 必须早于下面任何 load（否则读的是空 metadata）。冲突（云端/本机各一份且不同）时
         // migrate 不动任何数据，稍后异步弹窗让用户决策。
@@ -1965,6 +2006,12 @@ jQuery(async () => {
         refreshLedgerInjection();       // 暗历注入：切 chat → 账随 chat_metadata 变，重设（关/空时内部自清）
     };
     eventSource.on(event_types.CHAT_CHANGED, _stListeners.chat);
+    if (_stListeners.diagnosticRetention) eventSource.removeListener?.(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.diagnosticRetention);
+    _stListeners.diagnosticRetention = () => refreshDiagnosticRetention(getContext());
+    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.diagnosticRetention);
+    if (_stListeners.externalSnapshotPrune) eventSource.removeListener?.(event_types.MESSAGE_DELETED, _stListeners.externalSnapshotPrune);
+    _stListeners.externalSnapshotPrune = () => { if (isExternalMode()) void pruneExternalSnapshots(getContext()?.chat || []); };
+    eventSource.on(event_types.MESSAGE_DELETED, _stListeners.externalSnapshotPrune);
     // 首屏补迁移：扩展初始化时当前 chat 往往已 ready（CHAT_CHANGED 早已错过），
     // 否则老用户要手动切一次 chat 才触发迁移。同步搬数据，冲突延后弹窗。
     try {
@@ -2286,7 +2333,6 @@ function applyPluginEnabled(on) {
         $(`#${FAB_ID}`).css('display', fabEnabled() ? '' : 'none');
         try { backfillLinesInlineBlocks(); } catch {}   // 重挂线/历/点楼内块 + 重设线潜伏注入
         try { outlineFeature.injection.refresh(); } catch {}       // 重设大纲潜伏注入
-        try { refreshStoryClockInjection(); } catch {}    // 重设时间戳注入
         try { coordinateRuntime?.feature?.refreshSavedKeys(); coordinateRuntime?.feature?.scanButtons(); } catch {} // 补回锚点收藏入口
         try { refreshInlineWindow(true); } catch {}
         maybeApplyBoundCalendarTemplate().catch(error => {
@@ -2300,9 +2346,9 @@ function applyPluginEnabled(on) {
         _abortAllBackground();
         try { ctx.setExtensionPrompt?.(LINES_INJECT_KEY, ''); } catch {}
         try { outlineFeature.injection.clear(); } catch {}
-        try { ctx.setExtensionPrompt?.(STORY_CLOCK_KEY, ''); } catch {}
         try { ledgerInjectionController.clear(); } catch {}
     }
+    try { refreshStoryClockInjection({ announce: true }); } catch {}
 }
 
 
@@ -3129,6 +3175,7 @@ function injectModal() {
                                         <p class="sp-cfg-hint">包裹符<strong>连同内部内容一起删除</strong>（如 <code>think,reasoning,[[...]]</code>）；未闭合的双中括号会保留原文，不会吞掉后文。</p>
                                     </details>
                                     <details class="sp-settings-subsection sp-prompt-storyclock"><summary>时间戳提示词</summary>
+                                        <p class="sp-cfg-hint" id="sp-storyclock-coordination">${storyClockStatusCopy(storyClockController.refresh())}</p>
                                         <p class="sp-cfg-hint"><strong>全部内容均可编辑</strong>；留空＝用内置完整默认（默认词随插件更新走）。删除 SDC 标签或机器合同可能导致时间戳无法识别，风险由你承担。务必让两端各带 date、weekday、time；旧无星期标记仍兼容读取，但不会从现实年份补星期。</p>
                                         <textarea id="sp-storyclock-prompt" class="sp-input sp-theater-cfg-textarea" placeholder="留空＝用内置完整默认强制词。"></textarea>
                                         <div style="display:flex; gap:8px; margin-top:6px"><button id="sp-storyclock-prompt-load" class="sp-mem-btn" type="button">载入默认再改</button><button id="sp-storyclock-prompt-reset" class="sp-mem-btn" type="button">恢复默认</button></div>
@@ -3268,6 +3315,14 @@ function injectModal() {
                                         <summary class="sp-settings-section-title">存储管理</summary>
                                         <div class="sp-settings-section-body">
                                             <p class="sp-cfg-hint">统管构画的数据占用，按存储位置分层。</p>
+                                            <div class="sp-storage-mode-card">
+                                                <div class="sp-storage-group-head">当前聊天的数据存储</div>
+                                                <div id="sp-storage-mode-status" class="sp-cfg-hint">检测中…</div>
+                                                <div class="sp-mem-actions">
+                                                    <button id="sp-storage-migrate" class="sp-save-btn" type="button" hidden>迁出到白鳥数据后端</button>
+                                                    <button id="sp-storage-retry" class="sp-mem-btn" type="button" hidden>重试加载</button>
+                                                </div>
+                                            </div>
                                             <div id="sp-storage-body"><div class="sp-cfg-hint">（打开设置时自动统计…）</div></div>
                                             <div class="sp-mem-actions"><button id="sp-storage-refresh" class="sp-mem-btn">刷新用量</button></div>
                                         </div>
@@ -3291,6 +3346,11 @@ function injectModal() {
                                                 <label class="sp-cfg-group">请求诊断</label>
                                                 <p class="sp-cfg-hint"><strong>适合发给开发者。</strong>复制最近 30 条安全诊断日志；不含正文、提示词、API Key 或 URL。</p>
                                                 <button id="sp-diagnostic-export" class="sp-save-btn" type="button"><i class="fa-regular fa-copy"></i> 复制最近诊断日志</button>
+                                            </div>
+                                            <div class="sp-diagnostics-block">
+                                                <div class="sp-diagnostics-label">当前聊天诊断包</div>
+                                                <p class="sp-cfg-hint">包含两楼 AI 输入与原始回复，可能含剧情。它不是完整可导入备份，也不会包含 API 密钥、地址或请求头。</p>
+                                                <button id="sp-current-diagnostic-export" class="sp-save-btn" type="button"><i class="fa-solid fa-file-export"></i> 导出当前聊天诊断包</button>
                                             </div>
                                         </div>
                                     </details>
@@ -4026,6 +4086,7 @@ function injectModal() {
             notify: (message, isError) => showToast(message, null, isError),
         });
     });
+    $in('#sp-current-diagnostic-export').on('click', () => { void exportCurrentChatDiagnosticPackage(); });
     bindApiPresetEvents();
     renderApiPresetList();
     renderUtilityPresetList();
@@ -4125,7 +4186,7 @@ function injectModal() {
     $in('#sp-storyclock-enabled').on('change', function () {
         getSettings().storyClockEnabled = this.checked;
         saveSettingsDebounced();
-        refreshStoryClockInjection();
+        refreshStoryClockInjection({ announce: true });
         if (axisState.almanacMode) renderAlmanacPanel();
     });
     // 冷知识自动开关：off 只停随线生成与楼层展示，历史保留并仍可在线面板查看。
@@ -6090,11 +6151,124 @@ function storageRow(label, bytesText, btnHtml = '', extraClass = '') {
     </div>`;
 }
 
+async function renderCurrentChatStorageMode() {
+    const $status = $in('#sp-storage-mode-status');
+    const $migrate = $in('#sp-storage-migrate');
+    const $retry = $in('#sp-storage-retry');
+    if (!$status.length) return;
+    $migrate.prop('hidden', true); $retry.prop('hidden', true);
+    const state = storageStatus();
+    if (!state.chatId) { $status.text('当前没有打开聊天。'); return; }
+    if (state.mode === 'external') {
+        if (state.status === 'ready') {
+            $status.text(`当前聊天已使用白鳥数据后端。聊天文件只保留定位标记与楼层快照指针；单独导出聊天不会包含完整构画数据，请同时保留后端数据。${state.error ? ` 最近一次外置操作失败：${state.error}` : ''}`);
+        } else {
+            $status.text(`当前聊天已迁出，但后端数据不可用：${state.error || '尚未加载'}。构画不会把它当成空数据，也不会自动回退写入聊天文件。`);
+            $retry.prop('hidden', state.status === 'invalid');
+        }
+        return;
+    }
+    $status.text('正在检测白鳥数据后端…');
+    const probe = await probeExternalBackend();
+    if (storageStatus().chatId !== state.chatId || storageStatus().mode !== 'chat') return;
+    if (probe.ok) {
+        $status.text('当前仍随聊天文件存储。可主动把当前聊天的构画数据迁到白鳥数据后端；迁移前原聊天保持不变。');
+        $migrate.prop('hidden', false);
+    } else {
+        $status.text('未检测到兼容的白鳥数据后端；当前聊天继续沿用原存储方式。');
+    }
+}
+
+function mountMigrationOverlay() {
+    document.getElementById('sp-storage-migration-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'sp-storage-migration-overlay';
+    overlay.innerHTML = `<div role="dialog" aria-modal="true" style="width:min(420px,calc(100vw - 32px));padding:22px;border-radius:16px;background:#17191f;color:#f5f5f7;box-shadow:0 20px 70px #000b;font-family:var(--sp-font-user,system-ui)">
+        <div style="font-size:18px;font-weight:700;margin-bottom:10px">正在迁移当前聊天的构画数据</div>
+        <div data-sp-migration-status style="font-size:14px;line-height:1.65;opacity:.86">准备复制并逐项回读校验…</div>
+        <button data-sp-migration-abort type="button" style="margin-top:18px;width:100%;min-height:42px;border:1px solid #ffffff30;border-radius:10px;background:#ffffff10;color:inherit">中断迁移</button>
+    </div>`;
+    Object.assign(overlay.style, { position: 'fixed', inset: '0', zIndex: '2147483647', display: 'grid', placeItems: 'center', padding: 'max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left))', background: '#000b', boxSizing: 'border-box', touchAction: 'none' });
+    const block = event => { if (!overlay.contains(event.target)) { event.preventDefault(); event.stopImmediatePropagation(); } };
+    for (const name of ['keydown', 'keyup', 'pointerdown', 'mousedown', 'touchstart', 'click']) document.addEventListener(name, block, true);
+    document.documentElement.appendChild(overlay);
+    overlay.querySelector('[data-sp-migration-abort]').addEventListener('click', abortMigration);
+    return {
+        progress(info = {}) {
+            const committing = info.phase === 'committing';
+            overlay.querySelector('[data-sp-migration-status]').textContent = committing ? '外置副本已校验，正在提交聊天定位标记与快照指针。此阶段不能撤销，请等待确认。' : `正在复制并校验 ${info.done || 0} / ${info.total || '…'} 项…`;
+            const button = overlay.querySelector('[data-sp-migration-abort]'); button.disabled = committing; button.textContent = committing ? '正在确认最终提交…' : '中断迁移';
+        },
+        unknown(message) {
+            overlay.querySelector('[data-sp-migration-status]').textContent = message;
+            const button = overlay.querySelector('[data-sp-migration-abort]'); button.disabled = false; button.textContent = '关闭（请刷新聊天后核实）';
+            button.onclick = () => this.close();
+        },
+        close() { for (const name of ['keydown', 'keyup', 'pointerdown', 'mousedown', 'touchstart', 'click']) document.removeEventListener(name, block, true); overlay.remove(); },
+    };
+}
+
+async function startCurrentChatMigration() {
+    const initial = storageStatus();
+    if (!initial.chatId || initial.mode !== 'chat') return;
+    const confirmed = await customDialog.confirm({
+        title: '迁出当前聊天的构画数据',
+        body: '仅迁移当前聊天。期间页面会被锁定并暂停构画任务；复制阶段可中断，最终提交阶段必须等待确认。迁出后，单独导出聊天不再包含完整构画数据。',
+        note: '请确保后端数据也有备份。此次迁移不会搬动正文、其它插件数据、世界书、坐标收藏或设备草稿。',
+        confirmText: '开始迁移', cancelText: '取消',
+    });
+    if (!confirmed || storageStatus().chatId !== initial.chatId) return;
+    _abortAllBackground();
+    const overlay = mountMigrationOverlay();
+    let result;
+    try { result = await migrateCurrentChat({ onProgress: info => overlay.progress(info) }); }
+    catch (error) { result = { ok: false, reason: 'migration-failed', error }; }
+    if (result.ok) {
+        overlay.close(); showToast('当前聊天的构画数据已迁出并完成回读校验');
+        renderStorageUsage(); renderCurrentChatStorageMode();
+    } else if (result.reason === 'publish-unknown') {
+        overlay.unknown(result.error?.message || '最终提交结果未知，请刷新聊天核实后再继续使用构画。');
+    } else {
+        overlay.close();
+        showToast(result.reason === 'aborted' ? '迁移已中断，原聊天数据未切换' : `迁移失败：${result.error?.message || result.reason || '未知错误'}`, null, result.reason !== 'aborted');
+        renderCurrentChatStorageMode();
+    }
+}
+
+function downloadDiagnosticPackage(data) {
+    const text = JSON.stringify(data, null, 2);
+    const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob); const anchor = document.createElement('a');
+    anchor.href = url; anchor.download = `gouhua-diagnostic-${Date.now()}.json`; anchor.style.display = 'none';
+    document.body.appendChild(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return text;
+}
+
+async function exportCurrentChatDiagnosticPackage() {
+    const choice = await customDialog.choose({
+        title: '导出当前聊天诊断包',
+        body: '诊断包会包含最近两个有效 AI 楼的请求记录（每个模块仅保留最新一次），包括完整输入与原始回复，可能含剧情。默认不附带聊天正文，也绝不导出 API 配置、URL、密码、请求头或其它聊天。',
+        note: '这不是完整可导入备份。若当前聊天已迁出，仍需另外保留白鳥数据后端。',
+        choices: [
+            { value: 'cancel', label: '取消' },
+            { value: 'safe', label: '导出（不附正文）', primary: true },
+            { value: 'narrative', label: '导出并附正文' },
+        ],
+    });
+    if (!choice || choice === 'cancel') return;
+    try {
+        const data = await buildCurrentChatDiagnosticPackage({ includeNarrative: choice === 'narrative', safeTrace: readDiagnosticTrace() });
+        const text = downloadDiagnosticPackage(data);
+        showToast('当前聊天诊断包已导出', async () => { if (await copyPlainText(text)) showToast('诊断包已复制'); });
+    } catch (error) { showToast(`诊断包导出失败：${error?.message || '未知错误'}`, null, true); }
+}
+
 // 渲染三层用量到 #sp-storage-body。异步（坐标要读服务器索引）。
 async function renderStorageUsage() {
     const $body = $in('#sp-storage-body');
     if (!$body.length) return;
     const fmt = store.formatBytes;
+    void renderCurrentChatStorageMode();
 
     // ① 本聊天 chat_metadata
     let chatHtml;
@@ -6264,6 +6438,14 @@ function refreshEditorsFromCurrentStore(kind) {
 // 绑定存储管理面板的清理按钮（委托到 #sp-storage-body，内容动态渲染）+ 刷新。
 function bindStorageHandlers() {
     $in('#sp-storage-refresh').on('click', () => renderStorageUsage());
+    $in('#sp-storage-migrate').on('click', () => { void startCurrentChatMigration(); });
+    $in('#sp-storage-retry').on('click', async () => {
+        const before = storageStatus().chatId;
+        await loadExternalChat({ force: true });
+        if (storageStatus().chatId !== before) return;
+        renderCurrentChatStorageMode(); renderStorageUsage();
+        showToast(storageStatus().status === 'ready' ? '外置构画数据已重新加载' : `重试失败：${storageStatus().error || '后端不可用'}`, null, storageStatus().status !== 'ready');
+    });
 
     const $body = $in('#sp-storage-body');
 
@@ -6936,7 +7118,7 @@ function bindMemoryHandlers() {
         getSettings().storyClockPrompt = this.value;
         getSettings().storyClockPromptVersion = 2;
         saveSettingsDebounced();
-        try { refreshStoryClockInjection(); } catch {}
+        try { refreshStoryClockInjection({ announce: true }); } catch {}
     }).on('blur', function () {
         getSettings().storyClockPrompt = this.value;
         getSettings().storyClockPromptVersion = 2;
@@ -6948,7 +7130,7 @@ function bindMemoryHandlers() {
         getSettings().storyClockPrompt = fullDefault;
         getSettings().storyClockPromptVersion = 2;
         stSaveSettings();
-        try { refreshStoryClockInjection(); } catch {}
+        try { refreshStoryClockInjection({ announce: true }); } catch {}
         try { showToast('已把默认强制词载入编辑框，可直接修改'); } catch {}
     });
     // 恢复默认＝清空＝回到内置 live 默认（继续跟随插件更新），区别于「载入默认再改」的冻结快照。
@@ -6957,7 +7139,7 @@ function bindMemoryHandlers() {
         getSettings().storyClockPrompt = '';
         getSettings().storyClockPromptVersion = 2;
         stSaveSettings();
-        try { refreshStoryClockInjection(); } catch {}
+        try { refreshStoryClockInjection({ announce: true }); } catch {}
         try { showToast('已恢复内置默认（跟随插件更新）'); } catch {}
     });
     $in('#sp-mem-check').on('click', function () {

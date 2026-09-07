@@ -1,6 +1,7 @@
 import { _cnToNumber, _CN_MONTH_ALIAS, normalizeCnDateDigits } from '../../utils/cn-date.js';
 const START_RE = /<!--\s*SDC-start\s+([\s\S]*?)\s*-->/i;
 const END_RE = /<!--\s*SDC-end\s+([\s\S]*?)\s*-->/i;
+const CLOCK_NAMESPACES = Object.freeze(['SDC', 'myknots']);
 let deps = { loadCalendar: () => null, validMonthDay: () => null, validRealDate: null, defaultCalendar: null, monthDayFromKey: () => null, extractDay: () => null, cnToNumber: () => 0, monthAlias: {}, explicitWeekdayDate: () => null, context: () => null };
 export function bindStoryClock(next = {}) { deps = { ...deps, ...next }; }
 const WEEKDAY_TEXT = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -138,16 +139,29 @@ function parseStoryClockMetaValue(raw) {
     return { raw: value, date, month: date?.month ?? null, day: date?.day ?? null, year: date?.year ?? null, eraLabel: date?.eraLabel ?? null, weekdayIndex, weekdayText, time: time || null, valid: !!date, complete: !!date && weekdayIndex != null && !!time };
 }
 export function parseStoryClock(message) {
-    const text = String(message || ''); const starts = [...text.matchAll(new RegExp(START_RE.source, 'ig'))]; const ends = [...text.matchAll(new RegExp(END_RE.source, 'ig'))]; const start = starts[0]; const end = ends[0];
+    const text = String(message || '');
+    const candidates = CLOCK_NAMESPACES.map(namespace => {
+        const starts = [...text.matchAll(new RegExp(`<!--\\s*${namespace}-start\\s+([\\s\\S]*?)\\s*-->`, 'ig'))];
+        const ends = [...text.matchAll(new RegExp(`<!--\\s*${namespace}-end\\s+([\\s\\S]*?)\\s*-->`, 'ig'))];
+        if (!starts.length && !ends.length) return null;
+        const start = starts[0]; const end = ends[0];
+        const startMeta = start ? parseStoryClockMetaValue(start[1]) : null; const endMeta = end ? parseStoryClockMetaValue(end[1]) : null;
+        const duplicate = starts.length !== 1 || ends.length !== 1;
+        const complete = !duplicate && !!start && !!end && end.index >= start.index + start[0].length && !!startMeta?.complete && !!endMeta?.complete;
+        return { namespace, starts, ends, start, end, startMeta, endMeta, duplicate, complete, sourceIndex: Math.min(start?.index ?? Infinity, end?.index ?? Infinity) };
+    }).filter(Boolean).sort((left, right) => Number(right.complete) - Number(left.complete) || left.sourceIndex - right.sourceIndex);
+    const selected = candidates[0] ?? null; const start = selected?.start; const end = selected?.end;
     const out = { start: start ? start[1].trim() : null, end: end ? end[1].trim() : null };
-    Object.defineProperties(out, { duplicate: { value: starts.length !== 1 || ends.length !== 1, enumerable: false }, startMeta: { value: start ? parseStoryClockMetaValue(start[1]) : null, enumerable: false }, endMeta: { value: end ? parseStoryClockMetaValue(end[1]) : null, enumerable: false } });
+    Object.defineProperties(out, { duplicate: { value: selected ? selected.duplicate : true, enumerable: false }, namespace: { value: selected?.namespace ?? null, enumerable: false }, startMeta: { value: selected?.startMeta ?? null, enumerable: false }, endMeta: { value: selected?.endMeta ?? null, enumerable: false } });
     return out;
 }
 export function storyClockNarrativeBody(message) {
     const text = String(message || '');
-    const start = START_RE.exec(text);
-    const end = END_RE.exec(text);
-    return start && end && end.index > start.index + start[0].length
+    const parsed = parseStoryClock(text);
+    const namespace = parsed.namespace ?? 'SDC';
+    const start = new RegExp(`<!--\\s*${namespace}-start\\s+[\\s\\S]*?\\s*-->`, 'i').exec(text);
+    const end = new RegExp(`<!--\\s*${namespace}-end\\s+[\\s\\S]*?\\s*-->`, 'i').exec(text);
+    return start && end && end.index >= start.index + start[0].length
         ? text.slice(start.index + start[0].length, end.index)
         : text;
 }
@@ -173,8 +187,7 @@ export const STORY_CLOCK_PROMPT_VERSION = 2;
 export function buildStoryClockPrompt(settings = {}) {
     const raw = typeof settings.storyClockPrompt === 'string' ? settings.storyClockPrompt : '';
     if (!raw.trim()) return `${DEFAULT_STORY_CLOCK_PROMPT}\n${STORY_CLOCK_MACHINE_CONTRACT}`;
-    if (Number(settings.storyClockPromptVersion) >= STORY_CLOCK_PROMPT_VERSION) return raw;
-    return `${raw.trim()}\n${STORY_CLOCK_MACHINE_CONTRACT}`;
+    return raw;
 }
 export function latestStoryClock(context, limit = 100) {
     const messages = context?.chat || []; let scanned = 0;
@@ -198,11 +211,10 @@ function sameStoryDate(left, right) {
 }
 function storyTextWithoutClockMetadata(message) {
     return String(message || '')
-        .replace(new RegExp(START_RE.source, 'ig'), ' ')
-        .replace(new RegExp(END_RE.source, 'ig'), ' ')
+        .replace(/<!--\s*(?:SDC|myknots)-(?:start|end)\s+[\s\S]*?\s*-->/ig, ' ')
         // 未闭合的 HTML 注释从标记处直到楼尾都仍属于注释元数据；不能让其中
         // 的 date/weekday 泄漏成正文显式证据。
-        .replace(/<!--\s*SDC-(?:start|end)\b[\s\S]*$/i, ' ');
+        .replace(/<!--\s*(?:SDC|myknots)-(?:start|end)\b[\s\S]*$/i, ' ');
 }
 export function storyWeekdayRef(context = deps.context?.(), calendar = deps.loadCalendar?.(), limit = 100, floor = null, currentDate = null) {
     const messages = context?.chat || []; const top = Number.isInteger(floor) ? Math.min(floor, messages.length - 1) : messages.length - 1;
@@ -257,13 +269,23 @@ export function createStoryClockController(options = {}) {
         const setPrompt = context?.setExtensionPrompt;
         if (typeof setPrompt !== 'function') return { status: 'unavailable' };
         const clear = () => setPrompt(STORY_CLOCK_KEY, '');
-        if (options.pluginEnabled?.() !== true || options.enabled?.() !== true) { clear(); return { status: 'cleared' }; }
+        const settings = options.settings?.() || {};
+        const active = options.pluginEnabled?.() === true && options.enabled?.() === true;
+        const custom = typeof settings.storyClockPrompt === 'string' && settings.storyClockPrompt.trim().length > 0;
+        const peer = options.peerState?.() || {};
+        if (!active) { clear(); return { status: 'cleared', inject: false }; }
+        if (!custom && peer.active === true && peer.custom === true) { clear(); return { status: 'adapted-peer-custom', inject: false }; }
         const pt = context.constants?.promptTypes?.IN_CHAT ?? 1;
         const pr = context.constants?.promptRoles?.SYSTEM ?? 0;
-        setPrompt(STORY_CLOCK_KEY, buildStoryClockPrompt(options.settings?.() || {}), pt, STORY_CLOCK_DEPTH, false, pr);
-        return { status: 'injected' };
+        setPrompt(STORY_CLOCK_KEY, buildStoryClockPrompt(settings), pt, STORY_CLOCK_DEPTH, false, pr);
+        return { status: custom ? 'custom' : 'injected', inject: true };
     };
     return { refresh, clear: () => { const context = options.context?.(); context?.setExtensionPrompt?.(STORY_CLOCK_KEY, ''); } };
+}
+export function extensionStoryClockState({ extensionNames = [], disabledExtensions = [], extensionSuffix, peerSettings } = {}) {
+    const extensionId = extensionNames.find(name => String(name).endsWith(extensionSuffix)) || null;
+    const active = !!(extensionId && !disabledExtensions.includes(extensionId) && peerSettings && peerSettings.pluginEnabled !== false && peerSettings.storyClockEnabled !== false);
+    return { active, custom: active && typeof peerSettings.storyClockPrompt === 'string' && peerSettings.storyClockPrompt.trim().length > 0 };
 }
 export function parseJudgedDate(answer) {
     const text = String(answer || '').trim(); if (!text || /未知|无法|不确定|不清楚|没有|无明确/.test(text)) return null;

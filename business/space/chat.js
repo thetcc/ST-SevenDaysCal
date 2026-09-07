@@ -1,4 +1,5 @@
 import { appendSpaceAssistant, appendSpaceUser } from './schema.js';
+import { createGenerationDiagnosticScope, diagnosticMessage, makeDiagnosticError } from '../../api/diagnostics.js';
 
 export function createSpaceChat(env = {}) {
     const repository = env.repository;
@@ -22,6 +23,7 @@ export function createSpaceChat(env = {}) {
         const controller = new AbortController();
         abortController = controller;
         const thinking = env.ui?.beginThinking?.();
+        const diagnostic = createGenerationDiagnosticScope('space');
         try {
             const config = env.loadConfig?.() || {};
             if (!config.url || !config.key) {
@@ -41,18 +43,23 @@ export function createSpaceChat(env = {}) {
                 signal: controller.signal,
                 promptMode: 'creative',
                 diagnosticModule: 'space',
+                diagnosticSink: diagnostic.sink,
             });
             if (abortController !== controller || controller.signal.aborted || !repository.isCurrent(target)) {
                 return Object.freeze({ status: 'cancelled' });
             }
+            diagnostic.accepted({ phase: 'response' });
             if (!repository.replace(target, appendSpaceAssistant(history(), reply))) {
+                diagnostic.rejected(new Error('space reply persistence failed'), { phase: 'save', reasonCode: 'space-save-failed' });
                 env.ui?.appendMessage?.('system', '发送失败：回复保存失败，请重试');
                 return Object.freeze({ status: 'failed', error: new Error('space reply persistence failed') });
             }
+            diagnostic.committed({ phase: 'save' });
             env.ui?.endThinking?.(thinking);
             env.ui?.appendMessage?.('ai', reply, history().length - 1);
             return Object.freeze({ status: 'updated', reply });
         } catch (error) {
+            diagnostic.rejected(error, { phase: error?.phase || 'request', reasonCode: 'space-request-failed' });
             if (abortController === controller && repository.isCurrent(target) && error?.name !== 'AbortError') {
                 env.ui?.appendMessage?.('system', `发送失败：${diagnosticMessage(error)}`);
                 return Object.freeze({ status: 'failed', error });
@@ -103,4 +110,3 @@ export function createSpaceChat(env = {}) {
         get signal() { return abortController?.signal; },
     });
 }
-import { diagnosticMessage, makeDiagnosticError } from '../../api/diagnostics.js';

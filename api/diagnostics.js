@@ -1,6 +1,7 @@
 // Shared, deliberately lossy diagnostics for AI generation paths.
 // Never copy upstream response bodies, URLs, prompts, keys, or model output here.
 import { isDiagnosticRequestId, traceDiagnosticEvent } from '../runtime/diagnostic-trace.js';
+import { recordDiagnosticResult } from '../runtime/external-chat-storage.js';
 
 const CODES = new Set([
     'config-missing', 'http-400', 'auth', 'not-found', 'rate-limit', 'server',
@@ -121,7 +122,7 @@ export function createGenerationDiagnosticScope(module, defaults = {}) {
     const annotate = error => attachDiagnosticRequest(error, metadata);
     const record = (event, options = {}) => {
         const error = annotate(options.error);
-        return traceDiagnosticEvent(event, {
+        const traced = traceDiagnosticEvent(event, {
             module: safeModule,
             ...(metadata.requestId ? { requestId: metadata.requestId } : {}),
             status: options.status,
@@ -130,6 +131,16 @@ export function createGenerationDiagnosticScope(module, defaults = {}) {
             errorClass: error ? classifyGenerationError(error, { phase: options.phase }) : undefined,
             background: defaults.background === true || options.background === true,
         });
+        if (metadata.requestId) recordDiagnosticResult({
+            requestId: metadata.requestId,
+            module: safeModule,
+            event,
+            status: options.status,
+            phase: options.phase,
+            reasonCode: options.reasonCode,
+            errorClass: error ? classifyGenerationError(error, { phase: options.phase }) : undefined,
+        });
+        return traced;
     };
     return Object.freeze({
         sink,

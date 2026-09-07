@@ -1,3 +1,6 @@
+import { createGenerationDiagnosticScope, diagnosticMessage, makeDiagnosticError } from '../../api/diagnostics.js';
+import { normalizeOutlineResponse } from './schema.js';
+
 export function createOutlineChat({
     repository,
     loadConfig,
@@ -92,6 +95,7 @@ export function createOutlineChat({
         const controller = new AbortController();
         const thinking = ui?.beginThinking?.();
         const task = Object.freeze({ target, historySnapshot, controller, thinking });
+        const diagnostic = createGenerationDiagnosticScope('outline-chat');
         owner = task;
         busy = true;
         try {
@@ -110,16 +114,23 @@ export function createOutlineChat({
                 signal: controller.signal,
                 promptMode: 'creative',
                 diagnosticModule: 'outline-chat',
+                diagnosticSink: diagnostic.sink,
             });
             if (!currentAndOwned(task) || !repository.sameHistory(target, historySnapshot)) return { status: 'cancelled' };
             const nextHistory = [...historySnapshot, { role: 'assistant', content: reply }].slice(-repository.historyCap);
-            if (!repository.writeHistory(target, nextHistory, historySnapshot)) return { status: 'cancelled' };
+            diagnostic.accepted({ phase: 'response' });
+            if (!repository.writeHistory(target, nextHistory, historySnapshot)) {
+                diagnostic.rejected(new Error('outline chat persistence failed'), { phase: 'save', reasonCode: 'outline-chat-save-failed' });
+                return { status: 'cancelled' };
+            }
+            diagnostic.committed({ phase: 'save' });
             history = nextHistory;
             if (nextHistory.length !== historySnapshot.length + 1 || normalizeOutlineResponse(reply)) ui?.renderHistory?.(history);
             else ui?.appendMessage?.('ai', reply, history.length - 1);
             finish(task);
             return { status: 'updated', reply };
         } catch (error) {
+            diagnostic.rejected(error, { phase: error?.phase || 'request', reasonCode: 'outline-chat-request-failed' });
             if (!currentAndOwned(task)) return { status: 'cancelled' };
             if (!repository.sameHistory(target, historySnapshot)) return { status: 'cancelled' };
             if (error?.name !== 'AbortError') {
@@ -184,5 +195,3 @@ export function createOutlineChat({
         history: () => history.slice(),
     });
 }
-import { diagnosticMessage, makeDiagnosticError } from '../../api/diagnostics.js';
-import { normalizeOutlineResponse } from './schema.js';

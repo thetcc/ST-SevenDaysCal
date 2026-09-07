@@ -8,18 +8,29 @@ import { buildWriteMessages, buildBeautifyMessages } from './prompts.js';
 import { sanitizeHtml, safePlainTextHtml } from './html.js';
 import { createTheaterTemplates } from './templates.js';
 import { THEATER_TEMPLATE_BOOK, THEATER_DRAFT_CAP, theaterDraftKey } from './constants.js';
+import { getChatRoot, isExternalMode, persistExternalRoots, registerExternalStorageContext } from '../../runtime/external-chat-storage.js';
 
 export function createTheaterRuntime(host = {}) {
+    registerExternalStorageContext(host.getContext);
     const owners = createTaskOwnerManager();
     const fixedSaver = createTargetMetadataSaver({ coreModule: host.coreModule, ownedRoots: ['/sp-theater'] });
+    const storageSaver = {
+        supported: fixedSaver.supported,
+        capture: (target, after) => target?.external ? { external: true } : fixedSaver.capture?.(target, after),
+        dispatch: (captured, options) => captured?.external
+            ? persistExternalRoots({ confirmed: true, ownerGuard: options?.isCurrent })
+            : fixedSaver.dispatch?.(captured, options),
+        confirm: captured => captured?.external ? Promise.resolve({ confirmed: false, available: false }) : fixedSaver.confirm?.(captured),
+    };
     const captureTarget = (chatId = host.getContext?.()?.chatId) => {
         const context = host.getContext?.(); context.chatMetadata ||= {};
-        const metadata = context.chatMetadata['sp-theater'] ||= { version: 1, saved: [] };
-        return { chatId, metadata, metadataSnapshot: { ...(context.chatMetadata || {}) }, target: host.coreModule?.resolveChatStateTarget?.(), persist: () => context.saveMetadata?.(), isCurrent: () => host.getContext?.()?.chatId === chatId };
+        const external = isExternalMode();
+        const metadata = getChatRoot('sp-theater', { create: true, factory: () => ({ version: 1, saved: [] }) });
+        return { chatId, metadata, external, metadataSnapshot: { ...(context.chatMetadata || {}) }, target: external ? { external: true } : host.coreModule?.resolveChatStateTarget?.(), persist: () => external ? persistExternalRoots({ confirmed: true }) : context.saveMetadata?.(), isCurrent: () => host.getContext?.()?.chatId === chatId };
     };
     const repository = createTheaterRepository({
         storage: host.storage, metadata: () => captureTarget().metadata, persist: () => host.getContext?.().saveMetadata?.(),
-        keyForChat: host.keyForChat || theaterDraftKey, metadataSaver: fixedSaver.supported ? fixedSaver : null, requireFixedSaver: fixedSaver.supported, cap: THEATER_DRAFT_CAP,
+        keyForChat: host.keyForChat || theaterDraftKey, metadataSaver: storageSaver.supported ? storageSaver : null, requireFixedSaver: storageSaver.supported, cap: THEATER_DRAFT_CAP,
     });
     const templates = createTheaterTemplates({ context: host.getContext, bookName: THEATER_TEMPLATE_BOOK });
     const generation = createTheaterGeneration({

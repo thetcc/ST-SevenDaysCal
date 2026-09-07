@@ -240,6 +240,30 @@ test('release prompt defines global agency, neutral progression, ideal format, a
     assert.match(prompt, new RegExp(LINE_NEXT_RELEASE_CONTRACT.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.match(prompt, /本轮真实唯一 Ticket 与 6×3 Cue/);
 });
+test('release prompt allows evidence-based offscreen progress across intents and scales while preserving protocol boundaries', () => {
+    const old = serializeLines([{ name: '旧活线', stage: '延展', when: '昨夜', agency: 'world', desc: '旧状态', next: '旧下一步' }]);
+    const ticket = { ticketId: 'TICKET-1', selections: [{ label: '时机', prompt: '近日' }] };
+    const locked = [{ name: '锁线', desc: '锁定状态', next: '锁定下一步' }];
+    const prompts = [
+        buildLinesPrompt('用户', '角色', 'user', '', 'auto', { intent: 'initial', pinnedBackground: locked, freshTickets: [ticket] }),
+        buildLinesPrompt('用户', '角色', 'user', old, 'macro', { intent: 'advance', pinnedBackground: locked, retained: [{ name: '旧活线' }], freshTickets: [ticket] }),
+        buildLinesPrompt('用户', '角色', 'user', '', 'micro', { intent: 'reroll', pinnedBackground: locked, rerollNames: ['上一版线'], freshTickets: [ticket] }),
+    ];
+    for (const prompt of prompts) {
+        for (const phrase of ['已有正文、记忆与世界设定确立的事实', '既有主体的动机、资源、行动条件和实际经过的故事时间', '可以在场外合理推进自身进展', '正文暂未提及或当前主角未参与不等于停滞', '普通场外推演也不等于凭空编造', '不要求每条线每轮都变化或升级阶段', '没有充分依据时，不得突然扩大伤害或制造不可逆后果', '只经过短时间时，不得强行跨越本应漫长的进程']) assert.match(prompt, new RegExp(phrase));
+        assert.doesNotMatch(prompt, /每轮都依据连续正文证据与人物动机/);
+        assert.match(prompt, /agency=world 表示其他人物、势力、机构或环境即使 用户 暂不参与也能自行推进/);
+        assert.match(prompt, /Line: 名称\|阶段\|时间锚点\|agency\|stall\|pin/);
+        assert.match(prompt, /AI 一律输出 pin=false/);
+        assert.match(prompt, /Ticket 不得缺失、重复、改写或伪造；旧线不得使用 Ticket/);
+        assert.match(prompt, /锁线已由本地完整保留，不输出、不改写、不终结、不分票/);
+    }
+    assert.match(prompts[0], /首次生成或刷新可按证据输出 1–8 条自动线/);
+    assert.match(prompts[1], /逐条原名、完整返回每条旧未锁活线/);
+    assert.match(prompts[1], /旧活线/);
+    assert.match(prompts[2], /刷新不要求返回旧自动线/);
+    assert.match(prompts[2], /上一版自动线主题·仅名称避重/);
+});
 test('Ticket is transient and absent from serialized storage/model', () => {
     const checked = validateLinesResponse('<storylines_widget>\nLine: 新线|推进|筹备|1|今天|world|false|false\nTicket: TICKET-1\nDesc: d\nNext: n\n</storylines_widget>');
     assert.equal(checked.ok, true); assert.equal(checked.model[0].ticketId, 'TICKET-1');

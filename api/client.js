@@ -16,6 +16,9 @@ import {
     safeAbortReason,
     traceDiagnosticEvent,
 } from '../runtime/diagnostic-trace.js';
+import { isExternalMode, isExternalReady, isStorageBusy, recordDiagnosticAttempt, recordDiagnosticTransport, registerExternalStorageContext } from '../runtime/external-chat-storage.js';
+
+registerExternalStorageContext(getContext);
 
 // 依赖注入桥：client.js 不反向 import index.js（避免循环依赖），由 index.js 在启动时注入
 // UI 忙碌态（setFabBusy）、调试面板数据源（setLastDebugPayload）与消息构建器（buildMessages）。
@@ -147,6 +150,7 @@ export async function postChatCompletion(options = {}) {
     });
     try {
         const result = await postChatCompletionCore({ ...options, signal, diagnosticLifecycle: lifecycle, diagnosticTraceBase: base });
+        recordDiagnosticTransport({ requestId: base.requestId, module: base.module, ok: true, rawResponse: result, httpStatus: lifecycle.httpStatus });
         traceDiagnosticEvent('api-success', {
             ...base,
             status: 'response-extracted',
@@ -163,6 +167,7 @@ export async function postChatCompletion(options = {}) {
         const abortReason = timeout
             ? 'timeout'
             : aborted ? safeAbortReason(signal?.reason, 'external-abort') : undefined;
+        recordDiagnosticTransport({ requestId: base.requestId, module: base.module, ok: false, errorClass: apiTraceErrorClass(error, signal), httpStatus: Number(error?.status) || lifecycle.httpStatus });
         try {
             error.spDiagnosticRequestId = base.requestId;
             error.spDiagnosticModule = base.module;
@@ -187,6 +192,11 @@ async function postChatCompletionCore({ cfg, messages, maxTokens, temperature, s
     throwIfPreAborted(signal);
     // 总开关硬闸：插件关闭时挡住一切生成（手动 + 后台判定），防任何路径漏网。tag 供调用方识别、静默处理。
     if (!pluginEnabled()) { const e = makeDiagnosticError('config-missing'); e.spDisabled = true; throw e; }
+    if (isStorageBusy() || (isExternalMode() && !isExternalReady())) {
+        const error = new Error(isStorageBusy() ? '构画正在迁移当前聊天，已暂停生成' : '当前聊天的外置构画数据尚未加载或后端不可用，请重试加载后再生成');
+        error.phase = 'storage';
+        throw error;
+    }
     if (!cfg?.url || !cfg?.key) throw makeDiagnosticError('config-missing');
     const ctx = getContext();
     if (!ctx?.getRequestHeaders) throw new Error('SillyTavern 上下文不可用');
@@ -227,6 +237,19 @@ async function postChatCompletionCore({ cfg, messages, maxTokens, temperature, s
         const key = String(p).trim();
         if (key && !PROTECTED_BODY_KEYS.has(key)) delete body[key];
     }
+    recordDiagnosticAttempt({
+        requestId: diagnosticTraceBase?.requestId,
+        module: diagnosticTraceBase?.module || 'api',
+        model: body.model,
+        messages,
+        parameters: {
+            stream: body.stream === true,
+            ...(Object.hasOwn(body, 'max_tokens') ? { maxTokens: body.max_tokens } : {}),
+            ...(Object.hasOwn(body, 'temperature') ? { temperature: body.temperature } : {}),
+            ...(Object.hasOwn(body, 'presence_penalty') ? { presencePenalty: body.presence_penalty } : {}),
+            ...(Object.hasOwn(body, 'frequency_penalty') ? { frequencyPenalty: body.frequency_penalty } : {}),
+        },
+    });
     // 调试上下文明确记录是否因剔除参数而没有发送输出上限；不改写用户配置。
     _bridge.setLastDebugPayload({ model: cfg.model || 'gpt-4o-mini', messages, outputLimit: body.max_tokens ?? null, outputLimitOmitted: !Object.hasOwn(body, 'max_tokens') });
 

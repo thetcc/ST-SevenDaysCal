@@ -29,6 +29,9 @@
 // baibai_book / variables / LWB_SNAP 等是别的插件的数据，一律只读、绝不删。
 
 import { getContext } from '../../../extensions.js';
+import { deleteChatRoot, externalOwnKeyBytes, getChatRoot, isExternalMode, persistExternalRoots, registerExternalStorageContext, restoreDeletedChatRoot } from './runtime/external-chat-storage.js';
+
+registerExternalStorageContext(getContext);
 
 const STORE_KEY      = 'sp-store';
 const SCHEMA_VERSION = 1;
@@ -78,12 +81,9 @@ function freshStore() {
 function store(create = false) {
     const ctx = getContext?.();
     if (!ctx || !ctx.chatId) return null;
-    const cm = ctx.chatMetadata;
-    if (!cm) return null;
-    let s = cm[STORE_KEY];
+    let s = getChatRoot(STORE_KEY, { create, factory: freshStore });
     if (!s || typeof s !== 'object') {
-        if (!create) return null;
-        s = cm[STORE_KEY] = freshStore();
+        return null;
     }
     if (!s.data || typeof s.data !== 'object') s.data = {};
     // 版本对齐只在写路径做：读路径若也把内存 version 拔到最新却不落盘、不迁移，
@@ -109,6 +109,8 @@ function persist() {
     // 走 diff patch（无变化即 no-op），写完当场发出，切档取消不掉。
     const ctx = getContext?.();
     if (!ctx) return;
+    const external = persistExternalRoots();
+    if (external !== null) return external;
     const metadata = ctx.chatMetadata;
     if (metadata && confirmedMetadataQueues.get(metadata)) {
         deferOrdinaryPersist(ctx, metadata);
@@ -122,6 +124,8 @@ function persist() {
 async function persistAsync() {
     const ctx = getContext?.();
     if (!ctx) return;
+    const external = persistExternalRoots({ confirmed: true });
+    if (external !== null) return await external;
     const metadata = ctx.chatMetadata;
     for (let pending = metadata && confirmedMetadataQueues.get(metadata); pending; pending = confirmedMetadataQueues.get(metadata)) {
         try { await pending; } catch {}
@@ -130,6 +134,14 @@ async function persistAsync() {
     if (metadata && current?.chatMetadata !== metadata) return;
     const result = persistNow(current || ctx);
     if (result && typeof result.then === 'function') await result;
+}
+
+function confirmedSaveError(saved, fallback = 'store-save-unconfirmed') {
+    if (!saved || (saved.ok === true && saved.commitState === 'confirmed')) return null;
+    if (!Object.prototype.hasOwnProperty.call(saved, 'ok') && !saved.commitState) return null;
+    return Object.assign(new Error(saved.reason || (saved.commitState === 'unknown' ? '外置写入结果未确认，请刷新后核实' : fallback)), {
+        phase: 'save', commitState: saved.commitState || 'not-dispatched', saveResult: saved,
+    });
 }
 
 // AI 生成链专用的可确认保存口。普通 UI/迁移仍继续使用同步 writeStore，避免把全插件
@@ -141,6 +153,8 @@ export function bindStoreMetadataPersistence(adapter = null) {
 }
 
 async function persistConfirmed(boundContext, options = {}) {
+    const external = persistExternalRoots({ confirmed: true, ownerGuard: options.ownerGuard });
+    if (external !== null) return await external;
     if (confirmedMetadataPersistence) return confirmedMetadataPersistence.commit(boundContext, options);
     const ctx = boundContext || getContext?.();
     if (!ctx?.chatId || typeof ctx.saveMetadata !== 'function') return { ok: false, reason: 'saveMetadata-unavailable', commitState: 'not-dispatched', dispatched: false };
@@ -212,6 +226,23 @@ export async function writeDataConfirmed(kind, view, charName, value, options = 
     const externalGuard = typeof options.ownerGuard === 'function' ? options.ownerGuard : () => getContext?.()?.chatId === chatId;
     const ownerGuard = () => getContext?.()?.chatMetadata === metadata && externalGuard();
     if (!ownerGuard()) return { ok: false, reason: 'stale-before-save', commitState: 'not-dispatched', dispatched: false };
+    if (isExternalMode()) {
+        const s = store(true);
+        if (!s) return { ok: false, reason: 'external-not-ready', commitState: 'not-dispatched', dispatched: false };
+        const key = subKey(kind, view, charName);
+        const beforeHad = Object.prototype.hasOwnProperty.call(s.data, key);
+        const before = beforeHad ? cloneStoreValue(s.data[key]) : undefined;
+        if (value == null) delete s.data[key]; else s.data[key] = value;
+        try {
+            const saved = await persistConfirmed(ctx, { ...options, ownerGuard });
+            if (saved?.commitState === 'unknown') return saved;
+            if (saved?.ok !== true || saved?.commitState !== 'confirmed') throw Object.assign(new Error(saved?.reason || 'store-save-unconfirmed'), { phase: 'save', saveResult: saved });
+            return saved;
+        } catch (error) {
+            if (beforeHad) s.data[key] = before; else delete s.data[key];
+            error.phase ||= 'save'; throw error;
+        }
+    }
     return serializeConfirmedMetadata(metadata, async () => {
         if (!ownerGuard()) return { ok: false, reason: 'stale-before-save', commitState: 'not-dispatched', dispatched: false };
         const rootExisted = Object.prototype.hasOwnProperty.call(metadata, STORE_KEY);
@@ -260,8 +291,7 @@ export async function writeDataConfirmed(kind, view, charName, value, options = 
 
 // sp-store 顶层 key 是否已存在（不含内容判断，也不实例化）。
 export function hasStore() {
-    const cm = getContext?.()?.chatMetadata;
-    return !!(cm && cm[STORE_KEY] && typeof cm[STORE_KEY] === 'object');
+    return !!store(false);
 }
 
 // 当前 chat 的 sp-store 是否**含真实点线面间数据**（忽略空壳）。迁移冲突检测用这个，不用 hasStore。
@@ -454,10 +484,11 @@ export async function clearDataKeyAsync(dataKey) {
     const previous = s.data[dataKey];
     delete s.data[dataKey];
     try {
-        await persistAsync();
+        const saved = await persistAsync();
+        const error = confirmedSaveError(saved); if (error) throw error;
         return true;
     } catch (error) {
-        if (!(dataKey in s.data)) s.data[dataKey] = previous;
+        if (error?.saveResult?.commitState !== 'unknown' && !(dataKey in s.data)) s.data[dataKey] = previous;
         throw error;
     }
 }
@@ -470,16 +501,19 @@ export async function clearKindAsync(kind) {
     if (!removed.length) return 0;
     for (const [sk] of removed) delete s.data[sk];
     try {
-        await persistAsync();
+        const saved = await persistAsync();
+        const error = confirmedSaveError(saved); if (error) throw error;
         return removed.length;
     } catch (error) {
-        for (const [sk, value] of removed) if (!(sk in s.data)) s.data[sk] = value;
+        if (error?.saveResult?.commitState !== 'unknown') for (const [sk, value] of removed) if (!(sk in s.data)) s.data[sk] = value;
         throw error;
     }
 }
 
 // 某个构画自有顶层 key（如 sp-store / sp-memory / sp-theater / sp-ledger）当前占用字节。
 export function ownKeyBytes(key) {
+    const external = externalOwnKeyBytes(key);
+    if (external !== null) return external;
     const cm = getContext?.()?.chatMetadata;
     if (!cm || cm[key] == null) return 0;
     return valueBytes(cm[key]) + String(key).length * 2;
@@ -489,24 +523,27 @@ export function ownKeyBytes(key) {
 // 安全阀：只允许 OWN_KEYS 里的独立顶层 key，别的插件的数据一律拒删；不会清空 sp-store 内部数据。
 export function clearOwnKey(key) {
     if (!OWN_KEYS.includes(key) || key === STORE_KEY) return false;
-    const cm = getContext?.()?.chatMetadata;
-    if (!cm || cm[key] == null) return false;
-    delete cm[key];
+    if (!deleteChatRoot(key)) return false;
     persist();
     return true;
 }
 
 export async function clearOwnKeyAsync(key) {
     if (!OWN_KEYS.includes(key) || key === STORE_KEY) return false;
-    const cm = getContext?.()?.chatMetadata;
-    if (!cm || cm[key] == null) return false;
-    const previous = cm[key];
-    delete cm[key];
+    const root = getChatRoot(key);
+    if (!root) return false;
+    const previous = cloneStoreValue(root);
+    if (!deleteChatRoot(key)) return false;
     try {
-        await persistAsync();
+        const saved = await persistAsync();
+        const error = confirmedSaveError(saved); if (error) throw error;
         return true;
     } catch (error) {
-        if (!(key in cm)) cm[key] = previous;
+        if (error?.saveResult?.commitState !== 'unknown') {
+            const restored = getChatRoot(key, { create: true, factory: () => previous });
+            if (!restored) restoreDeletedChatRoot(key, previous);
+            else if (restored !== previous) { for (const child of Object.keys(restored)) delete restored[child]; Object.assign(restored, previous); }
+        }
         throw error;
     }
 }
@@ -608,6 +645,10 @@ export function migrateChatFromLocalStorage(chatId) {
     if (!chatId) return { status: 'none' };
     const legacy = scanLegacy(chatId);
     if (!legacy.length) return { status: 'none' };
+    // External current records require confirmed CAS before browser copies may
+    // be deleted. The legacy upgrader is deliberately synchronous, so retain
+    // localStorage and defer rather than pretending an enqueued PUT succeeded.
+    if (isExternalMode()) return { status: 'external-deferred', count: legacy.length };
 
     const s = store(true);
     if (!s) return { status: 'none' };
@@ -633,6 +674,7 @@ export function migrateChatFromLocalStorage(chatId) {
 
 // 冲突决策：用户选「保留本机」→ 清掉云端构画子键、写入 legacy、删 localStorage。
 export function applyLegacyOverCloud(legacy) {
+    if (isExternalMode()) return false;
     const s = store(true);
     if (!s || !Array.isArray(legacy)) return false;
     for (const sk of Object.keys(s.data)) if (kindOfSubKey(sk)) delete s.data[sk];
