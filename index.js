@@ -184,6 +184,7 @@ import {
     renderDatabaseWorldbookOptions,
     sameDatabaseMemoryUiIdentity,
 } from './business/memory/database.js';
+import { createQianQianJieMemoryAccess, qianQianJieMemoryDiagnostic } from './business/memory/qianqianjie.js';
 import { createTaskOwnerManager } from './runtime/task-owner.js';
 import { evaluateTaskLifecycle } from './runtime/task-orchestration.js';
 import { parseLines as parseCanonicalLines, TERMINAL_LINE_STAGES } from './business/lines/schema.js';
@@ -1835,6 +1836,7 @@ jQuery(async () => {
                 useBaiBaiBook  : !!s.useBaiBaiBook,
                 useAnima       : !!s.useAnima,
                 useDatabase    : !!s.useDatabase,
+                useQianQianJie : !!s.useQianQianJie,
                 memoryEnabled  : s.memoryEnabled !== false,
                 memoryL0Group  : Number.isFinite(+s.memoryL0Group) ? +s.memoryL0Group : 5,
                 memoryL1Group  : Number.isFinite(+s.memoryL1Group) ? +s.memoryL1Group : 10,
@@ -2715,67 +2717,57 @@ function injectFab() {
         wasMobile = nowMobile;
     });
 
-    $(`#${FAB_ID}`).on('mousedown', function (e) {
+    const fab = document.getElementById(FAB_ID);
+    const fabButton = fab?.querySelector('.sp-fab-btn');
+    if (!fab || !fabButton) return;
+    fabButton.addEventListener('pointerdown', function (e) {
+        if (e.isPrimary === false || e.button !== 0 || fabDragState) return;
         fabDragged = false;
-        const el   = document.getElementById(FAB_ID);
-        const rect = el.getBoundingClientRect();
-        fabDragState = { startX: e.clientX, startY: e.clientY, origLeft: rect.left, origTop: rect.top };
-        $(document)
-            .on('mousemove.fabdrag', function (ev) {
-                if (!fabDragState) return;
-                if (Math.abs(ev.clientX - fabDragState.startX) > 5 || Math.abs(ev.clientY - fabDragState.startY) > 5) fabDragged = true;
-                if (!fabDragged) return;
-                const f = document.getElementById(FAB_ID);
-                f.style.left   = Math.max(0, Math.min(fabDragState.origLeft + ev.clientX - fabDragState.startX, window.innerWidth  - f.offsetWidth))  + 'px';
-                f.style.top    = Math.max(0, Math.min(fabDragState.origTop  + ev.clientY - fabDragState.startY, window.innerHeight - f.offsetHeight)) + 'px';
-                f.style.right  = 'auto';
-                f.style.bottom = 'auto';
-            })
-            .on('mouseup.fabdrag', onFabDragEnd);
+        const rect = fab.getBoundingClientRect();
+        fabDragState = {
+            pointerId: e.pointerId,
+            startX: e.clientX,
+            startY: e.clientY,
+            origLeft: rect.left,
+            origTop: rect.top,
+        };
+        fabButton.setPointerCapture?.(e.pointerId);
     });
-    document.getElementById(FAB_ID).addEventListener('touchstart', function (e) {
-        fabDragged = false;
-        const el   = document.getElementById(FAB_ID);
-        const rect = el.getBoundingClientRect();
-        fabDragState = { startX: e.touches[0].clientX, startY: e.touches[0].clientY, origLeft: rect.left, origTop: rect.top };
-        document.addEventListener('touchmove', onFabTouchMove, { passive: false });
-        document.addEventListener('touchend', onFabDragEnd);
-        document.addEventListener('touchcancel', onFabDragEnd);   // 同 divider：手机端被滚动/系统打断发的是 touchcancel，漏接就黏手
-    }, { passive: true });
+    fabButton.addEventListener('pointermove', onFabPointerMove);
+    fabButton.addEventListener('pointerup', onFabPointerEnd);
+    fabButton.addEventListener('pointercancel', onFabPointerEnd);
 
-    $(`#${FAB_ID} .sp-fab-btn`).on('click', function () {
+    fabButton.addEventListener('click', function () {
         if (!fabDragged) {
             $(`#${MODAL_ID}`).is(':visible') ? closePanel() : openSchedule();
         }
     });
 }
 
-function onFabTouchMove(ev) {
-    if (!fabDragState) return;
-    // 自愈：触点已全部离开却还在收 move（touchcancel 漏接）→ 收尾，兼防 ev.touches[0] 取空崩。
-    if (!ev.touches || ev.touches.length === 0) { onFabDragEnd(); return; }
-    const ex = ev.touches[0].clientX;
-    const ey = ev.touches[0].clientY;
+function onFabPointerMove(ev) {
+    if (!fabDragState || ev.pointerId !== fabDragState.pointerId) return;
+    const ex = ev.clientX;
+    const ey = ev.clientY;
     if (Math.abs(ex - fabDragState.startX) > 5 || Math.abs(ey - fabDragState.startY) > 5) fabDragged = true;
     if (!fabDragged) return;
-    ev.preventDefault();
+    ev.preventDefault?.();
     const f = document.getElementById(FAB_ID);
     f.style.left   = Math.max(0, Math.min(fabDragState.origLeft + ex - fabDragState.startX, window.innerWidth  - f.offsetWidth))  + 'px';
     f.style.top    = Math.max(0, Math.min(fabDragState.origTop  + ey - fabDragState.startY, window.innerHeight - f.offsetHeight)) + 'px';
     f.style.right  = 'auto';
     f.style.bottom = 'auto';
 }
-function onFabDragEnd() {
+function onFabPointerEnd(ev) {
+    if (!fabDragState || ev.pointerId !== fabDragState.pointerId) return;
+    const pointerId = fabDragState.pointerId;
     if (fabDragged) {
         const f = document.getElementById(FAB_ID);
         const r = f.getBoundingClientRect();
         localStorage.setItem('sp-fab-pos', JSON.stringify({ left: r.left, top: r.top }));
     }
     fabDragState = null;
-    $(document).off('mousemove.fabdrag mouseup.fabdrag');
-    document.removeEventListener('touchmove', onFabTouchMove);
-    document.removeEventListener('touchend', onFabDragEnd);
-    document.removeEventListener('touchcancel', onFabDragEnd);
+    const captureTarget = ev.currentTarget;
+    if (captureTarget?.hasPointerCapture?.(pointerId)) captureTarget.releasePointerCapture(pointerId);
 }
 
 function injectModal() {
@@ -2998,6 +2990,11 @@ function injectModal() {
                                 <summary class="sp-settings-section-title">记忆</summary>
                                 <div class="sp-settings-section-body" id="sp-mem-body">
                                     <label class="sp-cfg-group">记忆源</label>
+                                    <label class="sp-mode-opt sp-mem-source-toggle">
+                                        <input type="checkbox" id="sp-mem-source-qqj">
+                                        <span>使用千千结作为记忆源</span>
+                                    </label>
+                                    <div id="sp-mem-qqj-status" class="sp-cfg-hint" style="display:none"></div>
                                     <label class="sp-mode-opt sp-mem-source-toggle">
                                         <input type="checkbox" id="sp-mem-source-bbb">
                                         <span>使用柏宝书作为记忆源</span>
@@ -4700,7 +4697,7 @@ function setBody(html) { $in('#sp-body').html(html); }
 // switch OR the first time they open the panel post-upgrade.
 function checkMemoryMigrationNotice() {
     const _ms = getSettings();
-    if (_ms.useBaiBaiBook || _ms.useAnima || _ms.useDatabase) return;      // 外置记忆源不受内置记忆迁移影响
+    if (_ms.useBaiBaiBook || _ms.useAnima || _ms.useDatabase || _ms.useQianQianJie) return;      // 外置记忆源不受内置记忆迁移影响
     const notice = memory.consumeMigrationNotice?.();
     if (!notice) return;
     const { l0Count, l1Count } = notice;
@@ -4716,6 +4713,17 @@ function checkMemoryMigrationNotice() {
 // Called by the three generation triggers (schedule/outline/lines).
 // Returns a Promise<boolean>: true if user wants to continue, false if canceled.
 async function memoryPreCheckConfirm() {
+    if (getSettings().useQianQianJie) {
+        const result = await qianQianJieMemoryAccess.result();
+        if (result.status === 'ready') return true;
+        return spConfirm({
+            title: '千千结记忆未就绪',
+            body: `${qianQianJieMemoryDiagnostic(result)}。继续生成将不注入千千结历史。`,
+            note: '可以先确认千千结已启用并完成当前聊天的记忆处理。',
+            confirmText: '继续生成',
+            cancelText: '取消',
+        });
+    }
     // Anima mode: warn only if TavernHelper is missing or the chat-bound
     // worldbook has no anima_summary slices (built-in report is meaningless here).
     if (getSettings().useAnima) {
@@ -4901,7 +4909,7 @@ function reloadAfterConflict() {
 function loadingHtml(baseText, abortId) {
     // 柏宝书 / Anima mode has no built-in background queue — never show "补全记忆" text.
     const _ms = getSettings();
-    const busy = !_ms.useBaiBaiBook && !_ms.useAnima && !_ms.useDatabase && memory.isMemoryBusy();
+    const busy = !_ms.useBaiBaiBook && !_ms.useAnima && !_ms.useDatabase && !_ms.useQianQianJie && memory.isMemoryBusy();
     const text = busy
         ? `正在补全记忆并${baseText}…`
         : `${baseText}中…`;
@@ -5730,11 +5738,20 @@ const databaseMemoryAccess = createDatabaseMemoryAccess({
     selectSlices: selectAnimaSlices,
 });
 
-// Memory-source dispatcher. Priority: Anima → 数据库 → 柏宝书 → built-in L0/L1 store. The
-// alternate sources are mutually exclusive (enforced in bindMemoryHandlers); each
+const qianQianJieMemoryAccess = createQianQianJieMemoryAccess({
+    globalRef: globalThis,
+    contextProvider: getContext,
+    isSelected: () => getSettings().useQianQianJie === true,
+});
+
+// Alternate sources are mutually exclusive (enforced in bindMemoryHandlers); each
 // returns its own history or nothing (empty prompt block) — no fallback between them.
 async function _getMemTextRaw(opts = {}) {
     const s = getSettings();
+    if (s.useQianQianJie) {
+        try { return await qianQianJieMemoryAccess.text(opts); }
+        catch (err) { console.warn('[7dayscal] 千千结取记忆出错', safeDiagnosticLog('memory', 'request', err, { background: true })); return ''; }
+    }
     if (s.useAnima) {
         try { return await getAnimaMemText(opts); }
         catch (err) { console.warn('[7dayscal] Anima 取摘要出错', safeDiagnosticLog('memory', 'request', err, { background: true })); return ''; }
@@ -6874,6 +6891,8 @@ function renderMemorySection() {
     const useBbb   = !!s.useBaiBaiBook;
     const useAnima = !!s.useAnima;
     const useDatabase = !!s.useDatabase;
+    const useQianQianJie = !!s.useQianQianJie;
+    $in('#sp-mem-source-qqj').prop('checked', useQianQianJie);
     $in('#sp-mem-source-bbb').prop('checked', useBbb);
     $in('#sp-mem-source-anima').prop('checked', useAnima);
     $in('#sp-mem-source-database').prop('checked', useDatabase);
@@ -6888,6 +6907,17 @@ function renderMemorySection() {
     $in('#sp-custom-prompt').val(typeof s.customPrompt === 'string' ? s.customPrompt : '');
     $in('#sp-storyclock-prompt').val(buildStoryClockPrompt(s));
     $in('#sp-space-persona').val(typeof s.spacePersona === 'string' ? s.spacePersona : '');   // 间·人格覆盖：同为全局设置，须在按源 early-return 前回填
+    if (useQianQianJie) {
+        $in('#sp-mem-internal').hide();
+        $in('#sp-mem-bbb-status, #sp-mem-anima-status, #sp-mem-database-status').hide();
+        const result = qianQianJieMemoryAccess.status();
+        const ok = result.status === 'ready';
+        $in('#sp-mem-qqj-status').show().html(ok
+            ? '<i class="fa-solid fa-circle-check" style="color:var(--cardhub-accent,#7c9)"></i> 千千结只读接口已就绪（生成时读取当前聊天的正式记忆）'
+            : `<i class="fa-solid fa-triangle-exclamation" style="color:#e0a54e"></i> ${escapeHtml(qianQianJieMemoryDiagnostic(result))}`);
+        return;
+    }
+    $in('#sp-mem-qqj-status').hide();
     if (useBbb) {
         $in('#sp-mem-internal').hide();
         $in('#sp-mem-anima-status').hide();
@@ -7015,10 +7045,18 @@ function bindTheaterHandlers() {
 }
 
 function bindMemoryHandlers() {
+    $in('#sp-mem-source-qqj').on('change', function () {
+        const s = getSettings();
+        s.useQianQianJie = this.checked;
+        if (this.checked) { s.useBaiBaiBook = false; s.useAnima = false; s.useDatabase = false; }
+        saveSettingsDebounced();
+        memory.abortAll('manual-abort');
+        renderMemorySection();
+    });
     $in('#sp-mem-source-bbb').on('change', function () {
         const s = getSettings();
         s.useBaiBaiBook = this.checked;
-        if (this.checked) { s.useAnima = false; s.useDatabase = false; }   // 记忆源互斥
+        if (this.checked) { s.useAnima = false; s.useDatabase = false; s.useQianQianJie = false; }   // 记忆源互斥
         saveSettingsDebounced();
         memory.abortAll('manual-abort');
         renderMemorySection();
@@ -7026,7 +7064,7 @@ function bindMemoryHandlers() {
     $in('#sp-mem-source-anima').on('change', function () {
         const s = getSettings();
         s.useAnima = this.checked;
-        if (this.checked) { s.useBaiBaiBook = false; s.useDatabase = false; }   // 记忆源互斥
+        if (this.checked) { s.useBaiBaiBook = false; s.useDatabase = false; s.useQianQianJie = false; }   // 记忆源互斥
         saveSettingsDebounced();
         memory.abortAll('manual-abort');
         renderMemorySection();
@@ -7034,7 +7072,7 @@ function bindMemoryHandlers() {
     $in('#sp-mem-source-database').on('change', function () {
         const s = getSettings();
         s.useDatabase = this.checked;
-        if (this.checked) { s.useBaiBaiBook = false; s.useAnima = false; }
+        if (this.checked) { s.useBaiBaiBook = false; s.useAnima = false; s.useQianQianJie = false; }
         saveSettingsDebounced();
         memory.abortAll('manual-abort');
         renderMemorySection();

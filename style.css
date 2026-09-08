@@ -2198,6 +2198,7 @@ select.sp-input { appearance: none; cursor: pointer; }
     bottom  : auto;
     right   : 16px;
     z-index : 2000000;
+    touch-action: none;
 }
 .sp-fab-btn {
     width         : 36px;
@@ -2205,6 +2206,7 @@ select.sp-input { appearance: none; cursor: pointer; }
     border-radius : 50%;
     border        : none;
     cursor        : pointer;
+    touch-action  : none;
     display       : flex;
     align-items   : center;
     justify-content: center;

@@ -1,7 +1,7 @@
 import { _cnToNumber, _CN_MONTH_ALIAS, normalizeCnDateDigits } from '../../utils/cn-date.js';
 const START_RE = /<!--\s*SDC-start\s+([\s\S]*?)\s*-->/i;
 const END_RE = /<!--\s*SDC-end\s+([\s\S]*?)\s*-->/i;
-const CLOCK_NAMESPACES = Object.freeze(['SDC', 'myknots']);
+const CLOCK_NAMESPACES = Object.freeze(['SDC', 'QQJ', 'myknots']);
 let deps = { loadCalendar: () => null, validMonthDay: () => null, validRealDate: null, defaultCalendar: null, monthDayFromKey: () => null, extractDay: () => null, cnToNumber: () => 0, monthAlias: {}, explicitWeekdayDate: () => null, context: () => null };
 export function bindStoryClock(next = {}) { deps = { ...deps, ...next }; }
 const WEEKDAY_TEXT = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -211,10 +211,10 @@ function sameStoryDate(left, right) {
 }
 function storyTextWithoutClockMetadata(message) {
     return String(message || '')
-        .replace(/<!--\s*(?:SDC|myknots)-(?:start|end)\s+[\s\S]*?\s*-->/ig, ' ')
+        .replace(/<!--\s*(?:SDC|QQJ|myknots)-(?:start|end)\s+[\s\S]*?\s*-->/ig, ' ')
         // 未闭合的 HTML 注释从标记处直到楼尾都仍属于注释元数据；不能让其中
         // 的 date/weekday 泄漏成正文显式证据。
-        .replace(/<!--\s*(?:SDC|myknots)-(?:start|end)\b[\s\S]*$/i, ' ');
+        .replace(/<!--\s*(?:SDC|QQJ|myknots)-(?:start|end)\b[\s\S]*$/i, ' ');
 }
 export function storyWeekdayRef(context = deps.context?.(), calendar = deps.loadCalendar?.(), limit = 100, floor = null, currentDate = null) {
     const messages = context?.chat || []; const top = Number.isInteger(floor) ? Math.min(floor, messages.length - 1) : messages.length - 1;

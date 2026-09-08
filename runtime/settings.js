@@ -73,6 +73,7 @@ export const DEFAULT_SETTINGS = {
     useBaiBaiBook  : false, // if true, pull history from 柏宝书 getInjectedHistory() and skip built-in memory entirely
     useAnima       : false, // if true, read summaries from Anima's chat-bound worldbook (anima_summary entries) and skip built-in memory
     useDatabase    : false, // if true, retrieve raw TavernDB summary entries from the selected/default worldbook
+    useQianQianJie : false, // if true, read QQJ's formal projection through its versioned read-only bridge
     databaseWorldbookName: '', // empty follows the character primary worldbook; otherwise freeze this exact host book name
     animaRecallCount: 20,
     // Tag sanitizer (used by memory.js:stripTags AND anywhere else that reads

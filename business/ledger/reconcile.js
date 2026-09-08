@@ -1,7 +1,7 @@
 // 刻度来源校对：只做确定性来源匹配，不访问 API、不解释日期。
 function stableSourceBody(signature) {
     return String(signature || '')
-        .replace(/<!--\s*SDC-(?:start|end)\b[^>]*-->/gi, '')
+        .replace(/<!--\s*(?:SDC|QQJ|myknots)-(?:start|end)\b[^>]*-->/gi, '')
         .replace(/\s+/g, ' ')
         .trim();
 }

@@ -2,6 +2,7 @@
 // current business roots, bounded diagnostics and historical snapshots stay in
 // separate records so ordinary edits never upload the full snapshot history.
 import { sanitizeDiagnosticRecord } from './diagnostic-trace.js';
+import { createNativeExternalChatHostBridge } from './external-chat-host-bridge.js';
 
 export const EXTERNAL_MARKER_KEY = 'sp-storage';
 export const EXTERNAL_NAMESPACE = 'st-sevendayscal';
@@ -15,7 +16,7 @@ const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringi
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const enc = value => encodeURIComponent(String(value));
 
-let binding = { getContext: () => null, coreModule: null, fetchImpl: globalThis.fetch };
+let binding = { getContext: () => null, coreModule: null, fetchImpl: globalThis.fetch, nativeHostBridge: null };
 let active = freshActive();
 let changeListener = () => {};
 
@@ -42,8 +43,39 @@ function markerOf(ctx = context()) {
 function activeMatches(ctx = context()) { return !!ctx?.chatId && String(ctx.chatId) === active.chatId; }
 function headers() { return context()?.getRequestHeaders?.() || {}; }
 
+const PATCH_HOST_CONTRACT = Object.freeze([
+    'resolveChatStateTarget', 'getChatMetadataSnapshot', 'getChatMessageSnapshot',
+    'runSerializedChatWrite', 'buildChatMessagePatchOperations', 'getRequestHeaders',
+    'applyIntegrityFromWritePayloadToTarget', 'seedChatMessageSnapshot',
+    'seedChatMetadataSnapshot', 'invalidateChatWriteSnapshot',
+    'refreshChatWriteSnapshotsFromServer',
+]);
+function hasPatchHostContract() { return PATCH_HOST_CONTRACT.every(name => typeof binding.coreModule?.[name] === 'function'); }
+function captureChatTarget() {
+    if (typeof binding.coreModule?.resolveChatStateTarget === 'function') {
+        try { return clone(binding.coreModule.resolveChatStateTarget()); } catch { return null; }
+    }
+    return clone(binding.nativeHostBridge?.captureTarget?.());
+}
+async function readHostState(target) {
+    if (typeof binding.coreModule?.getChatMetadataSnapshot === 'function' && typeof binding.coreModule?.getChatMessageSnapshot === 'function') {
+        return {
+            metadata: clone(binding.coreModule.getChatMetadataSnapshot(target)),
+            messages: clone(binding.coreModule.getChatMessageSnapshot(target)),
+        };
+    }
+    if (typeof binding.coreModule?.getChatMessageSnapshot === 'function' && !target?.native) {
+        return { metadata: undefined, messages: clone(binding.coreModule.getChatMessageSnapshot(target)) };
+    }
+    return binding.nativeHostBridge?.readTarget?.(target);
+}
+
 export function bindExternalChatStorage(options = {}) {
     binding = { ...binding, ...options };
+    binding.nativeHostBridge = options.nativeHostBridge || createNativeExternalChatHostBridge({
+        getContext: binding.getContext,
+        fetchImpl: (...args) => binding.fetchImpl(...args),
+    });
     if (typeof options.onChange === 'function') changeListener = options.onChange;
 }
 
@@ -189,7 +221,7 @@ export async function loadExternalChat({ force = false } = {}) {
     }
     if (!force && active.chatId === chatId && ['ready', 'loading'].includes(active.status)) return storageStatus();
     const generation = active.generation + 1;
-    active = { ...freshActive(), chatId, mode: 'external', status: 'loading', marker: clone(marker), target: clone(binding.coreModule?.resolveChatStateTarget?.()), generation };
+    active = { ...freshActive(), chatId, mode: 'external', status: 'loading', marker: clone(marker), target: captureChatTarget(), generation };
     notify();
     try {
         const health = await probeExternalBackend(); if (!health.ok) throw health.error || new Error('白鳥数据后端能力不兼容');
@@ -589,6 +621,18 @@ function randomId(prefix = 'snapshot') {
 
 async function publishMessages(target, beforeMessages, nextMessages, metadataPatch = null, ownerGuard = () => true) {
     const api = binding.coreModule;
+    if (!hasPatchHostContract()) {
+        if (!target || typeof binding.nativeHostBridge?.publish !== 'function') return { ok: false, reason: 'host-patch-unavailable', dispatched: false };
+        return binding.nativeHostBridge.publish({
+            target,
+            beforeMessages,
+            nextMessages,
+            metadataPatch,
+            ownerGuard,
+            rootKeys: EXTERNAL_ROOT_KEYS,
+            markerKey: EXTERNAL_MARKER_KEY,
+        });
+    }
     const required = ['runSerializedChatWrite', 'buildChatMessagePatchOperations', 'getRequestHeaders', 'applyIntegrityFromWritePayloadToTarget', 'seedChatMessageSnapshot', 'seedChatMetadataSnapshot', 'invalidateChatWriteSnapshot'];
     if (!target || !required.every(name => typeof api?.[name] === 'function')) return { ok: false, reason: 'host-patch-unavailable', dispatched: false };
     return api.runSerializedChatWrite(async () => {
@@ -658,6 +702,9 @@ async function publishMessages(target, beforeMessages, nextMessages, metadataPat
 
 async function confirmPublished(target, marker, nextMessages) {
     const api = binding.coreModule;
+    if (!hasPatchHostContract()) {
+        return !!await binding.nativeHostBridge?.confirmPublished?.(target, marker, nextMessages, EXTERNAL_ROOT_KEYS, EXTERNAL_MARKER_KEY);
+    }
     if (typeof api?.refreshChatWriteSnapshotsFromServer !== 'function') return false;
     try {
         await api.refreshChatWriteSnapshotsFromServer(target);
@@ -685,7 +732,10 @@ async function writeExternalSnapshotNow(state, scheduled) {
     const current = currentScheduledReply(state, scheduled);
     if (!current) return { ok: false, reason: 'reply-changed', dispatched: false };
     const { floor, message } = current; const target = clone(state.target);
-    const beforeMessages = clone(binding.coreModule?.getChatMessageSnapshot?.(target));
+    let hostState;
+    try { hostState = await readHostState(target); }
+    catch (error) { return { ok: false, reason: error?.code || 'message-snapshot-unavailable', dispatched: false, error }; }
+    const beforeMessages = clone(hostState?.messages);
     if (!Array.isArray(beforeMessages) || !beforeMessages[floor]
         || replyIdentity(beforeMessages[floor], scheduled.swipeId) !== scheduled.replyId) {
         return { ok: false, reason: 'message-snapshot-unavailable', dispatched: false };
@@ -742,7 +792,7 @@ async function collectionIdFor(target) {
 export function abortMigration() { if (active.migration?.phase === 'copying') active.migration.controller.abort('user-abort'); }
 
 export async function migrateCurrentChat({ onProgress = () => {} } = {}) {
-    const ctx = context(); const chatId = String(ctx?.chatId || ''); const target = clone(binding.coreModule?.resolveChatStateTarget?.());
+    const ctx = context(); const chatId = String(ctx?.chatId || ''); const target = captureChatTarget();
     if (!chatId || !target || hasMarker(ctx)) return { ok: false, reason: hasMarker(ctx) ? 'already-external' : 'missing-chat-target' };
     const controller = new AbortController(); const generation = active.generation + 1;
     active = { ...freshActive(), chatId, mode: 'chat', status: 'migrating', target, generation, migration: { phase: 'copying', controller } }; notify();
@@ -751,8 +801,11 @@ export async function migrateCurrentChat({ onProgress = () => {} } = {}) {
         if (active === migrationState) active = { ...freshActive(), chatId, mode: 'chat', status: 'chat', error: error?.message || null, generation: generation + 1 };
         notify(); return { ok: false, reason, ...(error ? { error } : {}) };
     };
-    let currentSnapshot = clone(binding.coreModule?.getChatMetadataSnapshot?.(target));
-    let messagesSnapshot = clone(binding.coreModule?.getChatMessageSnapshot?.(target));
+    let hostState;
+    try { hostState = await readHostState(target); }
+    catch (error) { return failEarly('host-patch-unavailable', error); }
+    let currentSnapshot = clone(hostState?.metadata);
+    let messagesSnapshot = clone(hostState?.messages);
     if (!currentSnapshot?.integrity || !Array.isArray(messagesSnapshot)) return failEarly('host-patch-unavailable');
     const liveRoots = Object.fromEntries(EXTERNAL_ROOT_KEYS.map(key => [key, ctx.chatMetadata?.[key]]));
     const savedRoots = Object.fromEntries(EXTERNAL_ROOT_KEYS.map(key => [key, currentSnapshot?.[key]]));
@@ -768,11 +821,14 @@ export async function migrateCurrentChat({ onProgress = () => {} } = {}) {
         if (!saving || typeof saving.then !== 'function') return failEarly('live-save-unconfirmed');
         try { await saving; }
         catch (error) { return failEarly('live-save-failed', error); }
-        if (typeof binding.coreModule?.refreshChatWriteSnapshotsFromServer !== 'function') return failEarly('host-refresh-unavailable');
-        try { await binding.coreModule.refreshChatWriteSnapshotsFromServer(target); }
-        catch (error) { return failEarly('host-refresh-failed', error); }
-        currentSnapshot = clone(binding.coreModule.getChatMetadataSnapshot?.(target));
-        messagesSnapshot = clone(binding.coreModule.getChatMessageSnapshot?.(target));
+        try {
+            if (hasPatchHostContract() && typeof binding.coreModule?.refreshChatWriteSnapshotsFromServer === 'function') {
+                await binding.coreModule.refreshChatWriteSnapshotsFromServer(target);
+            }
+            hostState = await readHostState(target);
+        } catch (error) { return failEarly('host-refresh-failed', error); }
+        currentSnapshot = clone(hostState?.metadata);
+        messagesSnapshot = clone(hostState?.messages);
         const refreshedRoots = Object.fromEntries(EXTERNAL_ROOT_KEYS.map(key => [key, currentSnapshot?.[key]]));
         if (!currentSnapshot?.integrity || !Array.isArray(messagesSnapshot) || !same(liveRoots, refreshedRoots) || !same(liveMessages, messagesSnapshot)) return failEarly('live-flush-mismatch');
     }
