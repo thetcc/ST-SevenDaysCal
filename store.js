@@ -30,6 +30,7 @@
 
 import { getContext } from '../../../extensions.js';
 import { deleteChatRoot, externalOwnKeyBytes, getChatRoot, isExternalMode, persistExternalRoots, registerExternalStorageContext, restoreDeletedChatRoot } from './runtime/external-chat-storage.js';
+import { createBestEffortMetadataSaver } from './runtime/target-metadata-save.js';
 
 registerExternalStorageContext(getContext);
 
@@ -85,12 +86,13 @@ function store(create = false) {
     if (!s || typeof s !== 'object') {
         return null;
     }
-    if (!s.data || typeof s.data !== 'object') s.data = {};
+    if (!s.data || typeof s.data !== 'object') { claimOrdinaryRootOwnership(); s.data = {}; }
     // 版本对齐只在写路径做：读路径若也把内存 version 拔到最新却不落盘、不迁移，
     // 将来 bump schema 时写路径会误判「已是最新」而跳过迁移，数据停在旧结构却挂新版本号。
     // 故读路径原样返回（version 保持磁盘值），迁移一律推到下一次写路径（在此补迁移逻辑）。
     if (create && s.version !== SCHEMA_VERSION) {
         // v1 是初版，无历史结构要迁移；未来 bump 时在此补齐。
+        claimOrdinaryRootOwnership();
         s.version = SCHEMA_VERSION;
         persist();
     }
@@ -145,8 +147,8 @@ function confirmedSaveError(saved, fallback = 'store-save-unconfirmed') {
 }
 
 // AI 生成链专用的可确认保存口。普通 UI/迁移仍继续使用同步 writeStore，避免把全插件
-// 存储 API 粗暴异步化。生产宿主绑定固定目标 metadata saver；测试或旧宿主只能在
-// saveMetadata 明确返回 Promise 时，把 Promise resolve 当作本次调用完成确认。
+// 存储 API 粗暴异步化。生产宿主绑定固定目标 metadata saver；测试或旧宿主保留
+// best-effort 兼容语义，不把 Promise resolve 冒充服务端确认。
 let confirmedMetadataPersistence = null;
 export function bindStoreMetadataPersistence(adapter = null) {
     confirmedMetadataPersistence = adapter && typeof adapter.commit === 'function' ? adapter : null;
@@ -158,35 +160,31 @@ async function persistConfirmed(boundContext, options = {}) {
     if (confirmedMetadataPersistence) return confirmedMetadataPersistence.commit(boundContext, options);
     const ctx = boundContext || getContext?.();
     if (!ctx?.chatId || typeof ctx.saveMetadata !== 'function') return { ok: false, reason: 'saveMetadata-unavailable', commitState: 'not-dispatched', dispatched: false };
-    // 旧宿主没有固定目标 saver，只能依赖 saveMetadata 在调用时同步抓取 chatMetadata 快照。
-    // confirmed 使用私有 staging root；因此只在这次同步抓取的一瞬间换入，随后立即还原，
-    // 等待 Promise 期间普通 UI 写入口看不到未确认值。
-    const liveMetadata = options.liveMetadata;
-    const stagedMetadata = ctx.chatMetadata;
-    const swapRoot = liveMetadata && stagedMetadata && liveMetadata !== stagedMetadata;
-    const liveRootExisted = swapRoot && Object.prototype.hasOwnProperty.call(liveMetadata, STORE_KEY);
-    const liveRoot = swapRoot ? liveMetadata[STORE_KEY] : undefined;
-    let result;
-    try {
-        if (swapRoot) {
-            if (Object.prototype.hasOwnProperty.call(stagedMetadata, STORE_KEY)) liveMetadata[STORE_KEY] = stagedMetadata[STORE_KEY];
-            else delete liveMetadata[STORE_KEY];
-        }
-        result = ctx.saveMetadata();
-    } finally {
-        if (swapRoot) {
-            if (liveRootExisted) liveMetadata[STORE_KEY] = liveRoot;
-            else delete liveMetadata[STORE_KEY];
-        }
-    }
-    if (!result || typeof result.then !== 'function') return { ok: false, reason: 'saveMetadata-unconfirmed', commitState: 'legacy-unconfirmed', dispatched: true };
-    await result;
-    return { ok: true, reason: 'saveMetadata-promise-resolved', commitState: 'confirmed', dispatched: true };
+    return createBestEffortMetadataSaver({ context: () => ctx }).commit(ctx, { ...options, rootKey: STORE_KEY });
 }
 
 const cloneStoreValue = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 const confirmedMetadataQueues = new WeakMap();
 const deferredOrdinaryPersists = new WeakMap();
+const ordinaryKeyOwnership = new WeakMap();
+const ORDINARY_ROOT = Symbol('ordinary-root');
+
+// 只在 confirmed 事务在途时记录普通操作对同一子键的接管。它不参与生成准入，
+// 只防止该事务结算/回撤时把随后发生的普通同值写或删除认成本次候选。
+function ordinaryOwnership(metadata, key) { return ordinaryKeyOwnership.get(metadata)?.get(key); }
+function claimOrdinaryRootOwnership(metadata = getContext?.()?.chatMetadata) {
+    if (!metadata || !confirmedMetadataQueues.has(metadata)) return;
+    let keys = ordinaryKeyOwnership.get(metadata);
+    if (!keys) ordinaryKeyOwnership.set(metadata, keys = new Map());
+    keys.set(ORDINARY_ROOT, Symbol('ordinary-root-owner'));
+    return keys;
+}
+function claimOrdinaryOwnership(key) {
+    const metadata = getContext?.()?.chatMetadata;
+    const keys = claimOrdinaryRootOwnership(metadata);
+    if (!keys) return;
+    keys.set(key, Symbol(key));
+}
 
 // 普通 writeData/writeBatch 等仍立即更新 live root，保持同步读写合同；若同一 root 正有
 // confirmed 保存，只延后宿主抓取整 root 快照。confirmed 成功后保存 A+B，失败后保存 B，
@@ -257,18 +255,19 @@ export async function writeDataConfirmed(kind, view, charName, value, options = 
         if (value == null) delete s.data[key]; else s.data[key] = value;
         const stagedMetadata = { ...metadata, [STORE_KEY]: s };
         const stagedContext = { ...ctx, chatMetadata: stagedMetadata };
+        const ordinaryOwner = ordinaryOwnership(metadata, key);
+        const ordinaryRootOwner = ordinaryOwnership(metadata, ORDINARY_ROOT);
+        const publication = { root: null, installed: false, isOwned: () => ordinaryOwnership(metadata, ORDINARY_ROOT) === ordinaryRootOwner };
         try {
-            const saved = await persistConfirmed(stagedContext, { ...options, ownerGuard, liveMetadata: metadata });
-            if (saved?.ok !== true || saved?.commitState !== 'confirmed') {
+            const saved = await persistConfirmed(stagedContext, { ...options, ownerGuard, liveMetadata: metadata, publication });
+            if (saved?.ok !== true) {
                 const error = Object.assign(new Error(saved?.reason || 'store-save-unconfirmed'), { phase: 'save', saveResult: saved || null });
                 if (Number.isInteger(Number(saved?.status))) error.status = Number(saved.status);
                 throw error;
             }
             const currentRoot = metadata[STORE_KEY];
-            const currentData = currentRoot?.data && typeof currentRoot.data === 'object' ? currentRoot.data : {};
-            const currentHad = Object.prototype.hasOwnProperty.call(currentData, key);
-            const keyUnchanged = currentHad === beforeHad && (!currentHad || JSON.stringify(currentData[key]) === JSON.stringify(before));
-            if (keyUnchanged) {
+            const ordinaryStillOwned = ordinaryOwnership(metadata, key) === ordinaryOwner;
+            if (ordinaryStillOwned) {
                 let target = currentRoot;
                 if (!target || typeof target !== 'object') target = metadata[STORE_KEY] = freshStore();
                 if (!target.data || typeof target.data !== 'object') target.data = {};
@@ -276,9 +275,22 @@ export async function writeDataConfirmed(kind, view, charName, value, options = 
                 if (value == null) delete target.data[key]; else target.data[key] = value;
                 if (!rootExisted && value == null && Object.keys(target.data).length === 0) delete metadata[STORE_KEY];
             }
-            if (!ownerGuard() || !keyUnchanged) return { ...saved, stale: true, reason: 'committed-but-stale' };
+            if (!ownerGuard() || !ordinaryStillOwned) return { ...saved, stale: true, reason: 'committed-but-stale' };
             return saved;
         } catch (error) {
+            // fixed saver 从未发布 staging，不能回撤 live 数据。官方兼容路径只在
+            // 本次临时 root 仍实际挂载、且目标子键未被普通操作接管时撤回候选。
+            const currentRoot = metadata[STORE_KEY];
+            const candidateStillOwned = publication.installed && currentRoot === publication.root
+                && ordinaryOwnership(metadata, key) === ordinaryOwner;
+            if (candidateStillOwned) {
+                let target = currentRoot;
+                if (!target || typeof target !== 'object') target = metadata[STORE_KEY] = freshStore();
+                if (!target.data || typeof target.data !== 'object') target.data = {};
+                if (beforeHad) target.data[key] = before;
+                else delete target.data[key];
+                if (!rootExisted && Object.keys(target.data).length === 0) delete metadata[STORE_KEY];
+            }
             if (!error.saveResult) {
                 const status = Number(error?.status ?? error?.statusCode ?? error?.httpStatus);
                 error.saveResult = { ok: false, reason: Number.isInteger(status) ? `http-${status}` : 'saveMetadata-rejected', ...(Number.isInteger(status) ? { status } : {}), commitState: 'not-dispatched', dispatched: false };
@@ -355,6 +367,7 @@ export function writeData(kind, view, charName, value) {
     if (!s) return false;
     if (value == null) { removeData(kind, view, charName); return true; }
     const key = subKey(kind, view, charName);
+    claimOrdinaryOwnership(key);
     s.data[key] = value;
     persist();
     return true;
@@ -372,7 +385,7 @@ export function writeBatch(entries) {
 
 function _applyBatch(list) {
     const s = store(true); if (!s) return false;
-    for (const it of list) { const key = subKey(it.kind, it.view, it.charName); if (it.value == null) delete s.data[key]; else s.data[key] = it.value; }
+    for (const it of list) { const key = subKey(it.kind, it.view, it.charName); claimOrdinaryOwnership(key); if (it.value == null) delete s.data[key]; else s.data[key] = it.value; }
     return true;
 }
 
@@ -380,6 +393,7 @@ export function removeData(kind, view = 'user', charName = '') {
     const s = store();
     if (!s) return;
     const k = subKey(kind, view, charName);
+    claimOrdinaryOwnership(k);
     if (k in s.data) { delete s.data[k]; persist(); }
 }
 
@@ -387,6 +401,7 @@ export function removeData(kind, view = 'user', charName = '') {
 export function writeRaw(subKeyStr, value) {
     const s = store(true);
     if (!s || !subKeyStr) return false;
+    claimOrdinaryOwnership(subKeyStr);
     s.data[subKeyStr] = value;
     persist();
     return true;
@@ -410,6 +425,7 @@ export function pushRecentCharName(name, max = 3) {
     if (!s) return;
     const prev = Array.isArray(s.data[CHARNAMES_SUBKEY]) ? s.data[CHARNAMES_SUBKEY] : [];
     const next = [n, ...prev.filter(x => x !== n)].slice(0, max);
+    claimOrdinaryOwnership(CHARNAMES_SUBKEY);
     s.data[CHARNAMES_SUBKEY] = next;
     persist();
 }
@@ -437,6 +453,7 @@ export function addPinnedChar(name) {
     const prev = Array.isArray(s.data[CHARPINS_SUBKEY]) ? s.data[CHARPINS_SUBKEY].filter(x => typeof x === 'string' && x.trim()) : [];
     if (prev.includes(n)) return 'exists';
     if (prev.length >= PIN_CAP) return 'full';
+    claimOrdinaryOwnership(CHARPINS_SUBKEY);
     s.data[CHARPINS_SUBKEY] = [...prev, n];
     persist();
     return 'ok';
@@ -449,6 +466,7 @@ export function removePinnedChar(name) {
     const prev = Array.isArray(s.data[CHARPINS_SUBKEY]) ? s.data[CHARPINS_SUBKEY] : [];
     const next = prev.filter(x => x !== n);
     if (next.length === prev.length) return false;
+    claimOrdinaryOwnership(CHARPINS_SUBKEY);
     s.data[CHARPINS_SUBKEY] = next;
     persist();
     return true;
@@ -504,7 +522,7 @@ export function clearKind(kind) {
     if (!s) return 0;
     let n = 0;
     for (const sk of Object.keys(s.data)) {
-        if (sk === kind || sk.startsWith(kind + '-')) { delete s.data[sk]; n++; }
+        if (sk === kind || sk.startsWith(kind + '-')) { claimOrdinaryOwnership(sk); delete s.data[sk]; n++; }
     }
     if (n) persist();
     return n;
@@ -518,13 +536,14 @@ export async function clearDataKeyAsync(dataKey) {
     const s = store();
     if (!s || !(dataKey in s.data)) return false;
     const previous = s.data[dataKey];
+    claimOrdinaryOwnership(dataKey);
     delete s.data[dataKey];
     try {
         const saved = await persistAsync();
         const error = confirmedSaveError(saved); if (error) throw error;
         return true;
     } catch (error) {
-        if (error?.saveResult?.commitState !== 'unknown' && !(dataKey in s.data)) s.data[dataKey] = previous;
+        if (error?.saveResult?.commitState !== 'unknown' && !(dataKey in s.data)) { claimOrdinaryOwnership(dataKey); s.data[dataKey] = previous; }
         throw error;
     }
 }
@@ -535,13 +554,13 @@ export async function clearKindAsync(kind) {
     if (!s) return 0;
     const removed = Object.entries(s.data).filter(([sk]) => sk === kind || sk.startsWith(kind + '-'));
     if (!removed.length) return 0;
-    for (const [sk] of removed) delete s.data[sk];
+    for (const [sk] of removed) { claimOrdinaryOwnership(sk); delete s.data[sk]; }
     try {
         const saved = await persistAsync();
         const error = confirmedSaveError(saved); if (error) throw error;
         return removed.length;
     } catch (error) {
-        if (error?.saveResult?.commitState !== 'unknown') for (const [sk, value] of removed) if (!(sk in s.data)) s.data[sk] = value;
+        if (error?.saveResult?.commitState !== 'unknown') for (const [sk, value] of removed) if (!(sk in s.data)) { claimOrdinaryOwnership(sk); s.data[sk] = value; }
         throw error;
     }
 }
@@ -691,7 +710,7 @@ export function migrateChatFromLocalStorage(chatId) {
 
     const cloudHasData = Object.keys(s.data).some(kindOfSubKey);
     if (!cloudHasData) {
-        for (const it of legacy) s.data[it.subKey] = it.value;
+        for (const it of legacy) { claimOrdinaryOwnership(it.subKey); s.data[it.subKey] = it.value; }
         persist();
         legacy.forEach(it => localStorage.removeItem(it.key));
         return { status: 'migrated', count: legacy.length };
@@ -713,8 +732,8 @@ export function applyLegacyOverCloud(legacy) {
     if (isExternalMode()) return false;
     const s = store(true);
     if (!s || !Array.isArray(legacy)) return false;
-    for (const sk of Object.keys(s.data)) if (kindOfSubKey(sk)) delete s.data[sk];
-    for (const it of legacy) s.data[it.subKey] = it.value;
+    for (const sk of Object.keys(s.data)) if (kindOfSubKey(sk)) { claimOrdinaryOwnership(sk); delete s.data[sk]; }
+    for (const it of legacy) { claimOrdinaryOwnership(it.subKey); s.data[it.subKey] = it.value; }
     persist();
     legacy.forEach(it => localStorage.removeItem(it.key));
     return true;

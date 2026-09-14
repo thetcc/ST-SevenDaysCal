@@ -20,7 +20,7 @@ function generationLeases() {
 export function createLinesGenerationController(env = {}) {
     const owners = env.owners;
     const participantCurrent = identity => !identity || env.sameParticipantIdentity?.(identity, env.participantIdentity?.()) !== false;
-    const run = async (silent = false, swipeCtx = null, travelContext = null, preflightOwner = null) => {
+    const run = async (silent = false, swipeCtx = null, travelContext = null, preflightOwner = null, memoryContext = null) => {
         const diagnostic = createGenerationDiagnosticScope('lines', { background: silent });
         if (env.isEditing?.()) return { status: 'cancelled', reason: 'editing' };
         const chatId = env.chatId();
@@ -38,10 +38,11 @@ export function createLinesGenerationController(env = {}) {
         let travelAbort = null;
         let abortFromTravel = null;
         let generationCommitted = false;
+        let preserveFailureUi = false;
         try {
             owner = owners.create('lines-generation', { chatId, chatRevision, participantIdentity, intent: swipeCtx?.forceReroll || swipeCtx?.reroll ? 'reroll' : (travelContext ? 'time-travel' : 'advance') });
             owner.contextSnapshot = contextSnapshot;
-            env.runtime?.start(owner.controller); env.onStart?.(owner);
+            env.runtime?.start(owner.controller, '正在推演线'); env.onStart?.(owner);
             const signal = owner.controller.signal;
             travelAbort = travelContext?.signal;
             abortFromTravel = () => owner.controller.abort('time-travel-cancel');
@@ -93,6 +94,7 @@ export function createLinesGenerationController(env = {}) {
                 diagnosticModule: 'lines',
                 diagnosticSink: diagnostic.sink,
                 diagnosticContext: { owner: owner.token, channel: owner.channel, chatRevision, floor: swipeCtx?.mesId },
+                ...(memoryContext?.memorySnapshot ? { memorySnapshot: memoryContext.memorySnapshot, memoryOperationToken: memoryContext.memoryOperationToken } : {}),
             }, participantIdentity, contextSnapshot);
             if (env.isEditing?.()) return { status: 'cancelled', reason: 'editing' };
             if (signal.aborted || travelAbort?.aborted || !owners.isCurrent(owner, { chatId, chatRevision }) || env.chatId() !== chatId || !participantCurrent(participantIdentity)) return { status: 'cancelled', reason: 'stale-owner' };
@@ -137,12 +139,13 @@ export function createLinesGenerationController(env = {}) {
         } catch (error) {
             if (error?.name === 'AbortError') return { status: 'cancelled' };
             if (owner && (!owners.isCurrent(owner, { chatId, chatRevision }) || !participantCurrent(participantIdentity))) return { status: 'cancelled', reason: 'stale-owner' };
+            if (error?.diagnosticCode === 'memory-stale') { preserveFailureUi = true; env.memoryFailure?.(error); return { status: 'failed', error }; }
             if (env.chatId() === chatId && participantCurrent(participantIdentity)) env.fail?.(error, { silent });
             return { status: 'failed', error };
         } finally {
             const cleanup = () => {
                 if (abortFromTravel) travelAbort?.removeEventListener('abort', abortFromTravel);
-                if (owner) { env.runtime?.finish(owner.controller); env.cleanup?.(owner, chatId); }
+                if (owner) { env.runtime?.finish(owner.controller); env.cleanup?.(owner, chatId, { preserveFailureUi }); }
             };
             try {
                 if (generationCommitted) await runGenerationUiEffect(cleanup, { diagnostic, reasonCode: 'lines-cleanup-failed' });

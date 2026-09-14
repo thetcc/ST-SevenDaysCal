@@ -115,11 +115,13 @@ export function renderSchedule(raw, userName, perspective = 'user', calendar = n
     }
 
     const ctx = scheduleDayCtx(startDate, calendar);
-    const tabs = days.map((_, i) => {
-        let numLabel = String(i + 1);
+    const tabs = days.map((dayEntry, i) => {
+        const dayNumber = Number(dayEntry?.dayNumber);
+        const offset = Number.isInteger(dayNumber) && dayNumber > 0 ? dayNumber - 1 : i;
+        let numLabel = String(Number.isInteger(dayNumber) && dayNumber > 0 ? dayNumber : i + 1);
         let wdLabel = '';
         if (startDate) {
-            const { month, day, wd } = scheduleDayLabel(i, startDate, ctx);
+            const { month, day, wd } = scheduleDayLabel(offset, startDate, ctx);
             wdLabel  = wd == null ? '星期未记录' : ALM_WEEKDAYS[wd];
             numLabel = formatPointDate(month, day, ctx.cal, true) || '日期未知';
         }
@@ -133,9 +135,11 @@ export function renderSchedule(raw, userName, perspective = 'user', calendar = n
     </button>`);
 
     const panels = days.map((day, di) => {
-        let dateLabel = `第${di + 1}天`;
+        const dayNumber = Number(day?.dayNumber);
+        const offset = Number.isInteger(dayNumber) && dayNumber > 0 ? dayNumber - 1 : di;
+        let dateLabel = `第${Number.isInteger(dayNumber) && dayNumber > 0 ? dayNumber : di + 1}天`;
         if (startDate) {
-            const { month, day: dd, wd } = scheduleDayLabel(di, startDate, ctx);
+            const { month, day: dd, wd } = scheduleDayLabel(offset, startDate, ctx);
             const dateText = formatPointDate(month, dd, ctx.cal);
             dateLabel = dateText ? `${dateText} · ${wd == null ? '星期未记录' : ALM_WEEKDAYS[wd]}` : '日期未知';
         }

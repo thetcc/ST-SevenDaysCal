@@ -409,9 +409,26 @@ export function createInlineFeature(env = {}) {
     //   深度窗外的楼直接不观察、不挂（连快照都不建 DOM，只静静躺在 extra 里）。
     //
     // 深度按最近 N 个 AI 楼确定，但窗口覆盖其间用户楼；仅当前最后一个可见楼读活态出口，其余一律读各自快照。
+    const renderedBoxes = new Map();
+    let renderedChatId = Symbol('unbound-chat');
 
-
-
+    const syncRenderedChat = () => {
+        const chatId = getContext().chatId ?? null;
+        if (chatId === renderedChatId) return;
+        renderedBoxes.clear();
+        renderedChatId = chatId;
+    };
+    const renderedBoxKey = el => `${el.getAttribute('is_user') === 'true' ? 'user' : 'assistant'}:${el.getAttribute('mesid') ?? ''}`;
+    const syncRenderedOpen = rendered => {
+        if (rendered?.node && typeof rendered.node.open === 'boolean') rendered.open = rendered.node.open;
+    };
+    const releaseRenderedBox = rendered => {
+        if (!rendered) return;
+        syncRenderedOpen(rendered);
+        delete rendered.node;
+        delete rendered.html;
+        delete rendered.isLatest;
+    };
 
     const clearTimer = key => { if (key) clearTimeout(key); };
     const clearLegacy = () => {
@@ -420,6 +437,8 @@ export function createInlineFeature(env = {}) {
         env.removeLegacy?.();
     };
     const clear = () => {
+        syncRenderedChat();
+        renderedBoxes.forEach(releaseRenderedBox);
         doc?.querySelectorAll?.('#chat ' + BOX_SELECTOR)?.forEach(el => el.remove());
         clearLegacy();
     };
@@ -459,15 +478,20 @@ export function createInlineFeature(env = {}) {
         const rect = el.getBoundingClientRect();
         return rect.bottom > 0 && rect.top < (win?.innerHeight || doc?.documentElement?.clientHeight || 0);
     };
-    const boxSignature = (html, isLatest) => `${isLatest ? 'L' : 'H'}:${html.length}:${html.slice(0, 24)}:${html.slice(-24)}`;
-    const unmount = el => el?.querySelectorAll?.(BOX_SELECTOR)?.forEach(box => box.remove());
+    const unmount = el => {
+        syncRenderedChat();
+        releaseRenderedBox(renderedBoxes.get(renderedBoxKey(el)));
+        el?.querySelectorAll?.(BOX_SELECTOR)?.forEach(box => box.remove());
+    };
     const directBoxes = msg => [...(msg?.querySelectorAll?.(':scope > ' + BOX_SELECTOR) || [])];
     const mount = (el, isLatest) => {
         if (!pluginEnabled() || !el) return;
+        syncRenderedChat();
         const msg = el.querySelector?.('.mes_text');
         if (!msg) return;
         const isUser = el.getAttribute('is_user') === 'true';
         const mid = el.getAttribute('mesid');
+        const renderKey = renderedBoxKey(el);
         let snap = null;
         if (isLatest) env.freezeSnapshot?.(mid);
         else {
@@ -481,11 +505,12 @@ export function createInlineFeature(env = {}) {
             ? (recall && !recall.calendar ? '<div class="sp-inline-box sp-dash sp-inline-box-ro"><div class="sp-dash-summary sp-dash-summary-flat">历法未知 / 日期未知</div></div>' : env.buildUserRecall?.(snap, isLatest, recall?.calendar))
             : composeInlineBox(snap, isLatest, floorClock, floor);
         const boxes = directBoxes(msg);
-        if (!html) { boxes.forEach(box => box.remove()); return; }
-        const sig = boxSignature(html, isLatest);
-        // 宿主重绘可能留下多个同级框：统一收敛为一个。相同签名保留首个，保住展开态。
+        const rendered = renderedBoxes.get(renderKey);
+        syncRenderedOpen(rendered);
+        if (!html) { releaseRenderedBox(rendered); boxes.forEach(box => box.remove()); return; }
+        // 宿主重绘可能留下多个同级框：统一收敛为一个。正文逐字相同才保留首个，保住展开态。
         const existing = boxes[0];
-        if (existing?.dataset?.sig === sig) {
+        if (rendered && rendered.node === existing && rendered.html === html && rendered.isLatest === isLatest) {
             boxes.slice(1).forEach(box => box.remove());
             return;
         }
@@ -494,7 +519,13 @@ export function createInlineFeature(env = {}) {
         holder.innerHTML = html;
         const box = holder.firstElementChild;
         if (!box) return;
-        box.dataset.sig = sig;
+        if (typeof box.open === 'boolean') box.open = rendered?.open === true;
+        const nextRendered = { node: box, html, isLatest, open: box.open === true };
+        renderedBoxes.set(renderKey, nextRendered);
+        box.addEventListener('toggle', () => {
+            const current = renderedBoxes.get(renderKey);
+            if (current?.node === box) current.open = box.open === true;
+        });
         msg.appendChild(box);
         env.syncTheme?.(doc, box);
     };
@@ -572,6 +603,7 @@ export function createInlineFeature(env = {}) {
         if ($) $(doc).off('.spalmstrip').off('.spschstrip').off('.spinlineregioncollapse');
         delegated = false;
         clear();
+        renderedBoxes.clear();
     };
     return { init, refresh, clear, destroy, computeWindow, mount, unmount, computeRenderDepth };
 }

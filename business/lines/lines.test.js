@@ -14,6 +14,7 @@ import { activeLines, buildLinesInjection } from './strategy.js';
 import { adultInjectionGuidance, adultModeForCharacter, drawAdultSelections, allocateAdultPools } from './adult.js';
 import { drawTickets } from './vectors/draw.js';
 import { serializeVectorCue } from './vectors/codec.js';
+import { commitLineWidget } from './widget.js';
 
 test('line combined edit updates Desc and Next in one raw mutation', () => {
     const raw = '<storylines_widget>\nLine: A|推进|执行|1|今天|world|false|false\nDesc: 旧描述\nNext: 旧下一步\n</storylines_widget>';
@@ -134,6 +135,42 @@ test('space line card reuses tolerant business-field validation', () => {
     const canonicalNumericWhen = parseLineCard('Line: canonical|推进|筹备|1|world|停滞|false\nDesc: 新描述\nNext: 新下一步');
     assert.deepEqual([canonicalNumericWhen.when, canonicalNumericWhen.agency, canonicalNumericWhen.stall, canonicalNumericWhen.pin], ['1', 'world', true, false]);
     assert.equal(parseLineCard('Line: 缺下一步|推进|萌芽|近日|world|false|false\nDesc: 当前状态'), null);
+});
+
+test('space line edit follows its captured original after preceding deletions and preserves pin', () => {
+    const original = [
+        { name: '前项', stage: '起线', when: '今天', agency: 'world', desc: '前项描述', next: '前项下一步' },
+        { name: '目标', stage: '延展', when: '明天', agency: 'player', desc: '目标旧描述', next: '目标旧下一步', pin: true },
+        { name: '后项', stage: '成形', when: '后天', agency: 'world', desc: '后项描述', next: '后项下一步' },
+    ];
+    const locator = { name: '目标', stage: '延展', when: '明天', agency: 'player', stall: false, desc: '目标旧描述', next: '目标旧下一步', occurrence: 0 };
+    const current = serializeLines([{ ...original[1] }, { ...original[2], desc: '后项同期修改' }]);
+    const body = 'Line: 目标|成形|下周|player|false|false\nDesc: 目标新描述\nNext: 目标新下一步';
+    const result = commitLineWidget(current, body, { editIndex: 1, locator });
+    assert.equal(result.ok, true);
+    assert.deepEqual(parseLines(result.raw).map(line => [line.name, line.desc, line.pin]), [['目标', '目标新描述', true], ['后项', '后项同期修改', false]]);
+    const missing = commitLineWidget(serializeLines([original[0], original[2]]), body, { editIndex: 1, locator });
+    assert.equal(missing.reason, 'line-target-not-found');
+    const legacySafe = commitLineWidget(serializeLines([original[0], original[1]]), body, { editIndex: 1 });
+    assert.equal(legacySafe.ok, true);
+});
+test('space line locator uses Cue identity, allows ordinary content changes, and keeps identity-less duplicates ambiguous', () => {
+    const cues = drawTickets(2, { seed: 'line-card-locators' }).map(serializeVectorCue);
+    const original = [
+        { name: '同名', stage: '起线', when: '今天', agency: 'world', desc: '相同', next: '相同', cue: cues[0] },
+        { name: '同名', stage: '起线', when: '今天', agency: 'world', desc: '相同', next: '相同', cue: cues[1] },
+    ];
+    const edit = 'Line: 同名|成形|下周|player|false|false\nDesc: 已修改\nNext: 新下一步';
+    const aLocator = { ...original[0], occurrence: 0 };
+    const bLocator = { ...original[1], occurrence: 1 };
+    const afterDeleteA = serializeLines([original[1]]);
+    assert.equal(commitLineWidget(afterDeleteA, edit, { editIndex: 1, locator: aLocator }).reason, 'line-target-not-found');
+    assert.equal(parseLines(commitLineWidget(afterDeleteA, edit, { editIndex: 2, locator: bLocator }).raw)[0].cue, cues[1]);
+
+    const changed = serializeLines([{ ...original[0], stage: '延展', when: '后天', desc: '同期改动' }]);
+    assert.equal(commitLineWidget(changed, edit, { editIndex: 1, locator: aLocator }).ok, true);
+    const noIdentity = original.map(item => ({ ...item, cue: null }));
+    assert.equal(commitLineWidget(serializeLines(noIdentity), edit, { editIndex: 1, locator: { ...noIdentity[0], occurrence: 0 } }).reason, 'line-target-ambiguous');
 });
 test('legacy seven/eight-field storage stays readable and rewrites as six fields', () => {
     const legacy = '<storylines_widget>\nLine: 旧线|冲突|逼近|4|今晚|player|true|true\nDesc: 旧状态\nNext: 旧下一步\n</storylines_widget>';
@@ -465,6 +502,45 @@ test('line preflight is invalidated by chat change before a delayed precheck can
     assert.equal((await task).reason, 'stale-preflight');
     assert.equal(generations, 0);
     assert.equal(feature.actions.isPreparing(), false);
+});
+
+test('line preflight owns visible loading, cancel, inline failure, and one-operation memory snapshot', async () => {
+    const owners = createTaskOwnerManager();
+    let release; let request; let generations = 0; const bodies = [];
+    const waiting = createLinesFeature({
+        owners, chatId: () => 'A', dayAnchor: () => null, isPanelActive: () => true,
+        readRaw: () => '', empty: () => 'empty', loading: label => `loading:${label}`, renderPanelDom: ({ body }) => bodies.push(body),
+        generation: { run: async () => { generations++; } },
+        actionsEnv: { precheck: value => { request = value; return new Promise(resolve => { release = resolve; }); } },
+    });
+    const task = waiting.reroll();
+    assert.equal(waiting.runtime.busy, true);
+    assert.match(bodies.at(-1), /正在读取记忆/);
+    waiting.abortGeneration({ reason: 'manual-abort' });
+    assert.equal(request.signal.aborted, true);
+    release(false); await task;
+    assert.equal(generations, 0); assert.equal(waiting.runtime.busy, false);
+
+    const snapshot = Object.freeze({ source: 'qianqianjie', text: 'LINES-MEMORY' });
+    let args;
+    const ready = createLinesFeature({
+        chatId: () => 'A', dayAnchor: () => null, isPanelActive: () => true,
+        readRaw: () => '', empty: () => 'empty', loading: label => `loading:${label}`, renderPanelDom() {},
+        generation: { run: async (...value) => { args = value; return { status: 'updated' }; } },
+        actionsEnv: { precheck: async () => ({ proceed: true, memorySnapshot: snapshot }) },
+    });
+    assert.equal((await ready.reroll()).status, 'updated');
+    assert.equal(args[4].memorySnapshot, snapshot);
+
+    const failedBodies = [];
+    const failed = createLinesFeature({
+        chatId: () => 'A', dayAnchor: () => null, isPanelActive: () => true,
+        readRaw: () => '', empty: () => 'empty', loading: label => `loading:${label}`, preflightError: message => `memory-error:${message}`, renderPanelDom: ({ body }) => failedBodies.push(body),
+        generation: { run: async () => { throw new Error('不应调用'); } },
+        actionsEnv: { precheck: async () => ({ proceed: false, memoryError: '读取失败' }) },
+    });
+    assert.equal((await failed.reroll()).reason, 'memory-precheck');
+    assert.equal(failedBodies.at(-1), 'memory-error:读取失败');
 });
 
 test('late line API that ignores abort cannot refresh or freeze the new chat', async () => {

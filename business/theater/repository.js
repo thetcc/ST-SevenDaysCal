@@ -51,6 +51,11 @@ export function createTheaterRepository({ storage, metadata, persist, keyForChat
     };
     const fixedUnavailable = fixed => requireFixedSaver && (!metadataSaver || typeof metadataSaver.capture !== 'function' || typeof metadataSaver.dispatch !== 'function' || !fixed.target);
     const notDispatched = () => ({ ok: false, dispatched: false, commitState: 'not-dispatched', reason: 'fixed-saver-unavailable', error: new Error('theater-fixed-saver-unavailable') });
+    const legacyPersistResult = value => {
+        if (value && typeof value === 'object' && ('ok' in value || 'commitState' in value)) return value;
+        if (value === false) return { ok: false, dispatched: true, commitState: 'legacy-unconfirmed', reason: 'theater-persist-failed' };
+        return { ok: true, dispatched: true, commitState: 'legacy-unconfirmed', legacy: true, value };
+    };
     return {
         loadDrafts: chatId => readDrafts(chatId),
         pushDraft: (chatId, piece) => { const list = readDrafts(chatId); return writeDrafts(chatId, [...list, cloneTheaterPiece(piece)]); },
@@ -80,7 +85,7 @@ export function createTheaterRepository({ storage, metadata, persist, keyForChat
                     const captured = metadataSaver.capture(fixed.target, after); if (!captured) { rollback(m, before, owned); return notDispatched(); }
                     saved = await metadataSaver.dispatch(captured, { isCurrent: fixed.isCurrent });
                     if (saved?.commitState === 'unknown') unknownCommits.set(unknownKey, captured);
-                } else saved = { ok: true, dispatched: false, commitState: 'confirmed', legacy: true, value: await fixed.persist?.() };
+                } else saved = legacyPersistResult(await fixed.persist?.());
                 if (!saved?.ok && saved?.commitState !== 'unknown') { rollback(m, before, owned); return { ...saved, error: saved.error || new Error('theater-persist-failed') }; }
                 if (!saved?.ok) return { ...saved, chatId: fixed.chatId };
                 return { ok: true, chatId: fixed.chatId, ...saved };
@@ -110,7 +115,7 @@ export function createTheaterRepository({ storage, metadata, persist, keyForChat
                     const captured = metadataSaver.capture(fixed.target, after); if (!captured) { rollback(m, before, owned); return notDispatched(); }
                     saved = await metadataSaver.dispatch(captured, { isCurrent: fixed.isCurrent });
                     if (saved?.commitState === 'unknown') unknownCommits.set(unknownKey, captured);
-                } else saved = { ok: true, dispatched: false, commitState: 'confirmed', legacy: true, value: await fixed.persist?.() };
+                } else saved = legacyPersistResult(await fixed.persist?.());
                 if (!saved?.ok && saved?.commitState !== 'unknown') { rollback(m, before, owned); return { ...saved, error: saved.error || new Error('theater-persist-failed') }; }
                 if (!saved?.ok) return { ...saved, chatId: fixed.chatId };
                 return { ok: true, chatId: fixed.chatId, ...saved };
@@ -131,7 +136,7 @@ export function createTheaterRepository({ storage, metadata, persist, keyForChat
                 if (requireFixedSaver && !captured) { rollback(m, before, owned); return notDispatched(); }
                 const saved = captured
                     ? await metadataSaver.dispatch(captured, { isCurrent: fixed.isCurrent })
-                    : { ok: true, value: await fixed.persist?.() };
+                    : legacyPersistResult(await fixed.persist?.());
                 if (saved?.commitState === 'unknown' && captured) unknownCommits.set(unknownKey, captured);
                 if (!saved?.ok && saved?.commitState !== 'unknown') { rollback(m, before, owned); return { ...saved, error: saved.error || new Error('theater-persist-failed') }; }
                 if (!saved?.ok) return { ...saved, chatId: fixed.chatId };

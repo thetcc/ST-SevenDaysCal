@@ -6,7 +6,7 @@ import { recordDiagnosticResult } from '../runtime/external-chat-storage.js';
 const CODES = new Set([
     'config-missing', 'http-400', 'auth', 'not-found', 'rate-limit', 'server',
     'timeout', 'upstream-timeout', 'network', 'invalid-json', 'response-error', 'empty-output', 'truncated', 'sse-invalid', 'unknown',
-    'parse', 'invalid-structure', 'invalid-fields', 'save', 'recoverable-fallback',
+    'parse', 'invalid-structure', 'invalid-fields', 'save', 'recoverable-fallback', 'memory-stale',
 ]);
 
 export function classifyGenerationError(error, { status = 0, phase = 'request' } = {}) {
@@ -53,6 +53,7 @@ const MESSAGES = Object.freeze({
     'invalid-fields': '模型已返回，构画已识别格式，但字段未通过本地校验；原有内容未改变，请重试。',
     save: '内容已生成，但未确认保存完成；请检查当前内容后重试。',
     'recoverable-fallback': '美化失败，已保留原稿。',
+    'memory-stale': '千千结记忆快照已失效，请重新生成。',
     unknown: 'AI 生成失败，请稍后重试。',
 });
 

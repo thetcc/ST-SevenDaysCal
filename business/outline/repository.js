@@ -11,7 +11,7 @@ export function createOutlineRepository({ captureIdentity, isCurrent, readStore,
         if (!current(target)) return false;
         if (typeof writeStoreConfirmed !== 'function') return writeKind(target, kind, value);
         const stored = await writeStoreConfirmed(keyFor(target, kind), value, options);
-        return stored === true || stored?.ok === true ? true : stored;
+        return stored === true ? true : stored;
     };
     const removeKind = (target, kind) => {
         if (!current(target)) return false;

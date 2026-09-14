@@ -1,5 +1,5 @@
 import { buildSpaceChatSystemPrompt, buildSpaceHelpText } from './prompts.js';
-import { compactPointBaselines, latestSpaceWidget, stripWidgetsForApi } from './schema.js';
+import { compactLineBaselines, compactPointBaselines, latestSpaceWidget, stripWidgetsForApi } from './schema.js';
 
 export const LEDGER_READ_KEYWORDS = Object.freeze(['刻度', '暗历', '暗账', '状态', '伤', '病', '孕', '约定', '周期', '待办', '身心', '现在怎', '好了没', '没了结']);
 
@@ -45,7 +45,8 @@ const GENERAL_REQUEST_RX = /^\s*(?:请|麻烦|劳驾|帮|给|把|替|为|我要|
 
 const moduleMatches = message => {
     const era = ERA_RX.test(message);
-    const almanac = /(?:重要日期|具体日期|节日|生日|纪念日|年历|历卡片?)/.test(message) || (!era && /日期/.test(message));
+    const explicitObject = CANONICAL_ITEM_RX.test(message);
+    const almanac = /(?:重要日期|具体日期|节日|生日|纪念日|年历|历卡片?)/.test(message) || (!era && !explicitObject && /日期/.test(message));
     return Object.freeze({ schedule_widget: POINT_RX.test(message), line_widget: LINE_RX.test(message), almanac_widget: almanac, era_widget: era });
 };
 
@@ -162,9 +163,15 @@ export function createSpaceContext(env = {}) {
             pointScopes = legacyPointRaw.trim() ? [{ view: 'user', charName: '', raw: legacyPointRaw, ts: null }] : [];
         }
         const pointList = numberedSpacePointGroups(pointScopes, env.numberedPoints, userName);
+        const lineRaw = intent.lineContext ? env.readLineRaw?.(target) || '' : '';
         const lineList = intent.lineContext
-            ? numberedSpaceLineList(env.readLineRaw?.(target) || '', env.parseLines)
+            ? numberedSpaceLineList(lineRaw, env.parseLines)
             : '';
+        const lineBaselines = [...compactLineBaselines(lineRaw, env.parseLines)];
+        if (intent.action === 'revise-recent' && intent.recentWidget?.kind === 'line_widget'
+            && Number.isInteger(intent.recentWidget.editIdx) && intent.recentWidget.lineLocator) {
+            lineBaselines[intent.recentWidget.editIdx - 1] = intent.recentWidget.lineLocator;
+        }
         const ledgerList = ['write', 'revise-recent'].includes(intent.action)
             ? ''
             : (includesAny(message, LEDGER_READ_KEYWORDS) ? env.readLedgerText?.(target) || '' : '');
@@ -193,6 +200,7 @@ export function createSpaceContext(env = {}) {
         });
         const messages = [{ role: 'system', content: system }, ...stripWidgetsForApi(historySnapshot), { role: 'user', content: userMsg }];
         Object.defineProperty(messages, 'pointBaselines', { value: compactPointBaselines(pointScopes), enumerable: false });
+        Object.defineProperty(messages, 'lineBaselines', { value: Object.freeze(lineBaselines), enumerable: false });
         return messages;
     };
     return Object.freeze({ buildMessages });

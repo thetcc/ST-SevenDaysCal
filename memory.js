@@ -46,8 +46,9 @@ let _queue = [];
 let _running = false;
 let _abortController = null;      // reserved for rebuild flow (see abortRebuild)
 let _jobAbortController = null;   // shared signal for per-job fetches; aborted on CHAT_CHANGED
-let _isRebuilding = false;        // block every persist while rebuildAll holds uncommitted memory
 let _lifecycleEpoch = 0;          // invalidates late completions even when upstream ignores AbortSignal
+let _aiFloorSnapshot = [];
+let _activeRebuild = null;
 
 function builtInMemoryEnabled() {
     const settings = _getSettings();
@@ -124,8 +125,6 @@ function freshMeta() {
 function persist() {
     // 立即落盘（同 store.js persist）：切档 clearChat() 会取消防抖并清空 chat_metadata，
     // 防抖那份记忆就丢——补全过程多次写入、全吊在最后一个防抖上，尤其危险。
-    // rebuildAll 的新记忆必须整套完成后才能写入；期间任何路径都不能落盘半成品。
-    if (_isRebuilding) return;
     const external = persistExternalRoots();
     if (external !== null) return external;
     const ctx = getContext();
@@ -230,7 +229,7 @@ export function stripTags(raw, opts = {}) {
 // ─── Chat helpers ────────────────────────────────────────────────────────────
 function getChat() { return getContext().chat || []; }
 
-// Returns all AI floors (including hidden — is_system=true means hidden in ST).
+// Returns visible AI floors.
 // Text is sanitized: thinking/reasoning/widget/HTML tags all stripped,
 // leaving only narrative prose for the summarizer. User can influence which
 // tags to keep/strip via keepTags/extraTags settings.
@@ -241,12 +240,16 @@ function getAiFloors() {
     const out = [];
     for (let i = 0; i < chat.length; i++) {
         const m = chat[i];
-        if (m && !m.is_user) {
+        if (m && !m.is_user && !m.is_system && m.role !== 'system' && !m.is_hidden && !m.extra?.is_hidden) {
             const raw = m.mes || '';
             out.push({ mesid: String(i), text: stripTags(raw, stripOpts), rawLen: raw.length });
         }
     }
     return out;
+}
+
+function captureAiFloorSnapshot() {
+    return getAiFloors().map(floor => ({ mesid: floor.mesid, hash: hashStr(floor.text) }));
 }
 
 // Group AI floors into fixed-size chunks. Returns array of groups, each:
@@ -309,7 +312,8 @@ function isStrippedEmpty(group) {
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────
 function buildL0Prompt(prevSummary, groupFloors) {
-    const skipShort = +_getSettings().memorySkipShort || 50;
+    const configuredSkipShort = Number(_getSettings().memorySkipShort);
+    const skipShort = Number.isFinite(configuredSkipShort) ? configuredSkipShort : 50;
     const body = groupFloors
         .filter(f => (f.text || '').trim().length >= skipShort || groupFloors.length === 1)
         .map((f, i) => `【楼 ${f.mesid}】\n${String(f.text || '').slice(0, 2000)}`)
@@ -413,10 +417,10 @@ async function handleJob(job) {
 }
 
 // ─── L0 generation ───────────────────────────────────────────────────────────
-async function runL0(groupKey, { queueL1 = true } = {}) {
+async function runL0(groupKey, { queueL1 = true, memory = null } = {}) {
     if (!builtInMemoryEnabled()) return false;
     const lifecycleEpoch = _lifecycleEpoch;
-    const m = meta();
+    const m = memory || meta();
     if (!m) return false;
     const groups = getStableGroups();
     const group = groups.find(g => g.key === groupKey);
@@ -429,7 +433,7 @@ async function runL0(groupKey, { queueL1 = true } = {}) {
     // 净化后正文几乎为空：确定性结果，不调模型、不算模型失败。标记后直接返回，
     // 面板据此提示用户去查「保留标签」设置（多半正文被裹在自定义标签里）。
     if (isStrippedEmpty(group)) {
-        recordStrippedEmpty(groupKey);
+        recordStrippedEmpty(groupKey, m);
         if (m.L0[groupKey]) delete m.L0[groupKey];
         return true;   // 确定性「无可总结正文」是有效重建结果，不触发整次回滚
     }
@@ -449,7 +453,7 @@ async function runL0(groupKey, { queueL1 = true } = {}) {
         response = await _callApi(messages, jobSignal());
     } catch (err) {
         if (err?.name === 'AbortError') return false;    // chat switched; drop silently
-        recordFailure(groupKey, err, 'request');
+        recordFailure(groupKey, err, 'request', m);
         return false;
     }
 
@@ -457,7 +461,7 @@ async function runL0(groupKey, { queueL1 = true } = {}) {
     if (_lifecycleEpoch !== lifecycleEpoch || !builtInMemoryEnabled() || getContext().chatId !== chatIdSnap) return false;
 
     if (!response || response.length < 10) {
-        recordFailure(groupKey, new Error('响应为空或过短'));
+        recordFailure(groupKey, new Error('响应为空或过短'), 'request', m);
         return false;
     }
 
@@ -471,12 +475,12 @@ async function runL0(groupKey, { queueL1 = true } = {}) {
     m.system.consecutiveFails = 0;
     if (m.system.paused) m.system.paused = false;
 
-    if (queueL1) maybeQueueL1();
+    if (queueL1) maybeQueueL1(m);
     return true;
 }
 
-function recordFailure(groupKey, err, phase = 'request') {
-    const m = meta();
+function recordFailure(groupKey, err, phase = 'request', memory = null) {
+    const m = memory || meta();
     if (!m) return;
     const rec = m.failed[groupKey] || { count: 0 };
     rec.count += 1;
@@ -495,16 +499,16 @@ function recordFailure(groupKey, err, phase = 'request') {
 
 // 净化后正文几乎为空：直接标成 permaFailed（count=3，不再重试），但打 stripped 标记与
 // 模型失败区分，且**不触发全局暂停/consecutiveFails**——它不是模型的错，别让用户去调模型。
-function recordStrippedEmpty(groupKey) {
-    const m = meta();
+function recordStrippedEmpty(groupKey, memory = null) {
+    const m = memory || meta();
     if (!m) return;
     m.failed[groupKey] = { count: 3, lastErr: '净化后正文几乎为空，请重查标签设置', stripped: true };
     m.system.lastError = '净化后正文几乎为空，请重查标签设置';
 }
 
 // ─── L1 compression ──────────────────────────────────────────────────────────
-function maybeQueueL1() {
-    const m = meta();
+function maybeQueueL1(memory = null) {
+    const m = memory || meta();
     if (!m) return;
     const groups = getStableGroups();
     const l0Keys = groups.map(g => g.key).filter(k => m.L0[k]);
@@ -520,10 +524,10 @@ function maybeQueueL1() {
     }
 }
 
-async function runL1(range) {
+async function runL1(range, memory = null) {
     if (!builtInMemoryEnabled()) return false;
     const lifecycleEpoch = _lifecycleEpoch;
-    const m = meta();
+    const m = memory || meta();
     if (!m) return false;
     const [startMid, endMid] = range;
     const startNum = parseInt(startMid, 10);
@@ -690,22 +694,15 @@ export async function rebuildAll(onProgress) {
     const lifecycleEpoch = _lifecycleEpoch;
     const m = meta();
     if (!m) throw new Error('当前聊天的外置构画数据不可用');
-    // 关键：先把旧记忆整体备份，再在**内存里**换成空壳开始重构，此刻**绝不落盘**。
-    // 只有完整跑完才让新记忆算数（committed=true）；中途中止 / 异常 → finally 里整体还原旧记忆。
-    // 这样"点了推翻重构、立刻中止"绝不会把之前的记忆清空。旧对象在重构期间从不被改动
-    //（下面全是把 m.L0/L1/... 重新赋值成新对象），所以 backup 里的引用始终指向完好的旧数据。
-    const backup = { L0: m.L0, L1: m.L1, failed: m.failed, system: m.system };
-    let committed = false;
-    _isRebuilding = true;
-    m.L0 = {}; m.L1 = []; m.failed = {};
-    m.system = { paused: false, consecutiveFails: 0, lastError: null };
-
+    // 重建全程只写私有副本；正式 root 继续供其它模块读取和保存。完整成功后才一次替换。
+    const working = freshMeta();
     try {
         const groups = getStableGroups();
+        _activeRebuild = { ctrl, sources: new Map(groups.flatMap(group => group.floors.map(floor => [Number(floor.mesid), hashStr(floor.text)]))) };
         for (let i = 0; i < groups.length; i++) {
             if (ctrl.signal.aborted) { onProgress?.({ current: i, total: groups.length, aborted: true }); return; }
-            const succeeded = await runL0(groups[i].key, { queueL1: false });
-            if (ctrl.signal.aborted) {   // 中止发生在这次 fetch 期间 → 立刻收尾，交给 finally 还原
+            const succeeded = await runL0(groups[i].key, { queueL1: false, memory: working });
+            if (ctrl.signal.aborted) {   // 中止发生在这次 fetch 期间 → 立刻收尾，私有副本不提交
                 onProgress?.({ current: i, total: groups.length, aborted: true });
                 return;
             }
@@ -713,27 +710,24 @@ export async function rebuildAll(onProgress) {
             onProgress?.({ current: i + 1, total: groups.length });
         }
         // L1
-        const l0Keys = getStableGroups().map(g => g.key).filter(k => m.L0[k]);
+        const l0Keys = getStableGroups().map(g => g.key).filter(k => working.L0[k]);
         const M = Math.max(2, +_getSettings().memoryL1Group || 10);
         for (let s = 0; s + M <= l0Keys.length; s += M) {
             if (ctrl.signal.aborted) return;
             const chunk = l0Keys.slice(s, s + M);
-            const range = [m.L0[chunk[0]].range[0], m.L0[chunk[chunk.length - 1]].range[1]];
-            const succeeded = await runL1(range);
+            const range = [working.L0[chunk[0]].range[0], working.L0[chunk[chunk.length - 1]].range[1]];
+            const succeeded = await runL1(range, working);
             if (ctrl.signal.aborted) return;
             if (!succeeded) throw new Error(`L1 重建失败：${range.join('-')}`);
         }
-        committed = true;   // 全流程走完，新记忆算数
-        _isRebuilding = false;
+        if (_lifecycleEpoch !== lifecycleEpoch || ctrl.signal.aborted) return;
+        for (const key of Object.keys(m)) delete m[key];
+        Object.assign(m, working);
         persist();
         onProgress?.({ current: groups.length, total: groups.length, done: true });
     } finally {
-        if (!committed) {
-            // 中止或异常：整体还原到重构前，绝不留下"清空但没重建"的空记忆
-            m.L0 = backup.L0; m.L1 = backup.L1; m.failed = backup.failed; m.system = backup.system;
-            _isRebuilding = false;
-            if (_lifecycleEpoch === lifecycleEpoch && builtInMemoryEnabled()) persist();
-        }
+        // 未成功时私有副本自然丢弃，正式 root 从未被改动。
+        if (_activeRebuild?.ctrl === ctrl) _activeRebuild = null;
         if (_abortController === ctrl) _abortController = null;
     }
 }
@@ -765,6 +759,7 @@ function onCharacterMessageRendered() {
         if (m.failed[g.key]?.count >= 3) continue;
         enqueue({ type: 'L0', groupKey: g.key });
     }
+    _aiFloorSnapshot = captureAiFloorSnapshot();
 }
 
 function onMessageMutated(mesId) {
@@ -772,7 +767,11 @@ function onMessageMutated(mesId) {
     // Any mutation invalidates any L0 whose range contains this mesid
     const m = meta();
     if (!m) return;
-    const midNum = parseInt(String(mesId), 10);
+    const midNum = parseInt(String(mesId?.messageId ?? mesId?.mesId ?? mesId?.mesid ?? mesId), 10);
+    if (_activeRebuild?.sources.has(midNum)) {
+        const current = getAiFloors().find(floor => Number(floor.mesid) === midNum);
+        if (!current || hashStr(current.text) !== _activeRebuild.sources.get(midNum)) _activeRebuild.ctrl.abort('memory-source-mutated');
+    }
     let dirty = false;
     for (const [k, l0] of Object.entries(m.L0)) {
         const s = parseInt(l0.range[0], 10);
@@ -791,10 +790,60 @@ function onMessageMutated(mesId) {
         });
         persist();
     }
+    _aiFloorSnapshot = captureAiFloorSnapshot();
 }
 
 function onChatChanged() {
     abortAll('chat-boundary');
+    _aiFloorSnapshot = captureAiFloorSnapshot();
+}
+
+function onMessageDeleted() {
+    if (!builtInMemoryEnabled()) return;
+    const m = meta();
+    if (!m) return;
+    const before = _aiFloorSnapshot;
+    const after = captureAiFloorSnapshot();
+    _aiFloorSnapshot = after;
+    let offset = 0;
+    while (offset < before.length && offset < after.length
+        && before[offset].mesid === after[offset].mesid && before[offset].hash === after[offset].hash) offset++;
+    if (offset === before.length && offset === after.length) return;
+    const earliestAffected = Math.min(
+        Number(before[offset]?.mesid ?? Number.POSITIVE_INFINITY),
+        Number(after[offset]?.mesid ?? Number.POSITIVE_INFINITY),
+    );
+    if (!Number.isFinite(earliestAffected)) return;
+    if ([...(_activeRebuild?.sources?.keys() || [])].some(mesid => mesid >= earliestAffected)) {
+        _activeRebuild.ctrl.abort('memory-source-deleted');
+    }
+
+    const groupsByHash = new Map();
+    for (const group of getStableGroups()) {
+        const hash = groupHash(group);
+        const list = groupsByHash.get(hash) || [];
+        list.push(group); groupsByHash.set(hash, list);
+    }
+    const used = new Set();
+    const nextL0 = {};
+    for (const [key, l0] of Object.entries(m.L0)) {
+        const end = Number(l0?.range?.[1]);
+        if (Number.isFinite(end) && end < earliestAffected) {
+            nextL0[key] = l0; used.add(key); continue;
+        }
+        const matches = (groupsByHash.get(l0?.hash) || []).filter(group => !used.has(group.key));
+        if (matches.length !== 1) continue;
+        const group = matches[0];
+        nextL0[group.key] = { ...l0, range: [group.floors[0].mesid, group.floors.at(-1).mesid] };
+        used.add(group.key);
+    }
+    m.L0 = nextL0;
+    m.L1 = m.L1.filter(l1 => Number(l1?.range?.[1]) < earliestAffected);
+    m.failed = Object.fromEntries(Object.entries(m.failed || {}).filter(([key]) => {
+        const end = Number(String(key).split('-').at(-1));
+        return Number.isFinite(end) && end < earliestAffected;
+    }));
+    persist();
 }
 
 // ─── Public init ─────────────────────────────────────────────────────────────
@@ -818,18 +867,7 @@ export function initMemory({ getSettings, callApi, onPause }) {
     _listeners.char = onCharacterMessageRendered;
     _listeners.swipe = onMessageMutated;
     _listeners.edit = onMessageMutated;
-    _listeners.del = () => {
-        if (!builtInMemoryEnabled()) return;
-        const m = meta();
-        if (!m) return;
-        const chat = getChat();
-        const validMids = new Set(chat.map((_, i) => String(i)));
-        for (const [k, l0] of Object.entries(m.L0)) {
-            if (!validMids.has(l0.range[0]) || !validMids.has(l0.range[1])) delete m.L0[k];
-        }
-        m.L1 = m.L1.filter(l1 => validMids.has(l1.range[0]) && validMids.has(l1.range[1]));
-        persist();
-    };
+    _listeners.del = onMessageDeleted;
     _listeners.chat = onChatChanged;
 
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, _listeners.char);
@@ -837,6 +875,7 @@ export function initMemory({ getSettings, callApi, onPause }) {
     eventSource.on(event_types.MESSAGE_EDITED, _listeners.edit);
     eventSource.on(event_types.MESSAGE_DELETED, _listeners.del);
     eventSource.on(event_types.CHAT_CHANGED, _listeners.chat);
+    _aiFloorSnapshot = captureAiFloorSnapshot();
 }
 
 export function resumeSystem() {

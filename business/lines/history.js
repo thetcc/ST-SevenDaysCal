@@ -6,22 +6,13 @@ export function selectVisibleChatHistory(messages = [], historyLimit = 3, { excl
     if (!(Number(historyLimit) > 0)) return [];
     const all = Array.isArray(messages) ? messages : [];
     const visible = all.map((message, mesId) => ({ message, mesId })).filter(({ message }) => {
-        if (!message || message.is_user || message.is_system || String(message.role || '').toLowerCase() === 'system') return false;
+        if (!message || message.is_user || message.is_system || message.is_hidden || message?.extra?.is_hidden || String(message.role || '').toLowerCase() === 'system') return false;
         return String(message.mes ?? '').trim().length > 0;
     });
-    let visibleAiCount = 0;
-    let startIdx = 0;
-    for (let i = visible.length - 1; i >= 0; i--) {
-        visibleAiCount++;
-        if (visibleAiCount >= Number(historyLimit)) {
-            startIdx = i;
-            break;
-        }
-    }
-    return visible.slice(startIdx)
-        .filter(({ message, mesId }) => {
+    return visible.filter(({ message, mesId }) => {
             if (!excludedAssistant) return true;
             return !(mesId === Number(excludedAssistant.mesId) && String(message?.mes ?? '') === String(excludedAssistant.text ?? ''));
         })
+        .slice(-Math.floor(Number(historyLimit)))
         .map(({ message }) => mapMessage(message));
 }

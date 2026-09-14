@@ -1,6 +1,7 @@
 import { ledgerOwnerIdentity, sameLedgerOwner } from './owner.js';
 import { ledgerFailureText, logLedgerFailure, markLedgerError } from './diagnostics.js';
 import { createGenerationDiagnosticScope, diagnosticMessage, makeDiagnosticError } from '../../api/diagnostics.js';
+import { addCalendarDays } from '../calendar/date.js';
 export const JUDGE_FLOORS = 3;
 
 export function buildJudgePrompt(env, today, entries = env.listJudgeable?.() || []) {
@@ -93,10 +94,13 @@ export function createLedgerJudgeController(options = {}) {
                 if (entry.静音 === true && change.动作 === '了结') continue;
                 const patch = { 现状锚: { 楼层: floor, 历日期: date } };
                 if (change.现状) patch.现状 = change.现状;
-                if (change.动作 === '滚周期' && entry.周期长度 > 0 && entry.到期锚?.历日期) {
+                if (change.到期) patch.到期锚 = { 历日期: change.到期 };
+                else if (change.动作 === '滚周期' && entry.周期长度 > 0 && entry.到期锚?.历日期) {
                     const base = entry.到期锚.历日期;
-                    patch.到期锚 = { 历日期: env.monthDayFromDoy?.(env.dayOfYear?.(base.month, base.day, cal) + entry.周期长度, cal) };
-                } else if (change.到期 && change.动作 !== '滚周期') patch.到期锚 = { 历日期: change.到期 };
+                    const next = addCalendarDays(base, entry.周期长度, cal)
+                        || env.monthDayFromDoy?.(env.dayOfYear?.(base.month, base.day, cal) + entry.周期长度, cal);
+                    if (next) patch.到期锚 = { 历日期: next };
+                }
                 applied.push({ id: entry.id, patch, close: change.动作 === '了结',事由: entry.事由 });
             }
             if (!current(ctrl, owner, travel)) return { status: 'cancelled', reason: 'source-stale-chat', reconcile, applied: [] };

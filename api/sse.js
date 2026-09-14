@@ -78,23 +78,27 @@ export function isUpstreamTimeoutTemplate(value) {
 }
 
 // 从非流式响应里提取正文：优先 content，空则兜底 reasoning_content，仍空则抛可读错误。
-export function extractCompletion(data, { allowEmptyOutput = false } = {}) {
+const reportFinish = (onFinish, finishReason) => {
+    try { onFinish?.({ finishReason, truncated: isTruncationFinishReason(finishReason) }); } catch {}
+};
+
+export function extractCompletion(data, { allowEmptyOutput = false, onFinish = null } = {}) {
     const choice = data?.choices?.[0];
     const finishReason = responseFinishReason(data);
-    if (isTruncationFinishReason(finishReason)) {
-        throw makeDiagnosticError('truncated', { phase: 'truncated' });
-    }
     const msg = choice?.message;
     const hasToolCall = !!(msg?.tool_calls?.length || msg?.function_call || choice?.tool_calls?.length || choice?.function_call);
     let content = msg?.content ?? choice?.text ?? data?.content ?? '';
     if (typeof content !== 'string') content = String(content ?? '');
     content = content.trim();
-    if (content && !isPlaceholderContent(content)) return content;
+    if (content && !isPlaceholderContent(content)) { reportFinish(onFinish, finishReason); return content; }
     // 正文为空：兜底取推理内容（至少有东西可渲染，而非白屏/报错）
     const reasoning = msg?.reasoning_content ?? msg?.reasoning ?? '';
-    if (typeof reasoning === 'string' && reasoning.trim()) return reasoning.trim();
+    if (typeof reasoning === 'string' && reasoning.trim()) { reportFinish(onFinish, finishReason); return reasoning.trim(); }
+    if (isTruncationFinishReason(finishReason)) {
+        throw makeDiagnosticError('truncated', { phase: 'truncated' });
+    }
     // 仅供明确声明“空正文具有业务语义”的机械链路使用；占位符 none 仍按异常处理。
-    if (allowEmptyOutput && !content && !hasToolCall && isNormalEmptyFinishReason(finishReason)) return '';
+    if (allowEmptyOutput && !content && !hasToolCall && isNormalEmptyFinishReason(finishReason)) { reportFinish(onFinish, finishReason); return ''; }
     throw makeDiagnosticError('empty-output', { phase: 'empty-output' });
 }
 
@@ -122,7 +126,7 @@ export function mapApiError(status, raw) {
 
 // 读取 SSE 流（text/event-stream），拼接 delta.content。
 // ST 的 generate 端点在 stream=true 时透传上游 SSE：每行 `data: {json}`，以 `data: [DONE]` 结束。
-export async function readSseContent(resp, { allowEmptyOutput = false } = {}) {
+export async function readSseContent(resp, { allowEmptyOutput = false, onFinish = null } = {}) {
     const reader = resp.body?.getReader();
     if (!reader) {
         let data;
@@ -133,7 +137,7 @@ export async function readSseContent(resp, { allowEmptyOutput = false } = {}) {
         }
         if (!data) throw makeDiagnosticError('invalid-json', { phase: 'response' });
         if (data?.error) throw makeDiagnosticError('response-error', { phase: 'response' });
-        return extractCompletion(data, { allowEmptyOutput });
+        return extractCompletion(data, { allowEmptyOutput, onFinish });
     }
     const decoder = new TextDecoder();
     let buf = '', out = '', finishReason = '', eventData = [], plainLines = [], sawDone = false, sawToolCall = false, sawSseField = false;
@@ -162,18 +166,26 @@ export async function readSseContent(resp, { allowEmptyOutput = false } = {}) {
         else if (/^(?:event|id|retry):/.test(t)) sawSseField = true;
         else plainLines.push(t);
     };
-    for (;;) {
-        const { done, value } = await reader.read();
-        if (done) {
-            buf += decoder.decode();
-            if (buf) handleLine(buf);
-            handleEvent();
-            break;
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) {
+                buf += decoder.decode();
+                if (buf) handleLine(buf);
+                handleEvent();
+                break;
+            }
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop() ?? '';
+            for (const line of lines) handleLine(line);
+            if (sawDone) break;
         }
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split('\n');
-        buf = lines.pop() ?? '';
-        for (const line of lines) handleLine(line);
+    } finally {
+        if (sawDone) {
+            try { await reader.cancel?.(); } catch { /* best-effort stream cleanup */ }
+        }
+        try { reader.releaseLock?.(); } catch { /* already released */ }
     }
     if (plainLines.length) {
         if (sawSseField || out || sawDone || finishReason) throw makeDiagnosticError('sse-invalid', { phase: 'response' });
@@ -181,14 +193,15 @@ export async function readSseContent(resp, { allowEmptyOutput = false } = {}) {
         try { envelope = JSON.parse(plainLines.join('\n')); }
         catch { throw makeDiagnosticError('sse-invalid', { phase: 'response' }); }
         if (envelope?.error) throw makeDiagnosticError('response-error', { phase: 'response' });
-        return extractCompletion(envelope, { allowEmptyOutput });
+        return extractCompletion(envelope, { allowEmptyOutput, onFinish });
     }
     if (!sawDone && !isNormalEmptyFinishReason(finishReason) && !isTruncationFinishReason(finishReason)) throw makeDiagnosticError('sse-invalid', { phase: 'response' });
-    if (isTruncationFinishReason(finishReason)) throw makeDiagnosticError('truncated', { phase: 'truncated' });
     if (!out.trim()) {
-        if (allowEmptyOutput && !sawToolCall && (isNormalEmptyFinishReason(finishReason) || (!finishReason && sawDone))) return '';
+        if (isTruncationFinishReason(finishReason)) throw makeDiagnosticError('truncated', { phase: 'truncated' });
+        if (allowEmptyOutput && !sawToolCall && (isNormalEmptyFinishReason(finishReason) || (!finishReason && sawDone))) { reportFinish(onFinish, finishReason); return ''; }
         throw makeDiagnosticError('empty-output', { phase: 'empty-output' });
     }
+    reportFinish(onFinish, finishReason);
     return out.trim();
 }
 

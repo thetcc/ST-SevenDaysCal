@@ -23,6 +23,9 @@ export function createSpaceUi(host = {}) {
             editIdx: widget.editIdx,
             owner: widget.owner,
             pointBaselines: Array.isArray(messageContext.pointBaselines) ? messageContext.pointBaselines : null,
+            lineLocator: widget.kind === 'line_widget' && Number.isInteger(widget.editIdx)
+                ? messageContext.lineBaselines?.[widget.editIdx - 1] || null
+                : null,
             legacyPointOwner: messageContext.legacyPointOwner === true,
             readOnly: messageContext.readOnly === true,
             identity: host.captureIdentity?.() || null,
@@ -49,6 +52,7 @@ export function createSpaceUi(host = {}) {
         query('#sp-space-msgs')?.empty?.();
         history.forEach((message, index) => appendMessage(message.role === 'assistant' ? 'ai' : message.role, message.content, index, {
             pointBaselines: message.pointBaselines,
+            lineBaselines: message.lineBaselines,
             legacyPointOwner: message.role === 'assistant' && !Object.prototype.hasOwnProperty.call(message, 'pointBaselines'),
             readOnly: message.portableReadonly === true,
         }));
@@ -166,7 +170,7 @@ export function createSpaceUi(host = {}) {
                 pointBaselines: stored.pointBaselines,
                 legacyPointOwner: stored.legacyPointOwner,
             });
-            else if (stored.kind === 'line_widget') actions.lines?.(stored.body, stored.editIdx, $button);
+            else if (stored.kind === 'line_widget') actions.lines?.(stored.body, stored.editIdx, $button, stored.lineLocator);
             else if (stored.kind === 'almanac_widget') actions.almanac?.(stored.body, $button, $button.attr('data-idx'));
             else if (stored.kind === 'era_widget') actions.era?.(stored.body, $button);
         });

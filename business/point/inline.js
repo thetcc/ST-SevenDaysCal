@@ -13,7 +13,7 @@ export function createPointInlineRenderer(env) {
         let total = 0; const rel = ['今天', '明天', '后天'];
         const cell = (label, date, weather, count, cls, key) => `<div class="sp-sch-scell${cls}" data-day="${env.escapeAttr(String(key))}"><span class="sp-sch-scell-rel">${env.escapeHtml(label)}</span><span class="sp-sch-scell-line">${date ? `<span class="sp-sch-scell-md">${env.escapeHtml(date)}</span>` : ''}${weather ? `<span class="sp-sch-scell-wx">${weather}</span>` : ''}<span class="sp-sch-scell-n">${count}</span></span></div>`;
         const context = env.scheduleDayCtx(startDate, calendar, weekdayRefOverride);
-        const cells = days.map((day, index) => { const count = day.events.length; total += count; let date = `第${index + 1}天`; if (startDate) { const value = env.scheduleDayLabel(index, startDate, context); date = formatPointDate(value.month, value.day, context.cal, true) || '日期未知'; } return cell(rel[index] || `第${index + 1}天`, date, env.weatherGlyph(day.weather), count, (index === 0 ? ' sp-sch-scell-today' : '') + (count ? ' sp-sch-scell-has' : ''), index); });
+        const cells = days.map((day, index) => { const count = day.events.length; total += count; const dayNumber = Number(day?.dayNumber); const offset = Number.isInteger(dayNumber) && dayNumber > 0 ? dayNumber - 1 : index; const ordinal = Number.isInteger(dayNumber) && dayNumber > 0 ? dayNumber : index + 1; let date = `第${ordinal}天`; if (startDate) { const value = env.scheduleDayLabel(offset, startDate, context); date = formatPointDate(value.month, value.day, context.cal, true) || '日期未知'; } return cell(rel[offset] || `第${ordinal}天`, date, env.weatherGlyph(day.weather), count, (offset === 0 ? ' sp-sch-scell-today' : '') + (count ? ' sp-sch-scell-has' : ''), index); });
         if (hasFuture) { const count = future.events.length; cells.push(cell('未来', '', '', count, ' sp-sch-scell-future' + (count ? ' sp-sch-scell-has' : ''), 'future')); }
         return `<summary class="sp-inline-summary"><span class="sp-inline-title">点</span><span class="sp-inline-count">${total}件待办</span></summary><div class="sp-inline-body sp-sch-inline-body"><div class="sp-sch-strip-wrap sp-sch-strip-live"><div class="sp-sch-strip">${cells.join('')}</div><div class="sp-sch-sday" hidden></div></div></div>`;
     }
@@ -24,8 +24,9 @@ export function createPointInlineRenderer(env) {
         if (dayKey === 'future') { events = future?.events || []; headLabel = dateLabel = '未来'; }
         else {
             const index = Number(dayKey); const day = days[index]; events = day?.events || []; weather = String(day?.weather || '').trim(); temp = String(day?.temp || '').trim();
-            if (startDate) { const context = env.scheduleDayCtx(startDate, calendar, weekdayRefOverride); const value = env.scheduleDayLabel(index, startDate, context); const dateText = formatPointDate(value.month, value.day, context.cal); headLabel = dateText ? `${dateText} · ${value.wd == null ? '星期未记录' : env.weekdays[value.wd]}` : '日期未知'; }
-            else headLabel = `第${index + 1}天`;
+            const dayNumber = Number(day?.dayNumber); const offset = Number.isInteger(dayNumber) && dayNumber > 0 ? dayNumber - 1 : index; const ordinal = Number.isInteger(dayNumber) && dayNumber > 0 ? dayNumber : index + 1;
+            if (startDate) { const context = env.scheduleDayCtx(startDate, calendar, weekdayRefOverride); const value = env.scheduleDayLabel(offset, startDate, context); const dateText = formatPointDate(value.month, value.day, context.cal); headLabel = dateText ? `${dateText} · ${value.wd == null ? '星期未记录' : env.weekdays[value.wd]}` : '日期未知'; }
+            else headLabel = `第${ordinal}天`;
             dateLabel = headLabel; if (weather || temp) headLabel += ` · ${env.weatherGlyph(weather)}${weather}${temp ? ' ' + temp : ''}`;
         }
         const head = `<div class="sp-sch-sday-head">${env.escapeHtml(headLabel)}</div>`;

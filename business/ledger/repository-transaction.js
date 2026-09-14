@@ -48,7 +48,6 @@ export async function reconcileStateAtomic(state, sources, chatLength, save, nor
     const planSummary = numericPlanSummary({ ...result.summary, kept: result.entries.length });
     const fail = (message, phase) => Object.assign(new Error(message), { phase, planSummary });
     if (!result.summary.changed) return result;
-    if (before.length > 0 && result.entries.length === 0) throw fail('source-plan-empty-fuse', 'source-state-invalid');
     const dispositions = result.summary.dispositions || {};
     if (new Set(Object.keys(dispositions)).size !== before.length || before.some(entry => !['keep', 'remap', 'pending', 'delete'].includes(dispositions[entry?.id]))) throw fail('source-plan-disposition-invalid', 'source-state-invalid');
     if (!guard()) { state.entries = before; throw Object.assign(new Error('source-stale-chat'), { phase: 'source-stale-chat' }); }

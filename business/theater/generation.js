@@ -18,7 +18,7 @@ export function createTheaterGeneration({ write, beautify, buildWriteMessages, b
         const beautifyDiagnostic = createGenerationDiagnosticScope('theater-beautify');
         let beautifyAccepted = false;
         try {
-            htmlRaw = await beautify(buildBeautifyMessages(raw, { userName, charName }, settings), { maxTokens: 30000, signal, userName, charName, promptMode: 'mechanical', diagnosticModule: 'theater-beautify', diagnosticSink: beautifyDiagnostic.sink });
+            htmlRaw = await beautify(buildBeautifyMessages(raw, settings), { maxTokens: 30000, signal, userName, charName, promptMode: 'mechanical', diagnosticModule: 'theater-beautify', diagnosticSink: beautifyDiagnostic.sink });
             if (!String(htmlRaw || '').trim()) throw makeDiagnosticError('empty-output', { phase: 'empty-output' });
             beautifyDiagnostic.accepted({ phase: 'validation', reasonCode: 'beautify-valid' });
             beautifyAccepted = true;

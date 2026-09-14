@@ -20,7 +20,7 @@ export function createPointWidgetActions(env) {
         const eventBlock = env.firstPointEventBlock(body);
         const event = eventBlock ? env.parsePointEventRecord(eventBlock) : null;
         if (!isCompletePointEvent(event)) {
-            env.showToast('卡片格式不完整（Event 需要标题、描述、时间和地点），无法应用', null, true);
+            env.showToast('卡片格式不完整（Event 需要标题、描述和时间），无法应用', null, true);
             return false;
         }
 

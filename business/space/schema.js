@@ -13,7 +13,25 @@ export function appendSpaceUser(history, content, cap = SPACE_HISTORY_CAP) {
 export function appendSpaceAssistant(history, content, context = null) {
     const message = { role: 'assistant', content };
     if (Array.isArray(context?.pointBaselines)) message.pointBaselines = context.pointBaselines;
+    if (Array.isArray(context?.lineBaselines)) message.lineBaselines = context.lineBaselines;
     return [...history, message];
+}
+
+const lineLocatorFields = line => ({
+    name: String(line?.name || ''), stage: String(line?.stage || ''), when: String(line?.when || ''),
+    agency: String(line?.agency || ''), stall: line?.stall === true,
+    desc: String(line?.desc || ''), next: String(line?.next || ''), cue: String(line?.cue || ''),
+});
+
+export function compactLineBaselines(raw, parseLines) {
+    const counts = new Map();
+    return Object.freeze((parseLines?.(raw) || []).map(line => {
+        const fields = lineLocatorFields(line);
+        const signature = JSON.stringify(fields);
+        const occurrence = counts.get(signature) || 0;
+        counts.set(signature, occurrence + 1);
+        return Object.freeze({ ...fields, occurrence });
+    }));
 }
 
 const SPACE_WIDGET_RX = /<(schedule_widget|line_widget|almanac_widget|era_widget)([^>]*)>([\s\S]*?)<\/\1\s*>/gi;
@@ -96,6 +114,10 @@ export function latestSpaceWidget(history) {
             editIdx: widget.editIdx,
             historyIndex: index,
         };
+        if (widget.kind === 'line_widget') {
+            const locator = Number.isInteger(widget.editIdx) ? message.lineBaselines?.[widget.editIdx - 1] : null;
+            if (locator) snapshot.lineLocator = locator;
+        }
         if (widget.kind === 'schedule_widget') {
             snapshot.owner = widget.owner;
             snapshot.pointBaselines = Array.isArray(message.pointBaselines) ? message.pointBaselines : null;

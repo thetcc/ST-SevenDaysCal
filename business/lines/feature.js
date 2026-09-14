@@ -61,7 +61,7 @@ export function createLinesFeature(env = {}) {
             return result;
         },
         onStart: () => { if (env.isPanelActive?.()) refreshPanel?.(); },
-        cleanup: (owner, chatId) => cleanupOwner(owner, chatId),
+        cleanup: (owner, chatId, options) => cleanupOwner(owner, chatId, options),
     }));
     const actions = env.actions || (env.actionsEnv && createLinesActions({
         ...env.actionsEnv,
@@ -75,10 +75,18 @@ export function createLinesFeature(env = {}) {
             const participantIdentity = env.participantIdentity?.() || null;
             const owner = owners.create('lines-preflight', { chatId: env.chatId?.(), chatRevision: owners.currentChatRevision(), participantIdentity });
             owner.contextSnapshot = env.contextSnapshot?.() || null;
+            runtime.start(owner.controller, '正在读取记忆…');
+            if (env.isPanelActive?.()) refreshPanel?.();
             return owner;
         },
         preflightCurrent: owner => owners.isCurrent(owner, { chatId: env.chatId?.(), chatRevision: owners.currentChatRevision() }) && (!owner.participantIdentity || env.sameParticipantIdentity?.(owner.participantIdentity, env.participantIdentity?.()) !== false),
-        finishPreflight: owner => owners.finish(owner),
+        finishPreflight: (owner, failure = null) => {
+            owners.finish(owner);
+            if (runtime.finish(owner.controller) && env.isPanelActive?.()) {
+                if (failure) renderBody(env.preflightError?.(failure) || env.empty?.());
+                else refreshPanel?.();
+            }
+        },
         invalidatePreflight: (reason = 'manual-abort') => owners.invalidate('lines-preflight', reason),
         runGenerate: (...args) => generation?.run?.(...args),
     }));
@@ -96,12 +104,14 @@ export function createLinesFeature(env = {}) {
         return `<div class="sp-line-cues"><span class="sp-line-cue-list">${chips.map(chip => `<span class="sp-line-cue-chip sp-line-cue-tone-${chip.colorSlot}">${env.escapeHtml?.(chip.label) ?? String(chip.label)}</span>`).join('')}</span></div>`;
     };
     const widget = env.widget || (env.widgetEnv && {
-        apply(body, editIdx = null, button = null) {
+        apply(body, editIdx = null, button = null, locator = null) {
             const key = env.widgetEnv.key?.();
             if (!key) return env.widgetEnv.fail?.('当前 chat 没有可写入的线缓存');
             const saved = env.widgetEnv.read?.(key);
-            const result = commitLineWidget(saved?.raw || '', body, { editIndex: editIdx == null ? null : Number(editIdx) - 1, pin: true });
-            if (!result.ok) return env.widgetEnv.fail?.(editIdx != null ? `找不到第 ${editIdx} 条线，请刷新面板后重试` : '卡片格式不完整，无法应用');
+            const result = commitLineWidget(saved?.raw || '', body, { editIndex: editIdx == null ? null : Number(editIdx) - 1, pin: true, locator });
+            if (!result.ok) return env.widgetEnv.fail?.(editIdx != null
+                ? result.reason === 'line-target-ambiguous' ? '存在多条无法区分的同名线，请先在「线」中整理后重新生成卡片' : '原线已不存在，请重新生成这张卡片'
+                : '卡片格式不完整，无法应用');
             env.widgetEnv.write?.(key, { raw: result.raw, ts: Date.now() });
             runtime.cache(result.raw);
             refreshPanel?.(true);
@@ -200,11 +210,11 @@ export function createLinesFeature(env = {}) {
         });
         return ui.ok ? true : { ok: true, uiError: ui.error };
     };
-    const cleanupOwner = (owner, chatId) => {
+    const cleanupOwner = (owner, chatId, { preserveFailureUi = false } = {}) => {
         if (!owners.isCurrent(owner, { chatId })) return false;
         runtime.finish(owner.controller);
         owners.finish(owner);
-        if (env.isPanelActive?.()) refreshPanel();
+        if (env.isPanelActive?.() && !preserveFailureUi) refreshPanel();
         return true;
     };
     const canonicalMatches = baseline => {
@@ -237,6 +247,7 @@ export function createLinesFeature(env = {}) {
         return true;
     };
     const abortGeneration = ({ restore = true, reason = 'manual-abort' } = {}) => {
+        actions?.invalidatePreflight?.(reason);
         const owner = owners.invalidate('lines-generation', reason);
         runtime.abort(reason);
         if (restore && !env.isEditing?.() && owner?.baseline && owner.baseline.chatId === env.chatId?.() && canonicalMatches(owner.baseline)) env.restoreBaseline?.(owner.baseline);
@@ -344,7 +355,7 @@ export function createLinesFeature(env = {}) {
     };
     const refreshPanel = (force = false) => {
         const raw = env.readRaw?.() || '';
-        const body = runtime.busy && !force ? env.loading?.() : raw ? renderLines(raw) : env.empty?.();
+        const body = runtime.busy && !force ? env.loading?.(runtime.label) : raw ? renderLines(raw) : env.empty?.();
         if (raw && !runtime.busy) runtime.cache(raw);
         renderBody(body);
         return body;

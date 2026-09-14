@@ -564,7 +564,7 @@ function updateDiagnostics(mutator) {
         const state = active; const data = cleanDiagnosticsData(state.diagnostics?.data);
         enqueue(boundState => persistDiagnosticsNow(boundState, data)).catch(error => {
             if (active !== state) return;
-            state.error = error.message; state.status = 'unavailable'; notify();
+            console.warn('[SP storage] 外置诊断日志保存失败', error);
         });
     }
     else persistDiagnosticsNow().catch(() => {});

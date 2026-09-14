@@ -50,16 +50,24 @@ export function createOutlineGeneration({
         if (busy || isEditing()) return { status: 'skipped' };
         const target = repository.capture();
         if (!target?.chatId) return { status: 'skipped' };
-        if (precheck && !await precheck()) return { status: 'cancelled' };
-        if (!repository.isCurrent(target) || busy) return { status: 'cancelled' };
-        judge?.abort('superseded-owner');
         const baseline = repository.baseline(target);
         const controller = new AbortController();
-        const task = Object.freeze({ target, baseline, controller });
+        const operationToken = Symbol('outline-generation');
+        const task = Object.freeze({ target, baseline, controller, operationToken });
         owner = task;
         busy = true;
-        ui?.setLoading();
+        ui?.setLoading('正在读取记忆…');
         try {
+            let precheckResult;
+            try { precheckResult = precheck ? await precheck({ signal: controller.signal, operationToken, contextSnapshot: context?.() }) : true; }
+            catch {
+                if (!currentAndOwned(task)) return { status: 'cancelled' };
+                finish(task); ui?.showPreflightError?.('记忆读取失败，请重试'); return { status: 'failed', reason: 'memory-precheck' };
+            }
+            if (!precheckResult || !currentAndOwned(task)) { if (finish(task)) renderCurrent(target); return { status: 'cancelled' }; }
+            if (precheckResult.proceed === false) { finish(task); ui?.showPreflightError?.(precheckResult.memoryError); return { status: 'failed', reason: 'memory-precheck' }; }
+            judge?.abort('superseded-owner');
+            ui?.setLoading();
             const ctx = context?.();
             const userName = ctx?.name1 || '用户';
             const charName = ctx?.name2 || '角色';
@@ -76,7 +84,7 @@ export function createOutlineGeneration({
                 charName,
                 signal: controller.signal,
                 historyLimit: 3,
-                options: { ...(apiOptions || {}), promptMode: 'creative', diagnosticModule: 'outline-generation', diagnosticSink: diagnostic.sink },
+                options: { ...(apiOptions || {}), ...(precheckResult?.memorySnapshot ? { memorySnapshot: precheckResult.memorySnapshot, memoryOperationToken: operationToken } : {}), promptMode: 'creative', diagnosticModule: 'outline-generation', diagnosticSink: diagnostic.sink },
             });
             if (isEditing() || !currentAndOwned(task) || !repository.matches(target, baseline)) return { status: 'cancelled' };
             if (!String(raw || '').trim()) throw diagnostic.rejected(makeDiagnosticError('empty-output', { phase: 'empty-output' }), { phase: 'parse', reasonCode: 'outline-empty' });

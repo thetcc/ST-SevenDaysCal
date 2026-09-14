@@ -32,12 +32,13 @@ export function createOutlineUi(host = {}) {
         return String(id);
     };
     const setOutline = html => host.setOutline?.(html);
-    const setLoading = () => setOutline(host.loading?.('正在构思面', 'sp-abort-outline') || '');
+    const setLoading = (label = '正在构思面') => setOutline(host.loading?.(label, 'sp-abort-outline') || '');
     const toast = (message, error = false) => host.toast?.(message, error);
     const showGenerationError = error => {
         const retry = classifyGenerationError(error) === 'config-missing' ? '' : '<button class="sp-gen-btn sp-outline-gen-btn" id="sp-gen-outline-now">重新生成面</button>';
         setOutline(`<div class="sp-error"><i class="fa-solid fa-circle-exclamation"></i><p>生成失败：${escape(diagnosticMessage(error))}</p>${retry}</div>`);
     };
+    const showPreflightError = message => setOutline(`<div class="sp-error"><i class="fa-solid fa-circle-exclamation"></i><p>${escape(message || '记忆读取失败，请重试')}</p><button class="sp-gen-btn sp-outline-gen-btn" id="sp-gen-outline-now">重新生成面</button></div>`);
     const draftField = (label, value) => value
         ? `<div class="sp-outline-draft-field"><span>${label}</span>${escape(value)}</div>`
         : '';
@@ -228,6 +229,7 @@ export function createOutlineUi(host = {}) {
         setOutline,
         setLoading,
         showGenerationError,
+        showPreflightError,
         toast,
         closedSuccess: () => host.closedSuccess?.(),
         isOutlineMode: () => !!host.isOutlineMode?.(),

@@ -186,7 +186,9 @@ export function saveLedgerEditor() {
     patch.周期长度 = (Number.isFinite(cyc) && cyc > 0) ? cyc : null;
     // 到期锚：两框都有效则成锚，否则清空（约定/周期可留空＝未定档）。
     const dueMd = ledgerReadMd('#sp-led-f-due-m', '#sp-led-f-due-d', cal);
-    patch.到期锚 = dueMd ? { 历日期: dueMd } : null;
+    const previousDue = e.到期锚?.历日期;
+    const sameDue = dueMd && previousDue && dueMd.month === previousDue.month && dueMd.day === previousDue.day;
+    patch.到期锚 = dueMd ? { 历日期: sameDue ? { ...previousDue, ...dueMd } : dueMd } : null;
     // 起始锚：仅 advanced 展开时才读、才改；未展开保持原值不动（防手滑改基准）。
     if (_ledgerEditor.advanced) {
         const startMd = ledgerReadMd('#sp-led-f-start-m', '#sp-led-f-start-d', cal);

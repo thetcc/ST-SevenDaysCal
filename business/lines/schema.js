@@ -36,9 +36,9 @@ const isLegacyLevel = value => /^(?:[1-4]|[一二三四](?:级)?)$/.test(String(
 export function parseLineRow(value) {
     const text = cleanLabel(value);
     const fields = splitFields(/^Line\s*[:：]/i.test(text) ? fieldValue(text, 'Line') : text);
-    if (fields.length === 6) {
+    if (fields.length >= 6 && isAgencyField(fields[3]) && isBoolField(fields[4]) && isBoolField(fields[5])) {
         const [name, stage, when, agency, stall, pin] = fields;
-        return { fieldCount: fields.length, name, stage, when, agency, stall, pin, format: 'canonical-v3' };
+        return { fieldCount: fields.length, name, stage, when, agency, stall, pin, format: fields.length === 6 ? 'canonical-v3' : 'canonical-v3-extra' };
     }
     if (fields.length === 7) {
         const oldCanonicalShape = isAgencyField(fields[4]) && isBoolField(fields[5]) && isBoolField(fields[6]);

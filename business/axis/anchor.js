@@ -18,7 +18,7 @@ import { parseCalendar } from '../point/parse.js';
 import * as memory from '../../memory.js';
 import {
     DEFAULT_CAL, loadCalDesc, calYearLen, almDayOfYear, almClampInt, almItemCoversDoy,
-    almValidMonthDay, almDateFromChat,
+    almValidMonthDay, almDateFromChat, monthDayFromDayKey,
 } from './data.js';
 import { storyWeekdayRef, latestStoryClock } from './story-clock.js';
 import { automaticWeekdayCanReplaceCalibration } from './weekday-coordinator.js';
@@ -29,7 +29,6 @@ let env = null;
 export function bindAxisAnchor(e) { env = e; }
 
 // 从时间字符串里的 dayKey 派生月/日（依赖 extractDayFromTime + data.monthDayFromDayKey）。
-// 注：monthDayFromDayKey/extractDayFromTime 已在上面 import，此处直接用。
 
 // 今天 = 历上的 {month, day}。多源优先级见下方逐条注释。
 // 内部证据解析保留 null，避免最终 UI 默认值 1/1 被星期浅兜底误当成真实故事日期。

@@ -74,10 +74,20 @@ export function createPointController(env) {
         const view = env.view(); const char = view === 'char' ? String(env.char() || '').trim() : '';
         if (!validPointTarget(view, char)) { env.toast('请先选择明确的角色，再生成 TA 的点', null, true); return { status: 'skipped', reason: 'invalid-char-target' }; }
         const owner = attachParticipant(env.owners.create('point-manual', { chatId: env.chatId(), chatRevision: env.owners.currentChatRevision(), view, charName: char }));
-        if (!await env.precheck()) { cleanupManualOwner(owner); return; }
-        if (!participantCurrent(owner) || !env.evaluate({ manager: env.owners, owner, chatId: env.chatId(), chatRevision: env.owners.currentChatRevision(), pluginEnabled: env.enabled() }).canCommit) { cleanupManualOwner(owner); return; }
         owner.previousCachedSchedule = env.state.cachedSchedule; owner.previousView = view; owner.previousChar = char; activeManualOwner = owner; env.state.cachedSchedule = null; env.state.isGenerating = true; env.setButton('generating');
-        if (!env.panelVisible()) env.showPanel(); env.setBody(env.loading('正在规划', 'sp-abort-generate'));
+        env.state.scheduleAbortController = owner.controller;
+        if (!env.panelVisible()) env.showPanel(); env.setBody(env.loading('正在读取记忆…', 'sp-abort-generate'));
+        let precheck;
+        try { precheck = await env.precheck?.({ signal: owner.controller.signal, operationToken: owner.token, participantIdentity: owner.participantIdentity, contextSnapshot: owner.contextSnapshot }); }
+        catch {
+            if (!owner.controller.signal.aborted && participantCurrent(owner)) { cleanupManualOwner(owner); env.showPrecheckError?.('记忆读取失败，请重试'); return { status: 'failed', reason: 'memory-precheck' }; }
+            restoreManualOwner(owner); cleanupManualOwner(owner); return;
+        }
+        if (!precheck || !participantCurrent(owner) || !env.evaluate({ manager: env.owners, owner, chatId: env.chatId(), chatRevision: env.owners.currentChatRevision(), pluginEnabled: env.enabled() }).canCommit) { restoreManualOwner(owner); cleanupManualOwner(owner); return; }
+        if (precheck.proceed === false) { cleanupManualOwner(owner); env.showPrecheckError?.(precheck.memoryError); return { status: 'failed', reason: 'memory-precheck' }; }
+        owner.memorySnapshot = precheck?.memorySnapshot || null;
+        owner.memoryOperationToken = owner.token;
+        env.setBody(env.loading('正在规划', 'sp-abort-generate'));
         void runGenerate(null, owner);
     }
     async function runGenerate(travelContext = null, owner = null) {
@@ -98,7 +108,7 @@ export function createPointController(env) {
             const ctx = owner.contextSnapshot || env.context(); const user = owner.participantIdentity?.userName || ctx.name1 || '用户'; const character = view === 'char' ? (char || owner.participantIdentity?.charName || ctx.name2 || '角色') : (owner.participantIdentity?.charName || ctx.name2 || '角色'); const subject = view === 'char' ? character : user;
             const key = owner.canonical.key; const previous = owner.canonical.raw; const pinned = [];
             if (previous) { const parsed = env.parse(previous, env.calendar()); for (const day of parsed.days) for (const event of day.events) if (event.pin) pinned.push(event); if (parsed.future) for (const event of parsed.future.events) if (event.pin) pinned.push(event); }
-            const raw = await env.generate(ctx, user, character, view, signal, pinned, travelContext, owner.adultMode, diagnostic.sink);
+            const raw = await env.generate(ctx, user, character, view, signal, pinned, travelContext, owner.adultMode, diagnostic.sink, owner.memorySnapshot ? { memorySnapshot: owner.memorySnapshot, memoryOperationToken: owner.memoryOperationToken } : null);
             if (env.editing?.() || !participantCurrent(owner) || !env.canCommit(owner, travelContext) || !canonicalMatches(owner.canonical)) return { status: 'cancelled' };
             const rawCheck = env.validate(raw, env.calendar(), { generated: true, adultMode: owner.adultMode, pinned }); if (!rawCheck.ok) throw diagnostic.rejected(makePointValidationError(rawCheck), { phase: 'validation', reasonCode: rawCheck.code || rawCheck.reason });
             if (env.editing?.() || !participantCurrent(owner) || !env.canCommit(owner, travelContext) || !canonicalMatches(owner.canonical)) return { status: 'cancelled' };

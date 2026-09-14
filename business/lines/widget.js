@@ -22,8 +22,30 @@ export function editLineWidget(raw, index, body) {
     return { ok: true, raw: serializeLines(model), model };
 }
 
-export function commitLineWidget(raw, body, { editIndex = null, pin = true } = {}) {
-    return editIndex == null ? addLineWidget(raw, body, { pin }) : editLineWidget(raw, editIndex, body);
+function locateLineWidgetTarget(raw, locator, body = '') {
+    const model = parseLines(raw);
+    if (locator && typeof locator === 'object') {
+        const cue = serializeVectorCue(locator.cue);
+        if (cue) {
+            const matches = model.map((line, index) => ({ line, index })).filter(entry => entry.line.cue === cue);
+            return { index: matches.length === 1 ? matches[0].index : null, reason: matches.length > 1 ? 'line-target-ambiguous' : 'line-target-not-found' };
+        }
+        const name = String(locator.name || '').trim();
+        const matches = model.map((line, index) => ({ line, index })).filter(entry => entry.line.name === name);
+        return { index: matches.length === 1 ? matches[0].index : null, reason: matches.length > 1 ? 'line-target-ambiguous' : 'line-target-not-found' };
+    }
+    // 旧卡没有定位快照，只在新卡片线名能唯一对应当前线时兼容；不再凭旧序号盲改。
+    const candidate = parseLineWidget(body);
+    const matches = model.map((line, index) => ({ line, index })).filter(entry => entry.line.name === candidate?.name);
+    return { index: matches.length === 1 ? matches[0].index : null, reason: matches.length > 1 ? 'line-target-ambiguous' : 'line-target-not-found' };
+}
+
+export function resolveLineWidgetTarget(raw, locator, body = '') { return locateLineWidgetTarget(raw, locator, body).index; }
+
+export function commitLineWidget(raw, body, { editIndex = null, pin = true, locator = null } = {}) {
+    if (editIndex == null) return addLineWidget(raw, body, { pin });
+    const target = locateLineWidgetTarget(raw, locator, body);
+    return target.index == null ? { ok: false, reason: target.reason, raw } : editLineWidget(raw, target.index, body);
 }
 
 export function replaceLineBlock(raw, index, newBlock) {

@@ -22,6 +22,8 @@ export const DEFAULT_SETTINGS = {
     // 插件总开关：false = 构画完全隐身（藏悬浮球 / 楼内块 / 锚点收藏入口，停一切后台判定与潜伏注入），如同未安装；
     // 设置面板仍可从酒馆魔杖菜单进入以重新开启。默认开。
     pluginEnabled: true,
+    // 单聊角色卡排除：存精确 avatar 文件名。排除只影响运行态，不改总开关、不删除聊天数据；群聊不适用。
+    characterExcludeAvatars: [],
     // 潜伏注入总闸（受 pluginEnabled 统辖）：false = 线 / 面 / 刻度不注入主楼 AI（不影响楼内展示与手动生成）。默认开。
     injectEnabled: true,
     // 时间戳·时间锚点体系（只受 pluginEnabled + 自身开关统辖，独立于线/面注入闸）：强制主楼 AI 每楼正文首尾打时间戳
@@ -100,6 +102,7 @@ export function getSettings() {
     // 展开默认对象时数组仍会共享引用；设置层必须持有自己的容器。
     if (s.calendarTemplates === DEFAULT_SETTINGS.calendarTemplates) s.calendarTemplates = [];
     if (s.calendarTemplateBindings === DEFAULT_SETTINGS.calendarTemplateBindings) s.calendarTemplateBindings = {};
+    if (s.characterExcludeAvatars === DEFAULT_SETTINGS.characterExcludeAvatars) s.characterExcludeAvatars = [];
     return s;
 }
 

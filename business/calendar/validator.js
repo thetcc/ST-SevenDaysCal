@@ -9,5 +9,8 @@ export function validateCalendarDescriptor(raw) {
     const out = [];
     for (let i = 0; i < months.length; i++) { const name = String(months[i]?.name || '').trim(); const days = Number(months[i]?.days); if (!name || name.length > 12 || !Number.isInteger(days) || days < 1 || days > 60) return { error: '月份定义无效' }; out.push({ name, days }); }
     if (out.reduce((sum, m) => sum + m.days, 0) > 2000) return { error: '全年总天数超限' };
-    return { value: { kind: raw?.kind === 'gregorian' ? 'gregorian' : 'custom', id: String(raw?.id || 'custom-calendar'), revision: Number.isInteger(raw?.revision) && raw.revision > 0 ? raw.revision : 1, weekdayCycle: Number.isInteger(raw?.weekdayCycle) && raw.weekdayCycle > 0 ? raw.weekdayCycle : 7, era, displayStyle, months: out } };
+    const epoch = {};
+    for (const key of ['epochYear', 'epochOrdinal', 'epochWeekday']) if (Number.isInteger(raw?.[key])) epoch[key] = raw[key];
+    if (raw?.absoluteCycle === true) epoch.absoluteCycle = true;
+    return { value: { kind: raw?.kind === 'gregorian' ? 'gregorian' : 'custom', id: String(raw?.id || 'custom-calendar'), revision: Number.isInteger(raw?.revision) && raw.revision > 0 ? raw.revision : 1, weekdayCycle: Number.isInteger(raw?.weekdayCycle) && raw.weekdayCycle > 0 ? raw.weekdayCycle : 7, era, displayStyle, months: out, ...epoch } };
 }

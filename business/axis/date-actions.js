@@ -1,4 +1,5 @@
 // 轴日期动作：保存/清除锚点以及“今天 ±1”的宿主无关业务流程。
+import { addCalendarDays, validateCalendarDescriptor } from '../calendar/date.js';
 export function createAxisDateActions(env = {}) {
     const saveAnchor = (key, month, day, source = 'explicit', options = {}) => {
         if (!key) return { ok: false, reason: 'missing-character' };
@@ -16,11 +17,28 @@ export function createAxisDateActions(env = {}) {
         const calendar = env.calendar?.();
         const ownerIdentity = { chatId: env.chatId?.(), floor: env.floor?.(), swipe: env.swipe?.() };
         const today = env.today?.();
-        const target = env.monthDayFromDoy?.((env.dayOfYear?.(today?.month, today?.day, calendar) || 0) + Number(delta || 0), calendar);
+        const step = Number(delta || 0);
+        const fullTarget = validateCalendarDescriptor(calendar)
+            ? addCalendarDays({ year: today?.year ?? null, month: today?.month, day: today?.day }, step, calendar)
+            : null;
+        const startOrdinal = env.dayOfYear?.(today?.month, today?.day, calendar);
+        const targetOrdinal = Number(startOrdinal) + step;
+        const target = fullTarget || env.monthDayFromDoy?.(targetOrdinal, calendar);
         if (!target) { env.toast?.('日期保存失败，请重试', null, true); return { ok: false, reason: 'invalid-target' }; }
-        const weekday = env.weekday?.(today.month, today.day, null, calendar);
-        if (storyClock && !Number.isInteger(weekday)) { env.toast?.('当前没有可用故事星期，请先校准', null, true); return { ok: false, reason: 'weekday' }; }
-        const stored = saveAnchor(key, target.month, target.day, storyClock ? 'calibration' : 'explicit', storyClock ? { refMonth: target.month, refDay: target.day, weekday, floor: ownerIdentity.floor, sourceFloor: ownerIdentity.floor, swipe: ownerIdentity.swipe } : {});
+        const yearLength = Array.isArray(calendar?.months)
+            ? calendar.months.reduce((sum, month) => sum + Number(month?.days || 0), 0)
+            : null;
+        const fallbackCrossedYear = !fullTarget && Number.isInteger(startOrdinal) && Number.isInteger(yearLength)
+            && yearLength > 0 && (targetOrdinal < 1 || targetOrdinal > yearLength);
+        const currentWeekday = env.weekday?.(today.month, today.day, null, calendar);
+        if (storyClock && !Number.isInteger(currentWeekday)) { env.toast?.('当前没有可用故事星期，请先校准', null, true); return { ok: false, reason: 'weekday' }; }
+        const cycle = Number.isInteger(Number(calendar?.weekdayCycle)) && Number(calendar.weekdayCycle) > 0 ? Number(calendar.weekdayCycle) : 7;
+        const weekday = storyClock ? ((currentWeekday + step) % cycle + cycle) % cycle : null;
+        const dateFacts = {
+            ...(Number.isInteger(target.year) ? { year: target.year } : Number.isInteger(today?.year) && !fallbackCrossedYear ? { year: today.year } : {}),
+            ...(typeof today?.eraLabel === 'string' && today.eraLabel.trim() ? { eraLabel: today.eraLabel } : {}),
+        };
+        const stored = saveAnchor(key, target.month, target.day, storyClock ? 'calibration' : 'explicit', storyClock ? { ...dateFacts, refMonth: target.month, refDay: target.day, weekday, floor: ownerIdentity.floor, sourceFloor: ownerIdentity.floor, swipe: ownerIdentity.swipe } : dateFacts);
         if (!stored.ok) { env.toast?.('日期保存失败，请重试', null, true); return stored; }
         env.aftermath?.();
         return { ok: true, date: target };

@@ -10,14 +10,21 @@ export function createLinesActions(env = {}) {
         if (preparing || editing || env.isBusy?.()) return;
         const reservation = env.beginPreflight?.() || Object.freeze({ token: Symbol('lines-preflight') });
         preparing = reservation;
+        let preflightFailure = null;
         try {
-            if (!await env.precheck?.()) return;
+            const precheck = await env.precheck?.({ signal: reservation.controller?.signal, operationToken: reservation.token, participantIdentity: reservation.participantIdentity, contextSnapshot: reservation.contextSnapshot });
+            if (!precheck) return;
             if (preparing !== reservation || env.preflightCurrent?.(reservation) === false) return { status: 'cancelled', reason: 'stale-preflight' };
-            return await env.runGenerate?.(silent, options, null, reservation);
+            if (precheck.proceed === false) { preflightFailure = precheck.memoryError; return { status: 'failed', reason: 'memory-precheck' }; }
+            return await env.runGenerate?.(silent, options, null, reservation, precheck?.memorySnapshot ? { memorySnapshot: precheck.memorySnapshot, memoryOperationToken: reservation.token } : null);
+        } catch {
+            if (reservation.controller?.signal?.aborted) return { status: 'cancelled', reason: 'aborted' };
+            preflightFailure = '记忆读取失败，请重试';
+            return { status: 'failed', reason: 'memory-precheck' };
         } finally {
             if (preparing === reservation) {
                 preparing = null;
-                env.finishPreflight?.(reservation);
+                env.finishPreflight?.(reservation, preflightFailure);
             }
         }
     };

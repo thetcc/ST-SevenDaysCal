@@ -4,7 +4,14 @@ import { classifyGenerationError, diagnosticMessage } from '../api/diagnostics.j
 export function createTheaterHostPorts(d = {}) {
     const { $, $in, inEl, documentRef = globalThis.document, getContext, captureTarget, theaterMode, modalId, setBody, loading, escapeHtml, escapeAttr, settings, saveSettingsDebounced, showToast, showPanel, confirm, spConfirm, scriptCore } = d;
     return {
-        getChatId: () => getContext()?.chatId, captureTarget: chatId => ({ ...captureTarget(chatId), target: scriptCore?.resolveChatStateTarget?.(), metadataSnapshot: { ...(getContext()?.chatMetadata || {}) } }),
+        getChatId: () => getContext()?.chatId, captureTarget: chatId => {
+            const captured = captureTarget?.(chatId) || {};
+            return {
+                ...captured,
+                target: captured.target ?? scriptCore?.resolveChatStateTarget?.(),
+                metadataSnapshot: captured.metadataSnapshot ?? { ...(getContext()?.chatMetadata || {}) },
+            };
+        },
         htmlOptions: () => ({ purifier: globalThis.DOMPurify, documentRef }), escapeHtml, escapeAttr, setBody, loading,
         isOpen: () => theaterMode() && $(`#${modalId()}`).is(':visible'), notifyEnabled: () => settings().notifyMode !== 'off', toast: showToast,
         focus: selector => $in(selector).trigger('focus'), closedSuccess: () => showToast('棱已生成，点击查看', () => { $in('.sp-view-btn[data-view="theater"]').trigger('click'); showPanel(); }), closedFailure: () => showToast('棱生成失败，请重试', null, true),

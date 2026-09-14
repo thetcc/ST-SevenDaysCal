@@ -30,7 +30,6 @@ export const isCompletePointEvent = event => Boolean(
     && String(event.title || '').trim()
     && String(event.desc || '').trim()
     && String(event.time || '').trim()
-    && String(event.location || '').trim()
 );
 
 function pointDayHeading(value) {

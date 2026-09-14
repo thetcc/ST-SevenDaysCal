@@ -705,7 +705,7 @@ test('point generated protocol ignores AI pin/Adult instead of rejecting complet
     }
 });
 
-test('point generated validation drops missing-location records but accepts harmless extra fields', () => {
+test('point generated validation accepts optional location and harmless extra fields', () => {
     const makeRaw = event => `<calendar_widget>\nDay: 1\nEvent: main|一|描述|早|地|动\nDay: 2\nEvent: main|二|描述|午|地|动\nDay: 3\nEvent: main|三|描述|晚|地|动\nFuture:\nEvent: ${event}\n</calendar_widget>`;
     const futureFive = 'main|未来五字段|描述|夜|地';
     const parsedFive = parsePointEventRecord(`Event: ${futureFive}`);
@@ -714,7 +714,8 @@ test('point generated validation drops missing-location records but accepts harm
     assert.equal(validateGeneratedCalendar(makeRaw('main|六字段|描述|夜|地|动态'), null, { generated: true, adultMode: 'off' }).ok, true);
     const missing = makeRaw('main|四字段|描述|夜');
     assert.equal(validateGeneratedCalendar(missing, null, { generated: true, adultMode: 'off' }).ok, true);
-    assert.equal(parseCalendar(bindPointAdultTickets(missing, 'off')).future?.events?.length || 0, 0);
+    assert.equal(parseCalendar(bindPointAdultTickets(missing, 'off')).future?.events?.[0]?.title, '四字段');
+    assert.equal(parseCalendar(bindPointAdultTickets(missing, 'off')).future?.events?.[0]?.location, '');
     const extra = makeRaw('main|七字段|描述|夜|地|动态|false');
     assert.equal(validateGeneratedCalendar(extra, null, { generated: true, adultMode: 'off' }).ok, true);
     assert.equal(parseCalendar(bindPointAdultTickets(extra, 'off')).future.events[0].pin, false);

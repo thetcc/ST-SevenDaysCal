@@ -245,8 +245,37 @@ export function createBestEffortMetadataSaver({ context = () => null } = {}) {
             if (!ctx?.chatId || typeof ctx.saveMetadata !== 'function') return { ok: false, reason: 'official-saveMetadata-unavailable', commitState: 'not-dispatched', dispatched: false };
             if (target?.chatId && target.chatId !== ctx.chatId) return { ok: false, reason: 'target-chat-mismatch', commitState: 'not-dispatched', dispatched: false };
             if (!ownerGuard()) return { ok: false, reason: 'stale-before-save', commitState: 'not-dispatched', dispatched: false };
-            const result = ctx.saveMetadata();
-            if (result?.then) await result;
+            const rootKey = String(options.rootKey || 'sp-store');
+            const stagedMetadata = ctx.chatMetadata;
+            const liveMetadata = options.liveMetadata;
+            const swapRoot = liveMetadata && stagedMetadata && liveMetadata !== stagedMetadata;
+            const liveRootExisted = swapRoot && Object.prototype.hasOwnProperty.call(liveMetadata, rootKey);
+            const liveRoot = swapRoot ? liveMetadata[rootKey] : undefined;
+            const stagedRoot = stagedMetadata?.[rootKey];
+            const stagedSnapshot = clone(stagedRoot);
+            const publication = options.publication && typeof options.publication === 'object' ? options.publication : null;
+            let result;
+            try {
+                if (swapRoot) {
+                    if (Object.prototype.hasOwnProperty.call(stagedMetadata, rootKey)) liveMetadata[rootKey] = stagedRoot;
+                    else delete liveMetadata[rootKey];
+                    if (publication) { publication.root = stagedRoot; publication.installed = true; }
+                }
+                result = ctx.saveMetadata({ withMetadata: { [rootKey]: stagedRoot } });
+                if (result?.then) result = await result;
+            } finally {
+                // 宿主可能在 await 后才读取全局 metadata。仅当本次临时 root 的
+                // 引用和内容都仍归本次操作所有时还原；并发普通写已经改动它时保留新值。
+                const installedRootStillOwned = publication?.isOwned ? publication.isOwned() : same(stagedRoot, stagedSnapshot);
+                if (swapRoot && liveMetadata[rootKey] === stagedRoot && installedRootStillOwned) {
+                    if (liveRootExisted) liveMetadata[rootKey] = liveRoot;
+                    else delete liveMetadata[rootKey];
+                }
+                if (publication) publication.installed = swapRoot && liveMetadata[rootKey] === stagedRoot;
+            }
+            if (result === false || (result && typeof result === 'object' && result.ok === false)) {
+                return { ...(result && typeof result === 'object' ? result : {}), ok: false, reason: result?.reason || 'official-saveMetadata-failed', commitState: result?.commitState || 'legacy-unconfirmed', dispatched: result?.dispatched ?? true, bestEffort: true };
+            }
             if (!ownerGuard()) return { ok: true, stale: true, reason: 'stale-after-save', commitState: 'legacy-unconfirmed', dispatched: true, bestEffort: true };
             return { ok: true, reason: 'official-saveMetadata-best-effort', commitState: 'legacy-unconfirmed', dispatched: true, bestEffort: true };
         },
