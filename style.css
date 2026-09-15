@@ -5642,6 +5642,50 @@ body.sp-anchor-fs-lock { overflow: hidden; }
 }
 .sp-ledger-ctrl-wrap { padding: 10px 12px 10px; }
 .sp-ledger-ctrl-wrap .sp-ledger-ctrl { margin-bottom: 0; }
+.sp-ledger-task {
+    width         : min(100%, 560px);
+    box-sizing    : border-box;
+    margin        : 8px auto 12px;
+    padding       : 6px 10px 10px;
+    color         : var(--sp-subtle);
+    font-size     : var(--sp-fs-76);
+    line-height   : 1.5;
+}
+.sp-ledger-task-status {
+    margin     : 0 auto 8px;
+    padding    : 2px 8px;
+    text-align : center;
+    line-height: 1.5;
+}
+.sp-ledger-task-explain,
+.sp-ledger-task-action { text-align: center; }
+.sp-ledger-task-list {
+    display       : flex;
+    flex-direction: column;
+    gap           : 6px;
+    margin        : 8px 0;
+    padding       : 0;
+    list-style    : none;
+}
+.sp-ledger-task-item {
+    min-width     : 0;
+    padding       : 6px 9px;
+    text-align    : left;
+    background    : var(--sp-sheet-bg);
+    border        : 1px solid var(--sp-divider);
+    border-radius : 7px;
+    overflow-wrap : anywhere;
+    word-break    : break-word;
+}
+.sp-ledger-task-gist {
+    color      : var(--sp-on-surface);
+    font-weight: 600;
+}
+.sp-ledger-task-people {
+    margin-top   : 2px;
+    font-size    : var(--sp-fs-70);
+    overflow-wrap: anywhere;
+}
 .sp-alm-body-ledger { padding-top: 0; }
 .sp-alm-body > .sp-batch-bar:not(.sp-batch-active) { padding-top: 0; }
 .sp-ledger-auto {

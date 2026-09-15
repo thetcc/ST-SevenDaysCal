@@ -6,6 +6,7 @@ import { createGenerationDiagnosticScope, makeDiagnosticError, runGenerationUiEf
 import { drawAdultSelections, allocateAdultPools } from './adult.js';
 import { enforceLineCapacity, AUTO_LINE_CAPACITY, AUTO_LINE_SEED_CAPACITY } from './capacity.js';
 import { auditLineEvolution } from './evolution.js';
+import { freezeLineStore, lineStoreMatches } from './version-history.js';
 
 const LINES_GENERATION_LEASES = Symbol.for('st-seven-days-cal.lines-generation-leases');
 
@@ -51,7 +52,8 @@ export function createLinesGenerationController(env = {}) {
             const cfg = env.loadConfig();
             if (!cfg?.url || !cfg?.key) { env.missingApi?.({ silent }); throw makeDiagnosticError('config-missing'); }
             const savedSnapshot = env.readSaved() || {};
-            const commitBaseline = Object.freeze({ chatId, key: env.cacheKey?.() ?? null, raw: String(savedSnapshot.raw || ''), ts: Number(savedSnapshot.ts) || null, cursor: savedSnapshot.cursor ?? 0, html: savedSnapshot.html ?? null });
+            const baselineStore = freezeLineStore(savedSnapshot);
+            const commitBaseline = Object.freeze({ chatId, key: env.cacheKey?.() ?? null, raw: String(savedSnapshot.raw || ''), ts: Number(savedSnapshot.ts) || null, cursor: savedSnapshot.cursor ?? 0, html: savedSnapshot.html ?? null, store: baselineStore });
             owner.baseline = commitBaseline;
             const sourceRaw = typeof swipeCtx?.baselineRaw === 'string' ? swipeCtx.baselineRaw : commitBaseline.raw;
             const isReroll = !!(swipeCtx?.forceReroll || swipeCtx?.reroll);
@@ -86,7 +88,7 @@ export function createLinesGenerationController(env = {}) {
             const prompt = env.buildPrompt(promptRaw, travelContext, vectorContext, participantIdentity, contextSnapshot);
             if (signal.aborted || travelAbort?.aborted || !owners.isCurrent(owner, { chatId, chatRevision }) || env.chatId() !== chatId || !participantCurrent(participantIdentity)) return { status: 'cancelled', reason: 'stale-owner' };
             const beforeCall = env.readSaved() || {};
-            if (String(beforeCall.raw || '') !== commitBaseline.raw || (Number(beforeCall.ts) || null) !== commitBaseline.ts) return { status: 'cancelled', reason: 'stale-baseline' };
+            if (!lineStoreMatches(beforeCall, commitBaseline.store)) return { status: 'cancelled', reason: 'stale-baseline' };
             const raw = await env.callApi(prompt, signal, {
                 ...(travelContext || {}),
                 ...(swipeCtx?.forceReroll || swipeCtx?.reroll ? { reroll: true, module: 'lines' } : {}),
@@ -109,6 +111,7 @@ export function createLinesGenerationController(env = {}) {
             if (!audit.ok) { const error = diagnostic.rejected(makeDiagnosticError('invalid-fields', { phase: 'validation' }), { phase: 'validation', reasonCode: audit.reason }); env.fail?.(error, { silent }); return { status: 'failed', reason: audit.reason }; }
             const latest = env.readSaved() || {};
             const latestSnapshot = Object.freeze({ raw: String(latest.raw || ''), ts: Number(latest.ts) || null });
+            if (!lineStoreMatches(latest, commitBaseline.store)) return { status: 'cancelled', reason: 'stale-baseline' };
             const decision = decideLinesCommit({ ownerCurrent: owners.isCurrent(owner, { chatId, chatRevision }) && participantCurrent(participantIdentity) && !signal.aborted && !travelAbort?.aborted, validation: checked, baseline: { raw: commitBaseline.raw, ts: commitBaseline.ts }, latest: latestSnapshot });
             if (!decision.ok) return { status: 'cancelled', reason: decision.reason };
             const bound = bindVectorTickets({ previousLines: identityLines, generatedLines: checked.model, freshTickets: adultTickets });

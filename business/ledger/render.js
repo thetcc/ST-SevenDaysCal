@@ -229,6 +229,42 @@ export function batchScopeIds(scope) {
     return [];
 }
 
+function renderLedgerTask(checkpoint, busy) {
+    if (!checkpoint) return '';
+    const done = Math.max(0, Number.isFinite(+checkpoint.nextBatchIndex) ? Math.floor(+checkpoint.nextBatchIndex) : 0);
+    const selectedCount = Math.max(0, Number.isFinite(+checkpoint.scope?.selectedCount) ? Math.floor(+checkpoint.scope.selectedCount) : 0);
+    const total = Math.ceil(selectedCount / 6);
+    const candidates = Array.isArray(checkpoint.candidates) ? checkpoint.candidates : [];
+    const complete = done >= total;
+    const status = `来源溯源：已完成 ${done}/${total} 批，待查 ${candidates.length} 项`;
+    const items = candidates.length
+        ? `<div class="sp-ledger-task-explain">这些事项尚未确认可靠的历史出处，暂未写入刻度。</div>
+           <ul class="sp-ledger-task-list" aria-label="待查事项">${candidates.map(candidate => {
+                const people = Array.isArray(candidate?.牵扯)
+                    ? candidate.牵扯.map(person => String(person || '').trim()).filter(Boolean)
+                    : [];
+                return `<li class="sp-ledger-task-item">
+                    <div class="sp-ledger-task-gist">${escapeHtml(String(candidate?.事由 || ''))}</div>
+                    ${people.length ? `<div class="sp-ledger-task-people">涉及：${escapeHtml(people.join('、'))}</div>` : ''}
+                </li>`;
+            }).join('')}</ul>`
+        : '';
+    let action = '正在继续查找这些事项的历史出处。';
+    if (!busy && !complete) {
+        action = '可点上方「标注」继续查找剩余批次。保留待查期间，自动标注会等待手动处理。';
+    } else if (!busy) {
+        action = '所选范围已查完。可保留这些待查事项，或选择「放弃待查」；保留待查期间，自动标注会等待手动处理。';
+        if (checkpoint.scope?.mode !== 'all') {
+            action += '如需改查其他历史范围，可在 设置→节奏→刻度 调整后再点「标注」。';
+        }
+    }
+    return `<section class="sp-ledger-task" aria-label="刻度来源溯源">
+        <div class="sp-cfg-hint sp-ledger-task-status">${escapeHtml(status)}</div>
+        ${items}
+        <div class="sp-ledger-task-action">${escapeHtml(action)}</div>
+    </section>`;
+}
+
 // 按 scope 执行批量动作。动作彼此独立、确认后机械写回，随后退批并刷新面板。
 export async function execBatch(scope, ids) {
     if (!ids.length) return;
@@ -262,11 +298,14 @@ export function renderLedgerControls() {
     const busy = env.isCapturingLedger();
     const progress = env.getLedgerCaptureProgress?.();
     const judging = env.isJudgingLedger();
+    const captureState = env.getLedgerCaptureStatus?.() || {};
+    const checkpoint = captureState.checkpoint;
     return `<div class="sp-ledger-ctrl">
         <button type="button" class="sp-mini-btn sp-ledger-pill sp-ledger-capture-now${busy ? ' sp-ledger-capture-busy' : ''}" title="${busy ? '再次点击可中止当前标注' : '立即标注一次'}" aria-busy="${busy ? 'true' : 'false'}" aria-disabled="false">${busy ? (progress ? `中止标注（${progress.done}/${progress.total} 批）` : '中止标注') : '标注'}</button>
         <button type="button" class="sp-mini-btn sp-ledger-pill sp-ledger-judge-now" title="立即判定一次（更新现状 / 了结）" ${judging ? 'disabled' : ''}>${judging ? '更新中…' : '更新'}</button>
+        ${checkpoint ? '<button type="button" class="sp-mini-btn sp-ledger-pill sp-ledger-abandon" title="放弃仍未确认的候选；已保存条目不会删除">放弃待查</button>' : ''}
         ${_batchScope === 'ledger-active' ? '' : batchBarHtml('ledger-active', ledger.listEntries().length, '批量归档', false)}
-    </div>`;
+    </div>${renderLedgerTask(checkpoint, busy)}`;
 }
 
 export function renderLedgerSheet({ includeControls = true } = {}) {
@@ -289,7 +328,9 @@ export function renderLedgerSheet({ includeControls = true } = {}) {
     if (!entries.length) {
         const hint = busy ? '正在标注…'
             : `暂无活跃刻度条目。聊几楼后${on ? '自动标注' : '（先勾上「自动标注」）'}，或点右上「立即标注」。`;
-        return (includeControls ? renderLedgerControls() : '') + `<div class="sp-ledger-empty">${hint}</div>` + archive;
+        const initialized = env.getLedgerCaptureStatus?.()?.initialized === true;
+        const initHint = initialized ? '' : '<div>世界书初始化：待首次标注</div>';
+        return (includeControls ? renderLedgerControls() : '') + `<div class="sp-ledger-empty"><div>${hint}</div>${initHint}</div>` + archive;
     }
     const activeBatch = _batchScope === 'ledger-active' ? batchBarHtml('ledger-active', entries.length, '批量归档', false) : '';
     return (includeControls ? renderLedgerControls() : '') + activeBatch + `<div class="sp-ledger-list">${entries.map(e => ledgerRowHtml(e, cal)).join('')}</div>` + archive;

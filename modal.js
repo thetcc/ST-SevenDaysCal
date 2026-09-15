@@ -64,7 +64,7 @@ export function createDialogManager({ $, mount, getRootClass = () => '', subscri
         return Object.freeze({ finish, close: externalClose, isDone: () => done });
     }
 
-    function choose({ title = '', body = '', note = '', choices = [] } = {}) {
+    function choose({ title = '', body = '', note = '', choices = [], scrollable = false } = {}) {
         if (!Array.isArray(choices) || !choices.length) return Promise.resolve(null);
         return new Promise(resolve => {
             prepareDialog();
@@ -73,7 +73,7 @@ export function createDialogManager({ $, mount, getRootClass = () => '', subscri
                 return `<button class="sp-dialog-button sp-dialog-button-${tone}" type="button" data-dialog-choice="${index}">${escapeHtml(choice.label)}</button>`;
             }).join('');
             const $overlay = $(`<div id="${OVERLAY_ID}" class="sp-dialog-overlay">
-                <div class="sp-dialog-sheet" role="dialog" aria-modal="true" aria-labelledby="sp-dialog-title">
+                <div class="sp-dialog-sheet${scrollable ? ' sp-dialog-editor-sheet' : ''}" role="dialog" aria-modal="true" aria-labelledby="sp-dialog-title">
                     <div id="sp-dialog-title" class="sp-dialog-head">${escapeHtml(title)}</div>
                     <div class="sp-dialog-body">${escapeHtml(body)}</div>
                     ${note ? `<div class="sp-dialog-note">${escapeHtml(note)}</div>` : ''}

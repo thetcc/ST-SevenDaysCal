@@ -179,16 +179,16 @@ import { pointTicketPlan } from './business/point/adult.js';
 // ledger 检索前置选择器（纯逻辑三件套）已抽出到 business/ledger/select.js；到期/距今口径经 bindLedgerSelect 注入。
 import { bindLedgerSelect, selectLedgerForInject } from './business/ledger/select.js';
 import { bindLedgerDate, ledgerDaysSince, ledgerDueInfo, listJudgeableLedger, fmtLedgerForJudge } from './business/ledger/date.js';
-import { bindLedgerSchema, splitCnList, normGist, parseLedgerCapture as parseLedgerCaptureSchema, parseLedgerJudge as parseLedgerJudgeSchema } from './business/ledger/schema.js';
+import { bindLedgerSchema, splitCnList, normGist, parseLedgerCapture as parseLedgerCaptureSchema, parseLedgerCaptureDetailed, parseLedgerJudge as parseLedgerJudgeSchema } from './business/ledger/schema.js';
 import { createLedgerInjectionController } from './business/ledger/inject.js';
 import { createLedgerJudgeController } from './business/ledger/judge.js';
 import { createLedgerInlineRenderer } from './business/ledger/inline.js';
 import { createLedgerSnapshotBridge } from './business/ledger/snapshot.js';
 import { createLedgerActions } from './business/ledger/actions.js';
-import { bindLedgerEvents, createLedgerDeletedHandler } from './business/ledger/events.js';
+import { bindLedgerEvents, createLedgerDeletedHandler, formatLedgerCaptureFeedback } from './business/ledger/events.js';
 import { buildLedgerSources } from './business/ledger/reconcile.js';
 import { ledgerOwnerIdentity, sameLedgerOwner } from './business/ledger/owner.js';
-import { bindLedgerCapture, createLedgerCaptureController, ledgerNarrativeMessage, ledgerFloorDateContext, ledgerAiFloorRecords, LEDGER_EVENT_TYPES, LEDGER_FIELD_SPEC } from './business/ledger/capture.js';
+import { bindLedgerCapture, createLedgerCaptureController, ledgerNarrativeMessage, ledgerLatestAiFloorId, ledgerFloorDateContext, ledgerAiFloorRecords, ledgerHistoricalAiFloorRecords, LEDGER_EVENT_TYPES, LEDGER_FIELD_SPEC } from './business/ledger/capture.js';
 import { filterRerollItems, shouldRunPendingPointFollowup } from './runtime/refactor-adapters.js';
 import {
     createDatabaseMemoryAccess,
@@ -595,6 +595,8 @@ const ledgerCaptureController = createLedgerCaptureController({
     appendTravel: appendTravelPromptContext,
     callApi: callCustomApi,
     parseCapture: parseLedgerCaptureSchema,
+    parseCaptureDetailed: parseLedgerCaptureDetailed,
+    captureState: ledger.getCaptureState,
     listEntries: options => ledger.listEntries(options),
     normGist,
     addAtomic: ledger.addEntriesAtomic,
@@ -611,7 +613,7 @@ const ledgerCaptureController = createLedgerCaptureController({
 const reconcileLedgerSources = async (owner = null) => {
     const logSourceError = (error, counts = {}) => { try { const save = error?.saveResult; console.error('[SP ledger source reconcile]', { phase: error?.phase || 'source-state-invalid', cause: error?.code || error?.phase || 'unknown', reason: save?.reason || null, commitState: save?.commitState || null, saveReason: save?.saveReason || null, path: save?.path || null, httpStatus: save?.status || null, dispatched: save?.dispatched ?? null, counts: { cleaned: counts.cleaned || 0, remapped: counts.remapped || 0, pending: counts.pending || 0, lockedMissing: counts.lockedMissing || 0, kept: counts.kept || 0, deleted: counts.deleted || 0 } }); } catch {} };
     let records;
-    try { records = ledgerAiFloorRecords(); } catch (error) { error.phase = 'source-scan-failed'; logSourceError(error); return { changed: false, summary: {}, phase: error.phase, error }; }
+    try { records = ledgerHistoricalAiFloorRecords(); } catch (error) { error.phase = 'source-scan-failed'; logSourceError(error); return { changed: false, summary: {}, phase: error.phase, error }; }
     let sources;
     try { sources = buildLedgerSources(records); } catch (error) { error.phase = 'source-state-invalid'; logSourceError(error); return { changed: false, summary: {}, phase: error.phase, error }; }
     try { return await ledger.reconcileEntriesAtomic(sources, getContext()?.chat?.length || 0, owner); }
@@ -723,6 +725,7 @@ bindLedgerRender({
     renderAlmanacPanel: (...args) => renderAlmanacPanel(...args),
     getLedgerCaptureInterval,
     getLedgerCaptureProgress: () => ledgerCaptureController.progress,
+    getLedgerCaptureStatus: () => ledgerCaptureController.status || ledger.getCaptureState(),
     isCapturingLedger: () => ledgerCaptureController.isBusy,
     isJudgingLedger: () => ledgerJudgeController.isBusy,
     renderLedgerControls,
@@ -1348,6 +1351,7 @@ const MODULE_INTROS = {
     lines:
         _iLede('「线」有“平行事件”和“冷知识”两页。平行事件追踪仍在发展的伏笔、人物行动与局势；冷知识要先在设置 → 注入与内容设置 → 功能与内容开关开启“冷知识”，才会参与生成和显示。') +
         _iSub('线可按回合数自动推进、在故事日期变化时推进，或只接受手动推进；策略在设置 → 推进设置 → 线。潜伏注入必须同时开启总开关和线自己的“潜伏注入主楼 AI”。') +
+        _iKey('fa-clock-rotate-left', '历史版本', '线主页“重新生成”左侧的回退入口。保留最近 10 份旧版，当前版另计；按真实生成时间从新到旧排列，旧数据时间未知时会如实标明。选择版本可先预览，再确认恢复；恢复后会成为当前线，供后台潜伏注入、“当前内容”手动注入和后续更新使用。恢复前的当前版也会保留，可再次选回。历史从功能启用后的内容更新开始积累，暂无版本时会提示。') +
         _iKey('fa-rotate-right', '重新生成', '重做未锁定的线；锁定线保留') +
         _iKey('fa-forward',      '推进',     '更新已有线，并可能新增少量真正独立的事件') +
         _iKey('fa-plus',         '新增冷知识', '在“冷知识”页选择主题生成；只在冷知识开关开启后可用') +
@@ -1565,12 +1569,14 @@ const linesFeature = createLinesFeature({
     isEditing: () => manualEditing.lines,
     readSaved: () => readStore(getLinesCacheKey()) || {},
     writeStore, writeStoreConfirmed, readRaw: () => readStore(getLinesCacheKey())?.raw || '',
-    restoreBaseline: baseline => { if (!baseline || baseline.chatId !== getContext().chatId) return; const key = getLinesCacheKey(); if (!key) return; if (baseline.raw) writeStore(key, { raw: baseline.raw, ts: baseline.ts || Date.now() }); else removeStore(key); },
+    restoreBaseline: baseline => { if (!baseline || baseline.chatId !== getContext().chatId) return; const key = getLinesCacheKey(); if (!key) return; if (baseline.store && typeof baseline.store === 'object') writeStore(key, baseline.store); else if (baseline.raw) writeStore(key, { raw: baseline.raw, ts: baseline.ts || Date.now() }); else removeStore(key); },
     loadConfig: loadCfg, swipeId: mesId => getContext().chat?.[mesId]?.swipe_id ?? 0,
     refreshInlineWindow: refreshInlineWindow,
     freezeSnapshot: freezeSnapshotToFloor,
     isPanelActive: () => linesMode, notifyMode: () => getSettings().notifyMode,
     toast: (message, error) => showToast(message, null, error),
+    dialog: customDialog,
+    storageStatus,
     pluginEnabled, getSettings, getMode: getLinesMode, getInterval: getLinesInterval,
     floorSignature: _floorSig, messageText: mid => getContext().chat?.[mid]?.mes,
     chat: () => getContext().chat, lastAssistant: () => snapshotLastAssistant(getContext().chat),
@@ -1714,7 +1720,7 @@ const spaceFeature = createSpaceFeature({
         },
         readWorldInfo: ctx => buildWorldInfoContext(ctx),
         readMemory: () => getMemText(),
-        readRecent: ctx => buildRecentChatContext(ctx),
+        readRecent: ctx => buildRecentChatContext(ctx, 6, Infinity),
         readCardExtras,
         readAlmanacText: () => getAlmanacInjectText(),
         readCalendarText: () => getCalDescInjectText(),
@@ -1752,6 +1758,7 @@ let theaterMode          = false;
 // 暗历内联编辑态/归档折叠态/批量模式已随 ledger 渲染层迁入 business/ledger/render.js
 // （经 getLedgerEditor、归档/批量 actions 与 resetLedgerRenderState 复位）。
 const _injectTexts      = {};
+const _injectIdsByText  = new Map();
 let   _injectIdSeq      = 0;
 let viewportSyncBound   = false;
 
@@ -1976,6 +1983,7 @@ jQuery(async () => {
         theaterFeature.onChatChanged();
         ledgerCaptureController.reset('chat-boundary');
         ledgerJudgeController.reset('chat-boundary');
+        invalidateLedgerAutomationQueue();
         axisGenerationController.reset('chat-boundary');
         _autoRegenSchedAbort?.abort('chat-boundary'); _autoRegenSchedAbort = null;
         pointState.isGenerating = false;
@@ -2150,7 +2158,7 @@ jQuery(async () => {
     };
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.timeTravel);
     if (_stListeners.timeTravelDeleted) eventSource.removeListener?.(event_types.MESSAGE_DELETED, _stListeners.timeTravelDeleted);
-    _stListeners.timeTravelDeleted = createLedgerDeletedHandler({ cancel: cancelTimeTravelForDeletion, reconcile: reconcileLedgerSources, toast: showToast, refreshInject: refreshLedgerInjection, refreshInline: () => refreshInlineWindow(true), refreshPanel: () => { if (axisState.almanacMode && axisState._almanacSheet === 'ledger') renderAlmanacPanel(); } });
+    _stListeners.timeTravelDeleted = createLedgerDeletedHandler({ cancel: cancelTimeTravelForDeletion, onDeleted: rewindLedgerAutomationAfterDeletion, reconcile: reconcileLedgerSources, toast: showToast, refreshInject: refreshLedgerInjection, refreshInline: () => refreshInlineWindow(true), refreshPanel: () => { if (axisState.almanacMode && axisState._almanacSheet === 'ledger') renderAlmanacPanel(); } });
     eventSource.on(event_types.MESSAGE_DELETED, _stListeners.timeTravelDeleted);
     // 线·swipe：滑到新 swipe 时线跟着重算（临时存 localStorage，发下条消息即固定）。
     // pendingGeneration=true → 该 swipe 会触发新生成，此刻新回复还没好，先记标记，等它的
@@ -2254,13 +2262,22 @@ jQuery(async () => {
         const chat = getContext().chat;
         if (!Array.isArray(chat)) return;
         if (messageId !== chat.length - 1) return;
+        if (!ledgerNarrativeMessage(chat[messageId])) return;
         if (messageId <= ledgerLastCapturedMsgId) return;
         ledgerLastCapturedMsgId = messageId;
         // 时旅首楼：标注由显式步骤接管（LEDGER_CAPTURE step），跳过自动标注，防重复 API
         if (isAutomationSuppressed(messageId, AUTOMATION_MODULES.LEDGER_CAPTURE)) return;
-        if (++ledgerCaptureCounter < getLedgerCaptureInterval()) return;
-        ledgerCaptureCounter = 0;
-        runLedgerCaptureStep();   // fire-and-forget，自带守卫
+        ledgerCaptureCounter = Math.min(getLedgerCaptureInterval(), ledgerCaptureCounter + 1);
+        if (ledgerCaptureCounter < getLedgerCaptureInterval() || ledgerCaptureQueued) return;
+        ledgerCaptureQueued = true;
+        enqueueLedgerAutomation(async () => {
+            const result = await runLedgerCaptureStep();
+            if (['updated', 'unchanged'].includes(result?.status)) ledgerCaptureCounter = 0;
+            if (result?.feedbackShown !== true && (result?.status === 'needs-confirmation' || (result?.status === 'failed' && getSettings().notifyMode === 'full'))) {
+                const feedback = formatLedgerCaptureFeedback(result); showToast(feedback.message, feedback.error ? null : undefined, feedback.error);
+            }
+            return result;
+        }).finally(() => { ledgerCaptureQueued = false; });
     };
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.ledgerCapture);
     // 暗历·判定（刷现状）：每 N 楼重算活跃条目「距今多久」、只让 AI 回该变的那几条。与标注共用 ledgerCaptureEnabled
@@ -2272,13 +2289,19 @@ jQuery(async () => {
         const chat = getContext().chat;
         if (!Array.isArray(chat)) return;
         if (messageId !== chat.length - 1) return;
+        if (!ledgerNarrativeMessage(chat[messageId])) return;
         if (messageId <= ledgerLastJudgedMsgId) return;
         ledgerLastJudgedMsgId = messageId;
         // 时旅首楼：判定由显式步骤接管（LEDGER_JUDGE step），跳过自动判定，防重复 API
         if (isAutomationSuppressed(messageId, AUTOMATION_MODULES.LEDGER_JUDGE)) return;
-        if (++ledgerJudgeCounter < getLedgerJudgeInterval()) return;
-        ledgerJudgeCounter = 0;
-        runLedgerJudgeStep();   // fire-and-forget，自带守卫
+        ledgerJudgeCounter = Math.min(getLedgerJudgeInterval(), ledgerJudgeCounter + 1);
+        if (ledgerJudgeCounter < getLedgerJudgeInterval() || ledgerJudgeQueued) return;
+        ledgerJudgeQueued = true;
+        enqueueLedgerAutomation(async () => {
+            const result = await runLedgerJudgeStep();
+            if (['updated', 'unchanged'].includes(result?.status) || result?.reason === 'no-entry') ledgerJudgeCounter = 0;
+            return result;
+        }).finally(() => { ledgerJudgeQueued = false; });
     };
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, _stListeners.ledgerJudge);
     // 暗历·注入重算（场景感知）：每出一楼就按最新正文重挑注入集——纯 JS 打分、零 API，故不设间隔/单调闸，
@@ -2400,6 +2423,7 @@ function _abortAllBackground({ abortStorageMigration = false } = {}) {
     _autoRegenSchedAbort = null;
     ledgerJudgeController.reset('plugin-disabled');
     ledgerCaptureController.reset('plugin-disabled');
+    invalidateLedgerAutomationQueue();
     if (outlineMode) outlineFeature.chat.load();
 }
 
@@ -2428,6 +2452,7 @@ function abortPortableImportTasks(reason = 'portable-import') {
     dateCoordinator.clear();
     ledgerCaptureController.reset(reason);
     ledgerJudgeController.reset(reason);
+    invalidateLedgerAutomationQueue();
     memory.abortAll(reason);
 }
 
@@ -2588,6 +2613,30 @@ let   ledgerCaptureCounter   = 0;
 // 暗账·判定（刷现状）的一套闸，独立于标注：判定车重算「距今多久」、只让 AI 回该变的那几条。
 let   ledgerLastJudgedMsgId  = -1;
 let   ledgerJudgeCounter     = 0;
+let   ledgerAutomationQueue  = Promise.resolve();
+let   ledgerAutomationEpoch  = 0;
+let   ledgerCaptureQueued    = false;
+let   ledgerJudgeQueued      = false;
+function enqueueLedgerAutomation(task) {
+    const epoch = ledgerAutomationEpoch;
+    const queued = ledgerAutomationQueue.catch(() => {}).then(() => epoch === ledgerAutomationEpoch ? task() : { status: 'cancelled', reason: 'superseded' });
+    ledgerAutomationQueue = queued;
+    return queued;
+}
+function invalidateLedgerAutomationQueue() {
+    ledgerAutomationEpoch++;
+    ledgerAutomationQueue = Promise.resolve();
+    ledgerCaptureQueued = false;
+    ledgerJudgeQueued = false;
+}
+function rewindLedgerAutomationAfterDeletion() {
+    const latest = ledgerLatestAiFloorId();
+    ledgerLastCapturedMsgId = Math.min(ledgerLastCapturedMsgId, latest - 1);
+    ledgerLastJudgedMsgId = Math.min(ledgerLastJudgedMsgId, latest - 1);
+    ledgerCaptureCounter = Math.min(ledgerCaptureCounter, Math.max(0, getLedgerCaptureInterval() - 1));
+    ledgerJudgeCounter = Math.min(ledgerJudgeCounter, Math.max(0, getLedgerJudgeInterval() - 1));
+    invalidateLedgerAutomationQueue();
+}
 
 // 历·API 兜底判定的间隔（缺省/非法 → 3；≥1）。抄 getOutlineJudgeInterval。
 function getAlmanacJudgeInterval() {
@@ -2875,6 +2924,10 @@ function onFabPointerEnd(ev) {
     fabDragState = null;
     const captureTarget = ev.currentTarget;
     if (captureTarget?.hasPointerCapture?.(pointerId)) captureTarget.releasePointerCapture(pointerId);
+}
+
+function bindLinesHistoryUi($linesWrap) {
+    $linesWrap.on('click', '.sp-lines-history', function (e) { e.stopPropagation(); void linesFeature.openHistory(); });
 }
 
 function injectModal() {
@@ -3417,7 +3470,11 @@ function injectModal() {
                                         <div class="sp-settings-section-body">
                                             <label class="sp-mode-opt"><span>每</span><input id="sp-ledger-capture-interval" class="sp-input sp-interval-input" type="number" min="1" max="30" value="${escapeAttr(String(Math.max(1, Math.min(30, Number(getSettings().ledgerCaptureInterval) || 5))))}"><span>条 AI 回复标注一次</span></label>
                                             <label class="sp-mode-opt"><span>每</span><input id="sp-ledger-judge-interval" class="sp-input sp-interval-input" type="number" min="1" max="30" value="${escapeAttr(String(Math.max(1, Math.min(30, Number(getSettings().ledgerJudgeInterval) || 4))))}"><span>条 AI 回复更新一次现状</span></label>
-                                            <p class="sp-cfg-hint">两项节奏均受“刻度 · 自动标注”开关统辖。</p>
+                                            <p class="sp-cfg-group">首次历史溯源范围</p>
+                                            <label class="sp-mode-opt"><input type="radio" name="sp-ledger-history-scope" value="recent" ${getSettings().ledgerHistoryScope !== 'all' && getSettings().ledgerHistoryScope !== 'custom' ? 'checked' : ''}><span>最近</span><input id="sp-ledger-history-limit" class="sp-input sp-interval-input" type="number" min="1" max="500" value="${escapeAttr(String(Math.max(1, Math.min(500, Number(getSettings().ledgerHistoryLimit) || 50))))}"><span>个有效历史角色回复（默认）</span></label>
+                                            <label class="sp-mode-opt"><input type="radio" name="sp-ledger-history-scope" value="all" ${getSettings().ledgerHistoryScope === 'all' ? 'checked' : ''}><span>全部有效历史角色回复</span></label>
+                                            <label class="sp-mode-opt"><input type="radio" name="sp-ledger-history-scope" value="custom" ${getSettings().ledgerHistoryScope === 'custom' ? 'checked' : ''}><span>自定真实楼号</span><input id="sp-ledger-history-start" class="sp-input sp-interval-input" type="number" min="0" value="${escapeAttr(String(Math.max(0, Number(getSettings().ledgerHistoryStartFloor) || 0)))}"><span>至</span><input id="sp-ledger-history-end" class="sp-input sp-interval-input" type="number" min="0" value="${escapeAttr(String(Math.max(0, Number(getSettings().ledgerHistoryEndFloor) || 0)))}"><span>楼</span></label>
+                                            <p class="sp-cfg-hint">范围只用于首次从旧到新查当前候选的来源；包含已隐藏的角色回复，排除用户楼与明确系统提示，每批最多 6 个有效楼。它与上面的自动触发间隔是两回事。</p>
                                         </div>
                                     </details>
                                 </div>
@@ -3658,6 +3715,7 @@ function injectModal() {
     $linesWrap.on('click', '.sp-lines-dashed-add', () => linesFeature.dashed.openDialog());
     $linesWrap.on('click', '.sp-lines-dashed-lock', function () { linesFeature.dashed.toggle($(this).attr('data-id')); });
     $linesWrap.on('click', '.sp-lines-dashed-delete', function () { linesFeature.dashed.remove($(this).attr('data-id')); });
+    bindLinesHistoryUi($linesWrap);
     $in('#sp-body').on('click', '#sp-gen-schedule-now, .sp-refresh-schedule', onRegenClick);
     // 点视图头部 📌：固定/取消固定当前 char（只在 char 视角出现）。名字取按钮 data-name，兜底 charViewName。
     $in('#sp-body').on('click', '.sp-point-pin-char', function () {
@@ -3803,7 +3861,7 @@ function injectModal() {
     $almanac.on('click', '.sp-alm-sheet-btn', function () { almSetSheet($(this).attr('data-sheet')); });
     bindLedgerEvents({
         almanac: $almanac, chat: $('#chat'), $, settings: getSettings, saveSettings: saveSettingsDebounced,
-        capture: { run: runLedgerCaptureStep, abort: () => ledgerCaptureController.abort() },
+        capture: { run: runLedgerCaptureStep, abort: () => ledgerCaptureController.abort(), prepareAbandon: () => ledgerCaptureController.prepareAbandon?.(), abandon: token => ledgerCaptureController.abandon?.(token), confirmAbandon: () => spConfirm({ title: '放弃未确认候选', body: '只会放弃仍未找到可靠来源的候选；已经逐批保存的刻度条目不会删除。', confirmText: '放弃待查', cancelText: '继续保留' }) },
         judge: { run: runLedgerJudgeStep }, captureState: () => ({ busy: ledgerCaptureController.isBusy, controller: ledgerCaptureController.abortController }), actions: ledgerActions,
         render: renderAlmanacPanel,
         refreshInline: () => refreshInlineWindow(true),
@@ -4452,6 +4510,18 @@ function injectModal() {
     $in('#sp-ledger-judge-interval').on('change', function () {
         const n = Math.max(1, Math.min(30, Math.floor(Number(this.value) || 4)));
         getSettings().ledgerJudgeInterval = n; this.value = String(n); saveSettingsDebounced(); ledgerJudgeCounter = 0;
+    });
+    $in('input[name="sp-ledger-history-scope"]').on('change', function () {
+        getSettings().ledgerHistoryScope = ['all', 'custom'].includes(this.value) ? this.value : 'recent'; saveSettingsDebounced();
+    });
+    $in('#sp-ledger-history-limit').on('change', function () {
+        const n = Math.max(1, Math.min(500, Math.floor(Number(this.value) || 50))); getSettings().ledgerHistoryLimit = n; this.value = String(n); saveSettingsDebounced();
+    });
+    $in('#sp-ledger-history-start, #sp-ledger-history-end').on('change', function () {
+        const start = Math.max(0, Math.floor(Number($in('#sp-ledger-history-start').val()) || 0));
+        const end = Math.max(start, Math.floor(Number($in('#sp-ledger-history-end').val()) || start));
+        getSettings().ledgerHistoryStartFloor = start; getSettings().ledgerHistoryEndFloor = end;
+        $in('#sp-ledger-history-start').val(String(start)); $in('#sp-ledger-history-end').val(String(end)); saveSettingsDebounced();
     });
     // 楼内渲染框·主开关：关 → 整框全清、停观察；开 → 重算窗口挂回。三个子开关只在它开时才起效。
     $in('#sp-inline-render-enabled').on('change', function () {
@@ -6194,8 +6264,12 @@ async function buildMessages(ctx, prompt, userName, charName, historyLimit = 3, 
 // ─── Inject ───────────────────────────────────────────────────────────────────
 
 function makeInjectBtn(text) {
-    const id = ++_injectIdSeq;
-    _injectTexts[id] = text;
+    let id = typeof text === 'string' ? _injectIdsByText.get(text) : undefined;
+    if (id === undefined) {
+        id = ++_injectIdSeq;
+        _injectTexts[id] = text;
+        if (typeof text === 'string') _injectIdsByText.set(text, id);
+    }
     return `<button class="sp-inject-btn" data-iid="${id}" title="注入到输入框"><i class="fa-solid fa-arrow-right-to-bracket"></i></button>`;
 }
 
@@ -6989,6 +7063,7 @@ function invalidateLedgerTasksForStoreClear() {
     traceDiagnosticEvent('abort-boundary', { module: 'ledger', chatId: getContext?.()?.chatId ?? null, chatRevision: pointTaskOwners.currentChatRevision(), boundaryEpoch: chatBoundaryEpoch, abortReason: 'store-clear', status: 'dispatch' });
     ledgerCaptureController.reset('store-clear');
     ledgerJudgeController.reset('store-clear');
+    invalidateLedgerAutomationQueue();
     resetLedgerRenderState();
 }
 
@@ -7109,6 +7184,9 @@ function bindStorageHandlers() {
         const before = storageStatus().chatId;
         await loadExternalChat({ force: true });
         if (storageStatus().chatId !== before) return;
+        if (storageStatus().status === 'ready') {
+            linesFeature.reconcileHistoryStorage();
+        }
         renderCurrentChatStorageMode(); renderStorageUsage();
         showToast(storageStatus().status === 'ready' ? '外置构画数据已重新加载' : `重试失败：${storageStatus().error || '后端不可用'}`, null, storageStatus().status !== 'ready');
     });

@@ -17,6 +17,7 @@ export function createInlineFeature(env = {}) {
     let chatRetryTimer = null;
     let initialized = false;
     let delegated = false;
+    let pendingExpandScroll = null;
     const getContext = env.getContext;
     const loadAlmanac = env.loadAlmanac;
     const almTodayAnchor = env.almTodayAnchor;
@@ -129,6 +130,80 @@ export function createInlineFeature(env = {}) {
             catch { summary.focus(); }
         });
     }
+
+    const requestFrame = callback => {
+        if (typeof win?.requestAnimationFrame === 'function') return { type: 'window', id: win.requestAnimationFrame(callback) };
+        if (typeof globalThis.requestAnimationFrame === 'function') return { type: 'global', id: globalThis.requestAnimationFrame(callback) };
+        return { type: 'timer', id: setTimeout(callback, 0) };
+    };
+    const cancelFrame = frame => {
+        if (!frame) return;
+        if (frame.type === 'window') win?.cancelAnimationFrame?.(frame.id);
+        else if (frame.type === 'global') globalThis.cancelAnimationFrame?.(frame.id);
+        else clearTimeout(frame.id);
+    };
+    const cancelExpandScroll = () => {
+        const pending = pendingExpandScroll;
+        if (!pending) return;
+        pendingExpandScroll = null;
+        cancelFrame(pending.frame);
+        for (const type of pending.intentEvents) pending.chat.removeEventListener?.(type, pending.cancelOnIntent, true);
+    };
+    const expandScrollStillCurrent = pending => {
+        if (pendingExpandScroll !== pending || !initialized) return false;
+        if (!pluginEnabled() || getSettings().inlineRenderEnabled === false) return false;
+        if (doc?.querySelector?.('#chat') !== pending.chat) return false;
+        if ((getContext().chatId ?? null) !== pending.chatId) return false;
+        if (pending.details.open !== true || pending.summary.parentElement !== pending.details) return false;
+        if (pending.summary.isConnected === false || !pending.chat.contains?.(pending.summary)) return false;
+        return true;
+    };
+    const runExpandScrollFrame = pending => {
+        pending.frame = null;
+        if (!expandScrollStillCurrent(pending)) { cancelExpandScroll(); return; }
+        const currentTop = Number(pending.summary.getBoundingClientRect?.().top);
+        const scrollTop = Number(pending.chat.scrollTop);
+        const scrollHeight = Number(pending.chat.scrollHeight);
+        const clientHeight = Number(pending.chat.clientHeight);
+        if (![currentTop, scrollTop, scrollHeight, clientHeight].every(Number.isFinite)) { cancelExpandScroll(); return; }
+        const delta = currentTop - pending.top;
+        const maxScroll = Math.max(0, scrollHeight - clientHeight);
+        const nextScroll = Math.min(maxScroll, Math.max(0, scrollTop + delta));
+        if (Math.abs(delta) >= 0.5 && Math.abs(nextScroll - scrollTop) >= 0.5) pending.chat.scrollTop = nextScroll;
+        pending.framesLeft -= 1;
+        if (pending.framesLeft <= 0) cancelExpandScroll();
+        else pending.frame = requestFrame(() => runExpandScrollFrame(pending));
+    };
+    const initExpandScrollDelegation = () => {
+        const selector = '.sp-inline-box.sp-dash > summary, .sp-inline-box.sp-dash > .sp-dash-body > details.sp-dash-region[data-seg] > summary';
+        $(doc).on('click.spinlinescroll', selector, function (event) {
+            cancelExpandScroll();
+            if (event.defaultPrevented || event.isDefaultPrevented?.()) return;
+            if (event.target?.closest?.('a, button, input, select, textarea, [contenteditable], [role="button"]')) return;
+            const summary = this;
+            const details = summary.parentElement;
+            if (!details || details.open === true) return;
+            const chat = doc?.querySelector?.('#chat');
+            if (!chat?.contains?.(summary)) return;
+            const top = Number(summary.getBoundingClientRect?.().top);
+            if (!Number.isFinite(top)) return;
+            const pending = {
+                summary,
+                details,
+                chat,
+                chatId: getContext().chatId ?? null,
+                top,
+                framesLeft: 2,
+                frame: null,
+                intentEvents: ['wheel', 'touchmove', 'pointerdown', 'keydown'],
+                cancelOnIntent: null,
+            };
+            pending.cancelOnIntent = () => { if (pendingExpandScroll === pending) cancelExpandScroll(); };
+            for (const type of pending.intentEvents) chat.addEventListener?.(type, pending.cancelOnIntent, { capture: true, passive: type !== 'keydown' });
+            pendingExpandScroll = pending;
+            pending.frame = requestFrame(() => runExpandScrollFrame(pending));
+        });
+    };
 
     // ═══════════════════════════════════════════════════════════════════════════
     //  楼内仪表盘（今头 + 历/点/线三区·融进一个面板·最新楼全功能 / 历史楼只读）
@@ -415,12 +490,16 @@ export function createInlineFeature(env = {}) {
     const syncRenderedChat = () => {
         const chatId = getContext().chatId ?? null;
         if (chatId === renderedChatId) return;
+        cancelExpandScroll();
         renderedBoxes.clear();
         renderedChatId = chatId;
     };
     const renderedBoxKey = el => `${el.getAttribute('is_user') === 'true' ? 'user' : 'assistant'}:${el.getAttribute('mesid') ?? ''}`;
     const syncRenderedOpen = rendered => {
-        if (rendered?.node && typeof rendered.node.open === 'boolean') rendered.open = rendered.node.open;
+        if (!rendered?.node) return;
+        if (typeof rendered.node.open === 'boolean') rendered.open = rendered.node.open;
+        rendered.regions = Object.fromEntries([...rendered.node.querySelectorAll(':scope > .sp-dash-body > details.sp-dash-region[data-seg]')]
+            .map(region => [region.getAttribute('data-seg'), region.open === true]));
     };
     const releaseRenderedBox = rendered => {
         if (!rendered) return;
@@ -437,6 +516,7 @@ export function createInlineFeature(env = {}) {
         env.removeLegacy?.();
     };
     const clear = () => {
+        cancelExpandScroll();
         syncRenderedChat();
         renderedBoxes.forEach(releaseRenderedBox);
         doc?.querySelectorAll?.('#chat ' + BOX_SELECTOR)?.forEach(el => el.remove());
@@ -479,6 +559,7 @@ export function createInlineFeature(env = {}) {
         return rect.bottom > 0 && rect.top < (win?.innerHeight || doc?.documentElement?.clientHeight || 0);
     };
     const unmount = el => {
+        if (pendingExpandScroll && el?.contains?.(pendingExpandScroll.summary)) cancelExpandScroll();
         syncRenderedChat();
         releaseRenderedBox(renderedBoxes.get(renderedBoxKey(el)));
         el?.querySelectorAll?.(BOX_SELECTOR)?.forEach(box => box.remove());
@@ -520,7 +601,11 @@ export function createInlineFeature(env = {}) {
         const box = holder.firstElementChild;
         if (!box) return;
         if (typeof box.open === 'boolean') box.open = rendered?.open === true;
-        const nextRendered = { node: box, html, isLatest, open: box.open === true };
+        box.querySelectorAll(':scope > .sp-dash-body > details.sp-dash-region[data-seg]').forEach(region => {
+            const seg = region.getAttribute('data-seg');
+            if (Object.hasOwn(rendered?.regions || {}, seg)) region.open = rendered.regions[seg] === true;
+        });
+        const nextRendered = { node: box, html, isLatest, open: box.open === true, regions: rendered?.regions };
         renderedBoxes.set(renderKey, nextRendered);
         box.addEventListener('toggle', () => {
             const current = renderedBoxes.get(renderKey);
@@ -588,7 +673,7 @@ export function createInlineFeature(env = {}) {
         ensureInlineObserver();
         bindChatObserver();
         if (!delegated) {
-            if ($) { initAlmanacStripDelegation(); initScheduleStripDelegation(); initRegionCollapseDelegation(); }
+            if ($) { initAlmanacStripDelegation(); initScheduleStripDelegation(); initRegionCollapseDelegation(); initExpandScrollDelegation(); }
             delegated = true;
         }
     };
@@ -600,7 +685,8 @@ export function createInlineFeature(env = {}) {
         chatObserver = null;
         clearTimer(refreshTimer); clearTimer(chatMutationTimer); clearTimer(chatRetryTimer);
         refreshTimer = chatMutationTimer = chatRetryTimer = null;
-        if ($) $(doc).off('.spalmstrip').off('.spschstrip').off('.spinlineregioncollapse');
+        cancelExpandScroll();
+        if ($) $(doc).off('.spalmstrip').off('.spschstrip').off('.spinlineregioncollapse').off('.spinlinescroll');
         delegated = false;
         clear();
         renderedBoxes.clear();

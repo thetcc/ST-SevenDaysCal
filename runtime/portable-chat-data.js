@@ -75,6 +75,7 @@ function moduleHasContent(id, value) {
     return Object.values(entries).some(item => {
         if (Array.isArray(item)) return item.length > 0;
         if (isObject(item)) {
+            if (id === 'lines' && Array.isArray(item.history) && item.history.some(version => isObject(version) && typeof version.raw === 'string')) return true;
             if (typeof item.raw === 'string') return item.raw.trim().length > 0;
             if (Array.isArray(item.items)) return item.items.length > 0;
             return Object.keys(item).length > 0;

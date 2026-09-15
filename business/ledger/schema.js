@@ -18,7 +18,7 @@ function ledgerProtocolColumns(value) {
 }
 const captureAnchorKind = value => {
     const columns = ledgerProtocolColumns(value);
-    const id = String(columns[0] || '').toUpperCase();
+    const id = String(columns[0] || '').replace(/[\[\]【】]/g, '').trim().toUpperCase();
     const offset = /^(?:C|L)\d+$/.test(id) ? 1 : 0;
     return columns.length >= (offset ? 9 : 8) && columns[offset] ? 'record' : null;
 };
@@ -35,27 +35,29 @@ export function normalizeLedgerSentenceTerminal(value) {
     if (/[。！？.!?…]$/u.test(body)) return text;
     return closing ? `${body}。${closing}` : `${text}。`;
 }
-export function parseLedgerCapture(raw) {
+export function parseLedgerCaptureDetailed(raw) {
     const source = String(raw || '').trim().replace(/^```[^\n]*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
     const s = stripRecordWrappers(source, captureAnchorKind).trim();
-    if (!s || /^无[。.！!]?$/.test(s)) return [];
-    const out = [];
-    for (const line of s.split('\n')) {
+    if (!s || /^无[。.！!]?$/.test(s)) return { records: [], rejected: [], explicitNone: /^无[。.！!]?$/.test(s) };
+    const out = [], rejected = [];
+    for (const [lineIndex, line] of s.split('\n').entries()) {
         const t = line.trim().replace(/^[>#*\-\s]+/, '').replace(/\*+/g, '').trim();
-        if (!t || !/[｜|]/.test(t)) continue;
+        if (!t) continue;
+        const reject = reason => rejected.push({ line: lineIndex + 1, reason });
+        if (!/[｜|]/.test(t)) { reject('format'); continue; }
         const cols = t.split(/[｜|]/).map(x => x.trim());
         const outerPipes = /^[｜|]/.test(t) && /[｜|]$/.test(t);
         if (outerPipes) { cols.shift(); cols.pop(); }
         if (/^(?:事由|候选ID)$/i.test(cols[0] || '') || (cols.length && cols.every(col => /^:?-{3,}:?$/.test(col)))) continue;
-        const candidateId = String(cols[0] || '').trim().toUpperCase();
+        const candidateId = String(cols[0] || '').replace(/[\[\]【】]/g, '').trim().toUpperCase();
         const provenance = /^C\d+$/.test(candidateId);
         const targetId = /^L\d+$/.test(candidateId) ? candidateId : null;
         const offset = (provenance || targetId) ? 1 : 0;
         const minimum = offset ? 9 : 8;
-        if (cols.length < minimum) continue;
-        if (!cols[offset]) continue;
+        if (cols.length < minimum) { reject('format'); continue; }
+        if (!cols[offset]) { reject('gist'); continue; }
         const statusStart = offset + 4;
-        const sourcePattern = /^(?:SET|F\d+[SE])$/i;
+        const sourcePattern = /(?:^|[^A-Z0-9])(?:SET|F\d+[SE])(?:$|[^A-Z0-9])/i;
         const dateShape = value => !value || Boolean(parseDate(value)) || /^\d{1,4}(?:[-/]|月)\d{1,2}(?:日)?$/.test(value);
         const cycleShape = value => !value || /^\d+$/.test(value);
         let sourceIndex = -1;
@@ -64,24 +66,27 @@ export function parseLedgerCapture(raw) {
             if (sourceShape && cycleShape(cols[index - 1]) && dateShape(cols[index - 2])) { sourceIndex = index; break; }
         }
         if (sourceIndex < 0 && cols.length === minimum) sourceIndex = cols.length - 1;
-        const sourceToken = sourceIndex >= 0 && sourcePattern.test(cols[sourceIndex]) ? cols[sourceIndex].toUpperCase() : '';
+        const sourceText = sourceIndex >= 0 ? cols[sourceIndex] : '';
+        const sourceTokens = [...String(sourceText).matchAll(/(?:^|[^A-Z0-9])(SET|F\d+[SE])(?=$|[^A-Z0-9])/gi)].map(match => match[1].toUpperCase());
+        const sourceToken = sourceTokens.length === 1 ? sourceTokens[0] : '';
         const cycleText = sourceIndex >= 0 ? cols[sourceIndex - 1] || '' : '';
         const dueText = sourceIndex >= 0 ? cols[sourceIndex - 2] || '' : '';
         const statusEnd = sourceIndex >= 0 ? sourceIndex - 2 : cols.length;
         const status = cols.slice(offset + 4, statusEnd).join('｜');
-        if (!status) continue;
+        if (!status) { reject('status'); continue; }
         const entry = { 事由: cols[offset], 类型: types.includes(cols[offset + 1]) ? cols[offset + 1] : '持续状态', 牵扯: splitCnList(cols[offset + 2]), 标签: splitCnList(cols[offset + 3]), 现状: normalizeLedgerSentenceTerminal(status) };
         const cycle = /^\d+$/.test(cycleText) ? Number(cycleText) : NaN;
         if (Number.isFinite(cycle) && cycle > 0) entry.周期长度 = cycle;
         const due = parseDate(dueText);
         if (due) entry.到期锚 = { 历日期: due };
-        if (provenance) { entry._candidateId = candidateId; entry._sourceToken = sourceToken; }
-        else if (targetId) { entry._targetId = targetId; entry._sourceToken = sourceToken; }
-        else entry._sourceToken = sourceToken;
+        if (provenance) { entry._candidateId = candidateId; entry._sourceToken = sourceToken; entry._sourceText = sourceText; }
+        else if (targetId) { entry._targetId = targetId; entry._sourceToken = sourceToken; entry._sourceText = sourceText; }
+        else { entry._sourceToken = sourceToken; entry._sourceText = sourceText; }
         out.push(entry);
     }
-    return out;
+    return { records: out, rejected, explicitNone: false };
 }
+export function parseLedgerCapture(raw) { return parseLedgerCaptureDetailed(raw).records; }
 function parseJudgeAction(raw) {
     const text = String(raw || '').replace(/\s+/g, '');
     if (!text) return null;

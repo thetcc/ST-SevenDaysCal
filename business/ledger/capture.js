@@ -30,10 +30,21 @@ export const CAPTURE_FLOORS = 6;
 export const CAPTURE_CONTEXT_FLOORS = 3;
 const NON_NARRATIVE = new Set();
 export function ledgerNarrativeMessage(msg) {
-    if (!msg || msg.is_user || !String(msg.mes || '').trim()) return false;
+    if (!msg || msg.is_user || msg.is_system || msg.is_hidden === true || msg.extra?.is_hidden === true || !String(msg.mes || '').trim()) return false;
     const type = String(msg.extra?.type || '').trim().toLowerCase();
     if (type && NON_NARRATIVE.has(type)) return false;
     if (msg.extra?.uses_system_ui === true && type !== String(env.systemTypes?.NARRATOR || '').toLowerCase()) return false;
+    return true;
+}
+// 历史来源回查与常规近景上下文分开：SillyTavern 的 /hide 复用
+// is_system 标记普通角色楼，不能据此丢掉旧剧情；只排除宿主明确标识的非剧情楼。
+export function ledgerHistoricalNarrativeMessage(msg) {
+    if (!msg || msg.is_user || !String(msg.mes || '').trim()) return false;
+    const type = String(msg.extra?.type || '').trim().toLowerCase();
+    if (type && NON_NARRATIVE.has(type)) return false;
+    const narratorType = String(env.systemTypes?.NARRATOR || '').trim().toLowerCase();
+    if (msg.extra?.uses_system_ui === true && type !== narratorType) return false;
+    if (msg.extra?.isSmallSys === true || Array.isArray(msg.extra?.tool_invocations)) return false;
     return true;
 }
 export function ledgerLatestAiFloorId() {
@@ -55,10 +66,10 @@ export function ledgerFloorDateContext(floor = null) {
     const date = sideClock(clock, 'E').date || sideClock(clock, 'S').date;
     return { floor: floorId, date: date || null };
 }
-export function ledgerAiFloorRecords(limit = null) {
+function ledgerFloorRecords(predicate, limit = null) {
     const chat = env.context().chat || [], floors = [];
     for (let i = 0; i < chat.length; i++) {
-        const msg = chat[i]; if (!ledgerNarrativeMessage(msg)) continue;
+        const msg = chat[i]; if (!predicate(msg)) continue;
         const clock = env.parseClock(msg.mes); const parts = [];
         const start = sideClock(clock, 'S'), end = sideClock(clock, 'E');
         if (start.date) parts.push({ side: 'S', stamp: start.stamp, date: start.date });
@@ -68,6 +79,8 @@ export function ledgerAiFloorRecords(limit = null) {
     const selected = limit == null ? floors : floors.slice(-Math.max(0, limit));
     return selected.map(item => ({ ...item, sources: item.sources.map(source => ({ ...source, content: item.content })) }));
 }
+export function ledgerAiFloorRecords(limit = null) { return ledgerFloorRecords(ledgerNarrativeMessage, limit); }
+export function ledgerHistoricalAiFloorRecords(limit = null) { return ledgerFloorRecords(ledgerHistoricalNarrativeMessage, limit); }
 export const ledgerSourceFloors = (limit = null) => ledgerAiFloorRecords(limit).flatMap(item => item.sources);
 export function ledgerSourceMap(sources) { return new Map((sources || []).map(source => [String(source.token), source])); }
 export function ledgerSourceAnchor(token, sourceMap) {
@@ -202,8 +215,273 @@ export function selectLedgerProvenanceToken(value, batchMap) {
     valid.sort((a, b) => Number(a.source.floor) - Number(b.source.floor) || Number(!a.token.endsWith('S')) - Number(!b.token.endsWith('S')));
     return valid[0]?.token || '';
 }
+const checkpointHash = value => {
+    let hash = 2166136261;
+    for (const ch of JSON.stringify(value)) { hash ^= ch.charCodeAt(0); hash = Math.imul(hash, 16777619); }
+    return `lc-${(hash >>> 0).toString(16)}`;
+};
+const scopeSettings = settings => {
+    const mode = ['all', 'recent', 'custom'].includes(settings?.ledgerHistoryScope) ? settings.ledgerHistoryScope : 'recent';
+    return {
+        mode,
+        limit: Math.max(1, Math.min(500, Math.floor(Number(settings?.ledgerHistoryLimit) || 50))),
+        startFloor: Math.max(0, Math.floor(Number(settings?.ledgerHistoryStartFloor) || 0)),
+        endFloor: Math.max(0, Math.floor(Number(settings?.ledgerHistoryEndFloor) || 999999)),
+    };
+};
+function selectHistoryRecords(records, scope) {
+    const list = Array.isArray(records) ? records : [];
+    if (scope.mode === 'all') return list;
+    if (scope.mode === 'custom') return list.filter(record => record.floor >= scope.startFloor && record.floor <= scope.endFloor);
+    return list.slice(-scope.limit);
+}
+const recordCollectionSignature = records => checkpointHash((records || []).map(record => ({
+    floor: record.floor,
+    signature: checkpointHash(record.signature || ''),
+    identity: record.identity,
+    sources: (record.sources || []).map(source => [source.token, source.fingerprint, source.stamp]),
+})));
+const cleanCandidate = item => {
+    const clean = { ...item };
+    for (const key of ['_sourceToken', '_sourceText', '_candidateId', '_targetId', '_provenanceInvalid']) delete clean[key];
+    return clean;
+};
+const sameCaptureTarget = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+function createPersistentLedgerCaptureController(options) {
+    let busy = false, progress = null, abortController = null;
+    const state = () => options.captureState?.() || { initialized: false, checkpoint: null, ledgerRevision: '' };
+    const current = (ctrl, chatId, owner, travel) => abortController === ctrl && !ctrl.signal.aborted && !travel?.signal?.aborted
+        && env.context().chatId === chatId && sameLedgerOwner(owner, ledgerOwnerIdentity(env.context()));
+    const clear = ctrl => {
+        if (abortController !== ctrl) return;
+        busy = false; progress = null; abortController = null; env.setProgress?.(0, 0, ctrl);
+    };
+    const parse = raw => {
+        if (typeof options.parseCaptureDetailed === 'function') return options.parseCaptureDetailed(raw);
+        const records = options.parseCapture?.(raw) || [];
+        return { records, rejected: [], explicitNone: /^无[。.！!]?$/u.test(String(raw || '').trim()) };
+    };
+    const scopeFromSettings = records => {
+        const requested = scopeSettings(env.settings?.());
+        const selected = selectHistoryRecords(records, requested);
+        return { ...requested, requestedStartFloor: requested.startFloor, requestedEndFloor: requested.endFloor, selectedCount: selected.length, startFloor: selected[0]?.floor ?? requested.startFloor, endFloor: selected.at(-1)?.floor ?? requested.endFloor, signature: recordCollectionSignature(selected) };
+    };
+    const recordsForScope = (records, scope) => records.filter(record => record.floor >= scope.startFloor && record.floor <= scope.endFloor);
+    const stableCheckpoint = checkpoint => {
+        if (!checkpoint || checkpoint.version !== 1 || checkpoint.stage !== 'provenance') return null;
+        const ctx = env.context();
+        if (ctx.chatId !== checkpoint.chatId || String(env.charKey?.(ctx) || '') !== checkpoint.charKey) return null;
+        if (!sameLedgerOwner(checkpoint.owner, ledgerOwnerIdentity(ctx)) || !sameCaptureTarget(env.target?.(), checkpoint.target)) return null;
+        const snapshot = state();
+        if (snapshot.ledgerRevision !== checkpoint.ledgerRevision) return null;
+        const records = recordsForScope(ledgerHistoricalAiFloorRecords(), checkpoint.scope || {});
+        if (records.length !== checkpoint.scope?.selectedCount || recordCollectionSignature(records) !== checkpoint.scope?.signature) return null;
+        return { checkpoint, records };
+    };
+    const save = async ({ additions = [], patches = [], initialized, checkpoint }, owner, expectedRevision) => {
+        if (state().ledgerRevision !== expectedRevision) throw Object.assign(new Error('ledger-baseline-changed'), { phase: 'capture-stale-chat' });
+        return options.applyAtomic({ additions, patches, metaPatch: { initialized, checkpoint } }, owner);
+    };
+    const rejectedError = (diagnostic, reason, diagnosticCode = 'invalid-fields') => {
+        const error = diagnostic.rejected(makeDiagnosticError(diagnosticCode, { phase: 'validation' }), { phase: 'validation', reasonCode: reason });
+        error.ledgerReason = reason;
+        return error;
+    };
+    const run = async (manual = false, travel = null) => {
+        const diagnostic = createGenerationDiagnosticScope('ledger-capture', { background: !manual });
+        if (busy) return { status: 'busy', reason: 'busy' };
+        const ctx = env.context(), charKey = env.charKey?.(ctx);
+        if (!charKey) return { status: 'skipped', reason: 'no-character', feedbackShown: false };
+        const persisted = state();
+        let resumed = stableCheckpoint(persisted.checkpoint);
+        if (persisted.checkpoint && !resumed) return { status: 'failed', reason: 'checkpoint-invalid', feedbackShown: false };
+        if (resumed && !manual) return { status: 'needs-confirmation', reason: 'provenance-resume-manual', feedbackShown: false };
+        const cfg = env.config?.();
+        if (!resumed && (!cfg?.url || !cfg?.key)) return { status: 'failed', reason: 'no-api', feedbackShown: false };
+        const ctrl = new AbortController(); abortController = ctrl; busy = true;
+        const ownerSnapshot = resumed?.checkpoint.owner || ledgerOwnerIdentity(ctx);
+        const chatId = resumed?.checkpoint.chatId || ctx.chatId;
+        const fixedTarget = resumed?.checkpoint.target ?? env.target?.();
+        const owner = { chatId, target: fixedTarget, guard: () => current(ctrl, chatId, ownerSnapshot, travel) };
+        const removeBridge = env.bridge?.(travel?.signal, ctrl) || (() => {});
+        try {
+            const visibleRecords = ledgerAiFloorRecords();
+            const allRecords = ledgerHistoricalAiFloorRecords();
+            let checkpoint = resumed?.checkpoint || null;
+            let historyRecords = resumed?.records || null;
+            if (checkpoint) {
+                const requested = scopeFromSettings(allRecords);
+                const configured = scopeSettings(env.settings?.());
+                const changed = configured.mode !== checkpoint.scope.mode
+                    || (configured.mode === 'recent' && configured.limit !== checkpoint.scope.limit)
+                    || (configured.mode === 'custom' && (configured.startFloor !== checkpoint.scope.requestedStartFloor || configured.endFloor !== checkpoint.scope.requestedEndFloor));
+                if (changed) {
+                    historyRecords = selectHistoryRecords(allRecords, requested);
+                    if (historyRecords.length > CAPTURE_FLOORS) {
+                        const batches = Math.ceil(historyRecords.length / CAPTURE_FLOORS);
+                        const ok = await env.confirm?.({ title: '确认重新选择溯源范围', body: `新范围包含 ${historyRecords.length} 个有效历史角色回复（含已隐藏回复，排除用户与明确系统提示），最多分 ${batches} 批继续查找 ${checkpoint.candidates.length} 个待确认事项。已保存条目不会重跑或删除。`, confirmText: '按新范围继续', cancelText: '保留原进度' });
+                        if (!ok) return { status: 'cancelled', reason: 'confirmation-cancelled' };
+                    }
+                    checkpoint = { ...checkpoint, scope: requested, nextBatchIndex: 0, ledgerRevision: persisted.ledgerRevision };
+                }
+            }
+            const first = !persisted.initialized && !checkpoint;
+            if (!historyRecords) {
+                const scope = scopeFromSettings(allRecords);
+                historyRecords = selectHistoryRecords(allRecords, scope);
+                if (first && historyRecords.length > CAPTURE_FLOORS) {
+                    if (!manual) return { status: 'needs-confirmation', reason: 'historical-confirmation', feedbackShown: false };
+                    const batches = Math.ceil(historyRecords.length / CAPTURE_FLOORS);
+                    const label = scope.mode === 'all' ? '全部历史' : scope.mode === 'custom' ? `楼号 ${scope.startFloor}–${scope.endFloor}` : `最近 ${scope.limit} 个有效历史角色回复`;
+                    const ok = await env.confirm?.({ title: '确认刻度来源溯源', body: `将从${label}中检查 ${historyRecords.length} 个有效历史角色回复（含已隐藏回复，排除用户与明确系统提示），按旧到新分 ${batches} 批查找当前事项在所选范围内的最早来源。首次世界书设定与最近现状仍只读取一次。`, note: '设置里的“每 N 条 AI 回复标注一次”不受影响。', confirmText: '开始', cancelText: '取消' });
+                    if (!ok) return { status: 'cancelled', reason: 'confirmation-cancelled' };
+                }
+            }
+            const captureDate = env.validDate?.(travel?.targetDate, env.calendar?.()) || ledgerFloorDateContext().date || env.today?.();
+            const captureFloor = ledgerFloorDateContext().floor;
+            if (!checkpoint) {
+                const prompt = env.appendTravel?.(buildCapturePrompt(first), travel) || buildCapturePrompt(first);
+                const recentVisible = visibleRecords.slice(-CAPTURE_CONTEXT_FLOORS);
+                let raw;
+                try { raw = await env.callApi(ctx, prompt, cfg, ctx.name1 || '用户', ctx.name2 || '角色', ctrl.signal, CAPTURE_CONTEXT_FLOORS, { ...(travel || {}), noAlmanac: true, ledgerSourceFloors: recentVisible, promptMode: 'mechanical', diagnosticModule: 'ledger-capture', diagnosticSink: diagnostic.sink }); }
+                catch (error) { markLedgerError(error, { phase: 'capture-request' }); throw error; }
+                if (!current(ctrl, chatId, ownerSnapshot, travel)) return { status: 'cancelled', reason: 'source-stale-chat', stale: true };
+                const parsed = parse(raw);
+                if (!parsed.records.length && !parsed.explicitNone) throw rejectedError(diagnostic, 'capture-fields-unusable', 'parse');
+                if (parsed.explicitNone) {
+                    await save({ initialized: true, checkpoint: null }, owner, persisted.ledgerRevision);
+                    diagnostic.accepted({ phase: 'validation', reasonCode: 'capture-explicit-none' }); diagnostic.committed({ reasonCode: 'capture-no-change' });
+                    return { status: 'unchanged', reason: 'no-new-event', ignored: parsed.rejected.length, feedbackShown: false };
+                }
+                const recentMap = ledgerSourceMap(visibleRecords.slice(-CAPTURE_FLOORS).flatMap(record => record.sources || []));
+                const picked = parsed.records.map((item, index) => ({ ...item, _candidateId: `C${index + 1}` }));
+                // 长聊天的首次建立始终遵守用户选择的历史范围。即使范围只有
+                // 1–6 个有效 AI 楼，也不能退回到整段聊天末尾六楼去验来源。
+                const historical = first && allRecords.length > CAPTURE_FLOORS;
+                if (!historical) {
+                    const normalized = picked.map(item => {
+                        const rawSource = item._sourceText || item._sourceToken;
+                        const token = String(item._sourceToken || '').toUpperCase() === 'SET' ? 'SET' : selectLedgerProvenanceToken(rawSource, recentMap);
+                        return { ...item, _sourceToken: token, 起始锚: resolveLedgerStartAnchor({ ...item, _sourceToken: token }, recentMap, [...recentMap.values()]) };
+                    });
+                    const validCandidates = normalized.filter(item => item._sourceToken === 'SET' || (recentMap.has(item._sourceToken) && item.起始锚?.历日期));
+                    if (!validCandidates.length) throw rejectedError(diagnostic, 'capture-source-unmatched');
+                    const plan = planLedgerCapture({ entries: env.listEntries?.({ includeClosed: true }) || [], candidates: validCandidates, sourceMap: recentMap, captureFloor, captureDate, norm: env.normGist });
+                    const result = await save({ additions: plan.additions.map(cleanCandidate), patches: plan.patches, initialized: true, checkpoint: null }, owner, persisted.ledgerRevision);
+                    diagnostic.accepted({ phase: 'validation', reasonCode: plan.additions.length || plan.patches.length ? 'capture-valid' : 'capture-duplicate' }); diagnostic.committed({ reasonCode: plan.additions.length || plan.patches.length ? 'capture-saved' : 'capture-no-change' });
+                    return { status: plan.additions.length || plan.patches.length ? 'updated' : 'unchanged', reason: plan.additions.length || plan.patches.length ? undefined : 'duplicate', added: result.added?.length || 0, patched: result.patched?.length || 0, ignored: parsed.rejected.length + normalized.length - validCandidates.length, feedbackShown: false };
+                }
+                const isSetItem = item => String(item._sourceToken || '').toUpperCase() === 'SET';
+                const setItems = picked.filter(isSetItem).map(item => ({ ...item, _sourceToken: 'SET', 起始锚: { 楼层: null, 历日期: null } }));
+                const pending = picked.filter(item => !isSetItem(item)).map(item => ({ ...item, _sourceToken: '', _sourceText: '' }));
+                const scope = scopeFromSettings(allRecords);
+                const setPlan = planLedgerCapture({ entries: env.listEntries?.({ includeClosed: true }) || [], candidates: setItems, sourceMap: new Map(), captureFloor, captureDate, norm: env.normGist });
+                checkpoint = pending.length ? { version: 1, stage: 'provenance', chatId, charKey: String(charKey), owner: ownerSnapshot, target: fixedTarget, scope, nextBatchIndex: 0, candidates: pending, captureFloor, captureDate, ignored: parsed.rejected.length, ledgerRevision: '@after' } : null;
+                const result = await save({ additions: setPlan.additions.map(cleanCandidate), patches: setPlan.patches, initialized: true, checkpoint }, owner, persisted.ledgerRevision);
+                if (!checkpoint) {
+                    diagnostic.accepted({ phase: 'validation', reasonCode: 'capture-valid' }); diagnostic.committed({ reasonCode: 'capture-saved' });
+                    return { status: result.added?.length || result.patched?.length ? 'updated' : 'unchanged', reason: result.added?.length || result.patched?.length ? undefined : 'duplicate', added: result.added?.length || 0, patched: result.patched?.length || 0, ignored: parsed.rejected.length, feedbackShown: false };
+                }
+                checkpoint = state().checkpoint;
+            }
+            historyRecords = recordsForScope(ledgerHistoricalAiFloorRecords(), checkpoint.scope);
+            const batches = ledgerSourceBatches(historyRecords);
+            let addedTotal = 0, patchedTotal = 0, ignoredTotal = Number(checkpoint.ignored) || 0;
+            progress = { done: checkpoint.nextBatchIndex, total: batches.length }; env.setProgress?.(progress.done, progress.total, ctrl);
+            for (let i = checkpoint.nextBatchIndex; i < batches.length && checkpoint?.candidates?.length; i++) {
+                if (!current(ctrl, chatId, ownerSnapshot, travel)) return { status: 'cancelled', reason: ctrl.signal.aborted ? 'aborted' : 'source-stale-chat', stale: !ctrl.signal.aborted };
+                const batch = batches[i], batchMap = ledgerSourceMap(batch.flatMap(record => record.sources || []));
+                // 本批请求发出前钉住刻度基线。API 等待期间的用户增删改锁
+                // 必须令本批保存失败，不能被请求返回后的新 revision 吸收。
+                const beforeRevision = state().ledgerRevision;
+                const provenanceDiagnostic = createGenerationDiagnosticScope('ledger-provenance', { background: !manual });
+                let raw;
+                try {
+                    const provenanceCfg = env.provenanceConfig?.() || cfg;
+                    raw = await env.callApi(ctx, buildProvenancePrompt(checkpoint.candidates, i + 1, batches.length), provenanceCfg, ctx.name1 || '用户', ctx.name2 || '角色', ctrl.signal, 0, { noAlmanac: true, ledgerSourceFloors: batch, temperature: 0.3, promptMode: 'mechanical', diagnosticModule: 'ledger-provenance', diagnosticSink: provenanceDiagnostic.sink });
+                } catch (error) { markLedgerError(error, { phase: 'source-provenance', batchNo: i + 1, batchTotal: batches.length }); throw error; }
+                if (!current(ctrl, chatId, ownerSnapshot, travel)) return { status: 'cancelled', reason: 'source-stale-chat', stale: true };
+                const parsed = parse(raw), hits = [];
+                if (!parsed.explicitNone) {
+                    for (const item of parsed.records) {
+                        const candidateId = String(item._candidateId || '').replace(/[\[\]【】]/g, '').toUpperCase();
+                        const candidate = checkpoint.candidates.find(value => value._candidateId === candidateId);
+                        const token = selectLedgerProvenanceToken(item._sourceText || item._sourceToken, batchMap);
+                        if (candidate && token) hits.push({ candidate, token, source: batchMap.get(token) });
+                    }
+                    if (!hits.length) {
+                        const tokens = [...String(raw || '').matchAll(/F(\d+)[SE]/gi)].map(match => ({ token: match[0].toUpperCase(), floor: Number(match[1]) }));
+                        const candidateIds = new Set((checkpoint.candidates || []).map(item => item._candidateId));
+                        const hasUsableRecord = parsed.records.some(item => candidateIds.has(String(item._candidateId || '').replace(/[\[\]【】]/g, '').toUpperCase()));
+                        const reason = tokens.some(token => batch.some(record => record.floor === token.floor))
+                            ? 'provenance-date-unreliable'
+                            : tokens.length || hasUsableRecord ? 'provenance-source-unmatched' : 'provenance-fields-unusable';
+                        const error = rejectedError(provenanceDiagnostic, reason);
+                        markLedgerError(error, { phase: 'source-provenance', batchNo: i + 1, batchTotal: batches.length }); throw error;
+                    }
+                }
+                const batchIgnored = parsed.rejected.length + Math.max(0, parsed.records.length - hits.length);
+                ignoredTotal += batchIgnored;
+                const resolvedIds = new Set(hits.map(hit => hit.candidate._candidateId));
+                const resolved = hits.map(hit => ({ ...hit.candidate, _sourceToken: hit.token, 起始锚: resolveLedgerStartAnchor({ ...hit.candidate, _sourceToken: hit.token }, batchMap, [...batchMap.values()]) }));
+                const plan = planLedgerCapture({ entries: env.listEntries?.({ includeClosed: true }) || [], candidates: resolved, sourceMap: batchMap, captureFloor: checkpoint.captureFloor, captureDate: checkpoint.captureDate, norm: env.normGist });
+                const nextCandidates = checkpoint.candidates.filter(item => !resolvedIds.has(item._candidateId));
+                const nextCheckpoint = nextCandidates.length ? { ...checkpoint, nextBatchIndex: i + 1, candidates: nextCandidates, ignored: ignoredTotal, ledgerRevision: '@after' } : null;
+                const result = await save({ additions: plan.additions.map(cleanCandidate), patches: plan.patches, initialized: true, checkpoint: nextCheckpoint }, owner, beforeRevision);
+                addedTotal += result.added?.length || 0; patchedTotal += result.patched?.length || 0;
+                checkpoint = nextCheckpoint ? state().checkpoint : null;
+                provenanceDiagnostic.accepted({ phase: 'validation', reasonCode: parsed.explicitNone ? 'provenance-explicit-none' : 'provenance-valid' }); provenanceDiagnostic.committed({ reasonCode: plan.additions.length || plan.patches.length ? 'provenance-saved' : 'provenance-no-change' });
+                progress = { done: i + 1, total: batches.length }; env.setProgress?.(progress.done, progress.total, ctrl);
+            }
+            if (checkpoint?.candidates?.length) return { status: 'needs-confirmation', reason: 'provenance-range-exhausted', pending: checkpoint.candidates.length, done: checkpoint.nextBatchIndex, totalBatches: batches.length, ignored: ignoredTotal, feedbackShown: false };
+            diagnostic.accepted({ phase: 'validation', reasonCode: 'capture-valid' }); diagnostic.committed({ reasonCode: 'capture-saved' });
+            return { status: addedTotal || patchedTotal ? 'updated' : 'unchanged', reason: addedTotal || patchedTotal ? undefined : 'duplicate', added: addedTotal, patched: patchedTotal, ignored: ignoredTotal, feedbackShown: false };
+        } catch (error) {
+            if (error?.name === 'AbortError' || ctrl.signal.aborted || travel?.signal?.aborted) return { status: 'cancelled', reason: 'aborted', error };
+            if (!sameLedgerOwner(ownerSnapshot, ledgerOwnerIdentity(env.context()))) return { status: 'cancelled', reason: 'source-stale-chat', stale: true, error };
+            markLedgerError(error, { phase: error?.ledgerPhase || error?.phase || 'capture-request' });
+            return { status: 'failed', reason: error?.ledgerReason || error?.ledgerPhase || error?.phase || 'api-failed', error, feedbackShown: false };
+        } finally { clear(ctrl); removeBridge(); }
+    };
+    const prepareAbandon = () => {
+        const persisted = state();
+        if (!persisted.checkpoint) return null;
+        const ctx = env.context();
+        const target = env.target?.();
+        if (ctx.chatId !== persisted.checkpoint.chatId || String(env.charKey?.(ctx) || '') !== persisted.checkpoint.charKey || !sameCaptureTarget(target, persisted.checkpoint.target)) return null;
+        const fixedTarget = target == null ? target : JSON.parse(JSON.stringify(target));
+        return { chatId: ctx.chatId, charKey: String(env.charKey?.(ctx) || ''), target: fixedTarget, owner: ledgerOwnerIdentity(ctx), ledgerRevision: persisted.ledgerRevision, checkpointHash: checkpointHash(persisted.checkpoint) };
+    };
+    const abandon = async token => {
+        if (!token) return { status: 'cancelled', reason: 'abandon-baseline-missing' };
+        const persisted = state(), ctx = env.context(), currentCheckpointHash = persisted.checkpoint ? checkpointHash(persisted.checkpoint) : '';
+        if (!persisted.checkpoint) return { status: 'unchanged', reason: 'checkpoint-absent' };
+        if (ctx.chatId !== token.chatId || String(env.charKey?.(ctx) || '') !== token.charKey || !sameCaptureTarget(env.target?.(), token.target)
+            || !sameLedgerOwner(token.owner, ledgerOwnerIdentity(ctx)) || persisted.ledgerRevision !== token.ledgerRevision || currentCheckpointHash !== token.checkpointHash) {
+            return { status: 'cancelled', reason: 'abandon-baseline-changed' };
+        }
+        const owner = {
+            chatId: token.chatId,
+            target: token.target,
+            guard: () => {
+                const live = state(), liveCtx = env.context(), liveCheckpointHash = live.checkpoint ? checkpointHash(live.checkpoint) : '';
+                return liveCtx.chatId === token.chatId && String(env.charKey?.(liveCtx) || '') === token.charKey
+                    && sameCaptureTarget(env.target?.(), token.target) && sameLedgerOwner(token.owner, ledgerOwnerIdentity(liveCtx))
+                    && live.ledgerRevision === token.ledgerRevision && (!live.checkpoint || liveCheckpointHash === token.checkpointHash);
+            },
+        };
+        try {
+            await save({ initialized: true, checkpoint: null }, owner, token.ledgerRevision);
+            return { status: 'updated' };
+        } catch (error) {
+            return { status: 'failed', reason: error?.ledgerReason || error?.phase || 'capture-save-failed', error };
+        }
+    };
+    return { run, prepareAbandon, abandon, abort(reason = 'manual-abort') { abortController?.abort(reason); }, reset(reason = 'reset') { abortController?.abort(reason); busy = false; progress = null; abortController = null; }, get isBusy() { return busy; }, get progress() { return progress; }, get abortController() { return abortController; }, get status() { return state(); } };
+}
 export function createLedgerCaptureController(options = {}) {
     env = { ...env, ...options };
+    if (typeof options.captureState === 'function' && typeof options.applyAtomic === 'function') return createPersistentLedgerCaptureController(options);
     let busy = false;
     let progress = null;
     let abortController = null;

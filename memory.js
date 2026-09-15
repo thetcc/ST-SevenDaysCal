@@ -152,8 +152,71 @@ export function normalizeTagList(csv) {
     return normalizeTagRules(csv);
 }
 const parseTagList = normalizeTagList;
-const escapeTagName = name => String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const replaceLiteralDoubleBracketBlocks = (text, replacement) => String(text).replace(/\[\[([\s\S]*?)\]\]/g, replacement);
+
+function parseSanitizerTree(text, keepSet, extraSet) {
+    const root = { kind: 'root', children: [] };
+    const stack = [root];
+    const tokenRx = new RegExp(`<\\/?${TAG_NAME_SOURCE}(?:\\s[^>]*)?\\/?>|\\[\\[([\\s\\S]*?)\\]\\]`, 'gu');
+    const pairedCloseRx = new RegExp(`^<\\/${TAG_NAME_SOURCE}\\s*>$`, 'u');
+    let cursor = 0;
+    let match;
+    while ((match = tokenRx.exec(text))) {
+        const parent = stack[stack.length - 1];
+        if (match.index > cursor) parent.children.push(text.slice(cursor, match.index));
+        const token = match[0];
+        if (token.startsWith('[[')) {
+            parent.children.push({
+                kind: 'bracket',
+                name: LITERAL_DOUBLE_BRACKET_RULE,
+                closed: true,
+                children: parseSanitizerTree(match[1], keepSet, extraSet).children,
+            });
+        } else {
+            const closing = token.startsWith('</');
+            const name = new RegExp(`^<\\/?(${TAG_NAME_SOURCE})`, 'u').exec(token)?.[1] || '';
+            if (!closing && !/\/\s*>$/u.test(token)) {
+                const node = { kind: 'xml', name, normalized: name.toLowerCase(), closed: false, children: [] };
+                parent.children.push(node);
+                stack.push(node);
+            } else if (closing && pairedCloseRx.test(token) && stack.length > 1) {
+                const normalized = name.toLowerCase();
+                for (let i = stack.length - 1; i > 0; i--) {
+                    const node = stack[i];
+                    const caseInsensitive = keepSet.has(node.normalized) || extraSet.has(node.normalized);
+                    if ((caseInsensitive && node.normalized === normalized) || (!caseInsensitive && node.name === name)) {
+                        node.closed = true;
+                        stack.length = i;
+                        break;
+                    }
+                }
+            }
+        }
+        cursor = tokenRx.lastIndex;
+    }
+    stack[stack.length - 1].children.push(text.slice(cursor));
+    return root;
+}
+
+function renderSanitizerChildren(children, keepSet, extraSet, rescueOnly = false) {
+    let out = '';
+    for (const child of children) {
+        if (typeof child === 'string') {
+            if (!rescueOnly) out += child;
+            continue;
+        }
+        const kept = child.closed && keepSet.has(child.normalized ?? child.name);
+        if (kept) {
+            out += renderSanitizerChildren(child.children, keepSet, extraSet);
+        } else if (!child.closed) {
+            out += renderSanitizerChildren(child.children, keepSet, extraSet, rescueOnly);
+        } else if (child.kind === 'bracket' && !extraSet.has(child.name) && !rescueOnly) {
+            out += `[[${renderSanitizerChildren(child.children, keepSet, extraSet)}]]`;
+        } else {
+            out += renderSanitizerChildren(child.children, keepSet, extraSet, true);
+        }
+    }
+    return out;
+}
 
 export function stripTags(raw, opts = {}) {
     if (!raw) return '';
@@ -162,66 +225,13 @@ export function stripTags(raw, opts = {}) {
     let s = String(raw);
     // 1. HTML/XML comments
     s = s.replace(/<!--[\s\S]*?-->/g, '');
-    // 2. Extract keep-list blocks into placeholders BEFORE any stripping runs,
-    //    so the default "delete paired tags with content" pass won't nuke them.
-    //    Restored (as bare inner text) at the end.
-    const keepStash = [];
-    for (const name of keep) {
-        if (name === LITERAL_DOUBLE_BRACKET_RULE) {
-            s = replaceLiteralDoubleBracketBlocks(s, (_m, inner) => inner);
-            continue;
-        }
-        const safeName = escapeTagName(name);
-        const rx = new RegExp(`<${safeName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${safeName}\\s*>`, 'giu');
-        s = s.replace(rx, (_m, inner) => {
-            keepStash.push(inner);
-            return ` KEEP${keepStash.length - 1} `;
-        });
-    }
-    // 3. Extra strip list — delete these tags + content entirely (redundant with
-    //    the default pass but explicit for user clarity + future-proofs if we
-    //    ever change the default).
-    for (const name of extra) {
-        if (name === LITERAL_DOUBLE_BRACKET_RULE) {
-            s = replaceLiteralDoubleBracketBlocks(s, '');
-            continue;
-        }
-        const safeName = escapeTagName(name);
-        const rx = new RegExp(`<${safeName}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${safeName}\\s*>`, 'giu');
-        let prev;
-        do { prev = s; s = s.replace(rx, ''); } while (s !== prev);
-    }
-    // 4. Default: delete every remaining paired tag WITH its content.
-    //    Multi-pass to handle nested same-name tags.
-    let prev;
-    do {
-        prev = s;
-        s = s.replace(new RegExp(`<(${TAG_NAME_SOURCE})(?:\\s[^>]*)?>[\\s\\S]*?<\\/\\1\\s*>`, 'gu'), '');
-    } while (s !== prev);
-    // 5. Any remaining self-closing / orphan tags
-    s = s.replace(new RegExp(`<\\/?${TAG_NAME_SOURCE}(?:\\s[^>]*)?\\/?>`, 'gu'), '');
-    // 6. Restore keep-list inner content (bare, no tags)
-    s = s.replace(/ KEEP(\d+) /g, (_m, idx) => keepStash[+idx] ?? '');
-    // XML keep 先于双中括号 keep 时，后者会藏在 stash 内；恢复后再解包一次，
-    // 使两种配置顺序行为一致，也避免把 XML 占位符带进最终文本。
-    if (keep.includes(LITERAL_DOUBLE_BRACKET_RULE)) {
-        s = replaceLiteralDoubleBracketBlocks(s, (_m, inner) => inner);
-    }
-    // 7. Second cleaning pass — restored kept content may itself contain
-    //    noisy tags (e.g. <content><thinking>...</thinking>正文</content>).
-    //    Run the default + orphan strip again. Keep list is NOT re-applied
-    //    here (would re-stash then loop); protection is by design outermost-only.
-    do {
-        prev = s;
-        s = s.replace(new RegExp(`<(${TAG_NAME_SOURCE})(?:\\s[^>]*)?>[\\s\\S]*?<\\/\\1\\s*>`, 'gu'), '');
-    } while (s !== prev);
-    s = s.replace(new RegExp(`<\\/?${TAG_NAME_SOURCE}(?:\\s[^>]*)?\\/?>`, 'gu'), '');
-    // XML keep 块恢复后，其中的显式双中括号噪音仍须清理；同一规则也在
-    // keep 列表时维持既有的“保留优先”合同。
-    if (extra.includes(LITERAL_DOUBLE_BRACKET_RULE) && !keep.includes(LITERAL_DOUBLE_BRACKET_RULE)) {
-        s = replaceLiteralDoubleBracketBlocks(s, '');
-    }
-    // 8. Collapse the whitespace left behind by removed blocks
+    // 2. Parse paired wrappers as a hierarchy. Explicitly kept descendants are
+    //    rescued through stripped ancestors, while noise inside kept text still
+    //    follows the same recursive cleaning rules. Keep-list order is irrelevant.
+    const keepSet = new Set(keep);
+    const extraSet = new Set(extra);
+    s = renderSanitizerChildren(parseSanitizerTree(s, keepSet, extraSet).children, keepSet, extraSet);
+    // 3. Collapse the whitespace left behind by removed blocks
     s = s.replace(/\n{3,}/g, '\n\n').trim();
     return s;
 }

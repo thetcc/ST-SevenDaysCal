@@ -15,6 +15,7 @@ import { linesViewModel } from './render.js';
 import { buildLineInjectText, inlineState } from './inline.js';
 import { chooseSwipeLayer, floorToFinalize, markEditedFloor } from './strategy.js';
 import { renderActionMenu } from '../utils/action-menu.js';
+import { changeCurrentLineStore, freezeLineStore, generatedLineStore, lineStoreMatches, manualLineStore, normalizeLineGeneratedAt, normalizeLineHistory, restoreLineHistoryVersion, retiredLineStore, snapshotLineStore } from './version-history.js';
 
 const LINE_EDGE_COLORS = Object.freeze({
     ordinary: '#6aab8a',
@@ -51,6 +52,8 @@ export function createLinesFeature(env = {}) {
     const swipeStore = env.swipeStore || createSwipeLinesStore({ storage: env.storage });
     const injection = env.injection || (env.injectionEnv && createLinesInjectionController(env.injectionEnv));
     const dashed = env.dashed || (env.dashedEnv && createDashedModule({ ...env.dashedEnv, refreshPanel: () => refreshPanel?.(true), refreshInline: () => syncInline?.() }));
+    let historyBusy = false;
+    let pendingHistoryRestore = null;
     const generation = env.generation || (env.generationEnv && createLinesGenerationController({
         ...env.generationEnv,
         owners,
@@ -65,7 +68,7 @@ export function createLinesFeature(env = {}) {
     }));
     const actions = env.actions || (env.actionsEnv && createLinesActions({
         ...env.actionsEnv,
-        isBusy: () => runtime.busy,
+        isBusy: () => runtime.busy || historyBusy,
         resetCounter: () => { lifecycle.counter = 0; },
         render: raw => renderLines(raw),
         setCached: html => runtime.setHtml(html),
@@ -112,7 +115,7 @@ export function createLinesFeature(env = {}) {
             if (!result.ok) return env.widgetEnv.fail?.(editIdx != null
                 ? result.reason === 'line-target-ambiguous' ? '存在多条无法区分的同名线，请先在「线」中整理后重新生成卡片' : '原线已不存在，请重新生成这张卡片'
                 : '卡片格式不完整，无法应用');
-            env.widgetEnv.write?.(key, { raw: result.raw, ts: Date.now() });
+            env.widgetEnv.write?.(key, manualLineStore(saved, result.raw).value);
             runtime.cache(result.raw);
             refreshPanel?.(true);
             syncInline?.();
@@ -192,8 +195,11 @@ export function createLinesFeature(env = {}) {
     const commitGenerationResult = async (raw, { silent, owner, swipeCtx, travelContext, commitBaseline } = {}) => {
         const chatId = env.chatId?.();
         const key = env.cacheKey?.();
+        const baselineStore = snapshotLineStore(commitBaseline?.store ?? env.readSaved?.() ?? {});
+        const next = generatedLineStore(baselineStore, raw, Date.now());
+        if (!next.changed) return true;
         const writer = env.writeStoreConfirmed || env.writeStore;
-        const stored = await writer?.(key, { raw, ts: Date.now() }, { ownerGuard: () => env.chatId?.() === chatId && (!owner || owners.isCurrent(owner, { chatId, chatRevision: owner.chatRevision })) });
+        const stored = await writer?.(key, next.value, { ownerGuard: () => env.chatId?.() === chatId && (!owner || owners.isCurrent(owner, { chatId, chatRevision: owner.chatRevision })) && (canonicalMatches(baselineStore) || canonicalMatches(next.value)) });
         if (!(stored === true || stored?.ok === true)) return stored || false;
         if (stored?.stale) return { ...stored, ok: true };
         const ui = await runGenerationUiEffect(() => {
@@ -201,7 +207,9 @@ export function createLinesFeature(env = {}) {
             if (swipeCtx?.mesId != null) {
                 const rec = swipeStore.read(chatId, swipeCtx.mesId) || { baseline: swipeCtx.baselineRaw ?? commitBaseline?.raw ?? '', swipes: {}, view: 'user', charName: '' };
                 if (rec.baseline == null) rec.baseline = swipeCtx.baselineRaw ?? commitBaseline?.raw ?? '';
+                if (!rec.baselineMeta) rec.baselineMeta = { generatedAt: normalizeLineGeneratedAt(baselineStore.generatedAt) };
                 rec.swipes[String(swipeCtx.swipeId ?? 0)] = raw;
+                rec.swipeMeta = { ...(rec.swipeMeta || {}), [String(swipeCtx.swipeId ?? 0)]: { generatedAt: next.value.generatedAt } };
                 swipeStore.write(chatId, swipeCtx.mesId, rec);
             }
             if (env.isPanelActive?.()) { refreshPanel(true); if (!silent && env.notifyMode?.() !== 'off') env.toast?.('线已生成'); }
@@ -221,7 +229,8 @@ export function createLinesFeature(env = {}) {
         const hasSaved = typeof env.readSaved === 'function';
         const saved = hasSaved ? (env.readSaved() || {}) : { raw: env.readRaw?.() || '' };
         if (!hasSaved && !String(saved.raw || '')) return true;
-        return !!baseline && String(saved.raw || '') === String(baseline.raw || '') && (!hasSaved || (Number(saved.ts) || null) === (Number(baseline.ts) || null));
+        const expected = baseline?.store ?? baseline;
+        return !!expected && (hasSaved ? lineStoreMatches(saved, expected) : String(saved.raw || '') === String(expected.raw || ''));
     };
     const floorCredentialCurrent = credential => env.chatId?.() === credential?.chatId
         && (credential?.boundaryEpoch === undefined || env.boundaryEpoch?.() === credential.boundaryEpoch);
@@ -232,7 +241,7 @@ export function createLinesFeature(env = {}) {
         const retained = previous.filter(line => line.pin || !TERMINAL_LINE_STAGES.has(line.stage));
         if (retained.length === previous.length) return false;
         const raw = retained.length ? serializeLines(retained) : '';
-        const target = { raw, ts: Date.now() };
+        const target = retiredLineStore(baseline, raw, Date.now()).value;
         const writer = env.writeStoreConfirmed || env.writeStore;
         let stored;
         try {
@@ -260,11 +269,11 @@ export function createLinesFeature(env = {}) {
         const swipeId = Number(swipe.swipeId?.(mesId) ?? 0);
         if (env.isEditing?.()) return;
         const expectedSaved = env.readSaved?.() || env.generationEnv?.readSaved?.() || null;
-        const expectedCanonical = expectedSaved ? { raw: String(expectedSaved.raw || ''), ts: Number(expectedSaved.ts) || null } : (env.readRaw?.() ? { raw: env.readRaw(), ts: null } : null);
+        const expectedCanonical = expectedSaved ? snapshotLineStore(expectedSaved) : (env.readRaw?.() ? { raw: env.readRaw(), ts: null } : null);
         if (!forceRegen && applyStoredSwipe({ chatId, mesId, swipeId, key: swipe.key?.(), writeStore: swipe.writeStore, render: swipe.render, syncInline: swipe.syncInline, expectedCanonical })) return;
         const rec = swipeStore.read(chatId, mesId);
         let baseline = forceRegen ? (env.readSaved?.() || env.generationEnv?.readSaved?.() || (env.readRaw?.() ? { raw: env.readRaw?.(), ts: null } : null)) : rec?.baseline;
-        if (forceRegen && baseline && typeof baseline === 'object') baseline = { raw: String(baseline.raw || ''), ts: Number(baseline.ts) || null };
+        if (forceRegen && baseline && typeof baseline === 'object') baseline = snapshotLineStore(baseline);
         if (forceRegen && !baseline) baseline = null;
         if (baseline == null) return;
         if (runtime.busy) runtime.abort('superseded-owner');
@@ -282,10 +291,10 @@ export function createLinesFeature(env = {}) {
             lifecycle.consumePendingSwipe(mid);
             return false;
         }
-        const saved = env.readSaved?.() || { raw: env.readRaw?.() || '', ts: null };
+        const saved = freezeLineStore(env.readSaved?.() || { raw: env.readRaw?.() || '', ts: null });
         return lifecycle.registerFloor({
             chatId, messageId: mid, type: 'normal', cacheKey: env.cacheKey?.(), boundaryEpoch: env.boundaryEpoch?.(),
-            linesBaseline: Object.freeze({ raw: String(saved.raw || ''), ts: Number(saved.ts) || null }),
+            linesBaseline: saved,
         });
     };
     const onCharacterRendered = async ({ messageId, type, autoSuppressed = false } = {}) => {
@@ -350,8 +359,157 @@ export function createLinesFeature(env = {}) {
     const onToken = () => { if (env.pluginEnabled?.()) lifecycle.markToken(); };
     const onGenerationEnded = ({ stopped = false } = {}) => { if (env.pluginEnabled?.()) { const epoch = env.boundaryEpoch?.(); lifecycle.endGeneration({ stopped }); setTimeout(() => { if (epoch === undefined || env.boundaryEpoch?.() === epoch) env.refreshInlineWindow?.(true); }, 60); } };
     let sheet = 'events';
+    const formatGeneratedAt = value => {
+        const timestamp = normalizeLineGeneratedAt(value);
+        if (timestamp == null) return '生成时间未知';
+        const date = new Date(timestamp);
+        const pad = part => String(part).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+    };
+    const historySummary = raw => {
+        const names = parseLines(raw).map(line => String(line.name || '').trim()).filter(Boolean);
+        const suffix = names.length ? ` · ${names.slice(0, 2).join('、')}${names.length > 2 ? '…' : ''}` : '';
+        return `${names.length} 条线${suffix}`;
+    };
+    const historyChoices = baseline => {
+        const history = normalizeLineHistory(baseline?.history, { excludeRaw: Object.prototype.hasOwnProperty.call(baseline || {}, 'raw') ? String(baseline.raw ?? '') : undefined });
+        const entries = [
+            { value: 'current', current: true, raw: String(baseline?.raw ?? ''), generatedAt: normalizeLineGeneratedAt(baseline?.generatedAt), order: 0 },
+            ...history.map((version, index) => ({ value: `history:${index}`, current: false, historyIndex: index, ...version, order: index + 1 })),
+        ];
+        entries.sort((left, right) => {
+            const leftKnown = left.generatedAt != null; const rightKnown = right.generatedAt != null;
+            if (leftKnown !== rightKnown) return leftKnown ? -1 : 1;
+            if (leftKnown && left.generatedAt !== right.generatedAt) return right.generatedAt - left.generatedAt;
+            return left.order - right.order;
+        });
+        return entries.map(entry => ({ ...entry, label: `${formatGeneratedAt(entry.generatedAt)} · ${entry.current ? '当前' : '旧版'} · ${historySummary(entry.raw)}` }));
+    };
+    const historyBoundaryCurrent = (chatId, boundaryEpoch, baseline) => env.chatId?.() === chatId
+        && (boundaryEpoch === undefined || env.boundaryEpoch?.() === boundaryEpoch)
+        && lineStoreMatches(env.readSaved?.() || {}, baseline);
+    const resyncAfterHistoryFailure = (chatId, boundaryEpoch) => {
+        if (env.chatId?.() !== chatId || (boundaryEpoch !== undefined && env.boundaryEpoch?.() !== boundaryEpoch)) return null;
+        const actual = snapshotLineStore(env.readSaved?.() || {});
+        runtime.cache(String(actual.raw ?? ''));
+        if (env.isPanelActive?.()) refreshPanel(true);
+        syncInline(chatId);
+        return actual;
+    };
+    const historySaveUncertain = result => {
+        if (result?.commitState === 'unknown' || result?.saveResult?.commitState === 'unknown') return true;
+        const state = env.storageStatus?.();
+        return state?.mode === 'external' && (state.pendingCurrent === true || state.status === 'unavailable');
+    };
+    const historyCommitCurrent = (attempt, baseline) => {
+        if (pendingHistoryRestore !== attempt || env.chatId?.() !== attempt.chatId
+            || (attempt.boundaryEpoch !== undefined && env.boundaryEpoch?.() !== attempt.boundaryEpoch)) return false;
+        const state = env.storageStatus?.();
+        if (state?.mode === 'external' && (state.pendingCurrent === true || state.status === 'unavailable')) return true;
+        const actual = env.readSaved?.() || {};
+        return lineStoreMatches(actual, baseline) || lineStoreMatches(actual, attempt.value);
+    };
+    const reconcileHistoryStorage = () => {
+        const chatId = env.chatId?.();
+        const boundaryEpoch = env.boundaryEpoch?.();
+        const actual = snapshotLineStore(env.readSaved?.() || {});
+        const restored = !!pendingHistoryRestore && pendingHistoryRestore.chatId === chatId
+            && (pendingHistoryRestore.boundaryEpoch === undefined || pendingHistoryRestore.boundaryEpoch === boundaryEpoch)
+            && lineStoreMatches(actual, pendingHistoryRestore.value);
+        if (restored) swipeStore.clearAll(chatId);
+        pendingHistoryRestore = null;
+        runtime.cache(String(actual.raw ?? ''));
+        if (env.isPanelActive?.()) refreshPanel(true);
+        syncInline(chatId);
+        return restored;
+    };
+    const openHistory = async () => {
+        const chatId = env.chatId?.();
+        const boundaryEpoch = env.boundaryEpoch?.();
+        const baseline = freezeLineStore(env.readSaved?.() || {});
+        if (!chatId || historyBusy || runtime.busy || actions?.isPreparing?.() || actions?.isEditing?.()) return false;
+        if (!normalizeLineHistory(baseline.history, { excludeRaw: baseline.raw }).length) {
+            env.toast?.('暂无历史版本。线更新且内容变化后，会自动保留上一版。');
+            return false;
+        }
+        historyBusy = true;
+        if (env.isPanelActive?.()) refreshPanel(true);
+        try {
+            const choices = historyChoices(baseline);
+            for (;;) {
+                if (!historyBoundaryCurrent(chatId, boundaryEpoch, baseline)) { env.toast?.('线已变化，请重新打开历史版本', true); return false; }
+                const selectedValue = await env.dialog?.selectOneAsync?.({
+                    title: '线的历史版本',
+                    body: '按现实生成时间从新到旧排列。',
+                    loadChoices: async () => choices.map(({ value, label }) => ({ value, label })),
+                    confirmText: '预览', cancelText: '关闭', emptyText: '暂无可恢复的历史版本',
+                });
+                if (!selectedValue) return false;
+                const selected = choices.find(choice => choice.value === selectedValue);
+                if (!selected) return false;
+                if (!historyBoundaryCurrent(chatId, boundaryEpoch, baseline)) { env.toast?.('线已变化，请重新打开历史版本', true); return false; }
+                const publicRaw = stripInternalLineLines(selected.raw);
+                const decision = await env.dialog?.choose?.({
+                    title: `${selected.current ? '当前版本' : '历史版本'} · ${formatGeneratedAt(selected.generatedAt)}`,
+                    body: publicRaw || '此版本没有线',
+                    note: historySummary(selected.raw),
+                    scrollable: true,
+                    choices: selected.current
+                        ? [{ value: 'back', label: '返回列表' }, { value: 'close', label: '关闭', primary: true }]
+                        : [{ value: 'back', label: '返回列表' }, { value: 'restore', label: '恢复此版', primary: true }],
+                });
+                if (decision === 'back') continue;
+                if (decision !== 'restore' || selected.current) return false;
+                abortGeneration({ restore: false, reason: 'history-restore' });
+                if (!historyBoundaryCurrent(chatId, boundaryEpoch, baseline)) { env.toast?.('线已变化，请重新打开历史版本', true); return false; }
+                const restored = restoreLineHistoryVersion(baseline, selected.historyIndex, Date.now());
+                if (!restored.ok) { env.toast?.('这个历史版本已不可用，请重新打开', true); return false; }
+                const writer = env.writeStoreConfirmed || env.writeStore;
+                const attempt = Object.freeze({ chatId, boundaryEpoch, value: freezeLineStore(restored.value) });
+                pendingHistoryRestore = attempt;
+                let stored;
+                try {
+                    stored = await writer?.(env.cacheKey?.(), restored.value, { ownerGuard: () => historyCommitCurrent(attempt, baseline) });
+                } catch (error) {
+                    const uncertain = historySaveUncertain(error);
+                    if (!uncertain && pendingHistoryRestore === attempt) pendingHistoryRestore = null;
+                    const actual = uncertain ? null : resyncAfterHistoryFailure(chatId, boundaryEpoch);
+                    env.toast?.(uncertain ? '历史版本保存结果未确认，请到存储管理重试并核实当前线' : lineStoreMatches(actual, baseline) ? '历史版本保存失败，当前线没有改变' : '线已变化，历史版本未恢复', true);
+                    return false;
+                }
+                const confirmed = stored === true || (stored?.ok === true && stored?.commitState === 'confirmed');
+                if (!confirmed || stored?.stale || env.chatId?.() !== chatId) {
+                    const uncertain = historySaveUncertain(stored);
+                    if (!uncertain && pendingHistoryRestore === attempt) pendingHistoryRestore = null;
+                    const actual = uncertain ? null : resyncAfterHistoryFailure(chatId, boundaryEpoch);
+                    env.toast?.(uncertain ? '历史版本保存结果未确认，请到存储管理重试并核实当前线' : lineStoreMatches(actual, baseline) ? '历史版本保存失败，当前线没有改变' : '线已变化，历史版本未恢复', true);
+                    return false;
+                }
+                if (pendingHistoryRestore === attempt) pendingHistoryRestore = null;
+                swipeStore.clearAll(chatId);
+                runtime.cache(restored.value.raw);
+                if (env.isPanelActive?.()) refreshPanel(true);
+                syncInline(chatId);
+                env.toast?.('已恢复线的历史版本');
+                return true;
+            }
+        } finally {
+            historyBusy = false;
+            if (env.isPanelActive?.() && env.chatId?.() === chatId && !historySaveUncertain()) refreshPanel(true);
+        }
+    };
+    const historyToolbarState = () => {
+        const hasChat = !!env.chatId?.();
+        const current = env.readSaved?.() || {};
+        const historyCount = normalizeLineHistory(current.history, { excludeRaw: Object.prototype.hasOwnProperty.call(current, 'raw') ? String(current.raw ?? '') : undefined }).length;
+        const busy = !!(historyBusy || runtime.busy || actions?.isPreparing?.() || actions?.isEditing?.());
+        return {
+            historyDisabled: !hasChat || busy,
+            historyTitle: !hasChat ? '当前没有聊天' : busy ? '线正在处理中，暂不能查看历史' : historyCount ? `查看 ${historyCount} 个历史版本` : '暂无可恢复的历史版本',
+        };
+    };
     const renderBody = body => {
-        env.renderPanelDom?.({ toolbar: dashed?.toolbarHtml?.({ onEvents: sheet === 'events', lineBusy: runtime.busy ? ' sp-refresh-busy' : '', generationBusy: runtime.busy }), body: sheet === 'dashed' ? dashed?.panelHtml?.() : String(body || '') });
+        env.renderPanelDom?.({ toolbar: dashed?.toolbarHtml?.({ onEvents: sheet === 'events', lineBusy: runtime.busy ? ' sp-refresh-busy' : '', generationBusy: runtime.busy, ...historyToolbarState() }), body: sheet === 'dashed' ? dashed?.panelHtml?.() : String(body || '') });
     };
     const refreshPanel = (force = false) => {
         const raw = env.readRaw?.() || '';
@@ -364,14 +522,18 @@ export function createLinesFeature(env = {}) {
         if (env.isEditing?.()) return false;
         const rec = swipeStore.read(chatId, mesId);
         const hit = rec?.swipes?.[String(swipeId)];
-        if (hit == null || !key || typeof writeStore !== 'function' || !rec?.baseline) return false;
+        if (hit == null || !key || typeof writeStore !== 'function' || rec?.baseline == null) return false;
         const hasSaved = typeof env.readSaved === 'function' || typeof env.generationEnv?.readSaved === 'function';
         const saved = typeof env.readSaved === 'function' ? (env.readSaved() || {}) : (env.generationEnv?.readSaved?.() || {});
-        const current = hasSaved ? { raw: String(saved.raw || ''), ts: Number(saved.ts) || null } : { raw: env.readRaw?.() || '', ts: null };
+        const current = hasSaved ? snapshotLineStore(saved) : { raw: env.readRaw?.() || '', ts: null };
         if (expectedCanonical && (current.raw !== String(expectedCanonical.raw || '') || (expectedCanonical.ts != null && current.ts !== expectedCanonical.ts))) return false;
         if (hasSaved && ![rec.baseline, ...Object.values(rec.swipes || {})].includes(current.raw)) return false;
         if (!hasSaved && current.raw && ![rec.baseline, ...Object.values(rec.swipes || {})].includes(current.raw)) return false;
-        writeStore(key, { raw: hit, ts: Date.now() });
+        const targetGeneratedAt = hit === rec.baseline
+            ? normalizeLineGeneratedAt(rec.baselineMeta?.generatedAt)
+            : normalizeLineGeneratedAt(rec.swipeMeta?.[String(swipeId)]?.generatedAt);
+        const target = changeCurrentLineStore(current, hit, { now: Date.now(), generatedAt: targetGeneratedAt, archiveCurrent: current.raw !== hit }).value;
+        writeStore(key, target);
         runtime.cache(hit);
         render?.(hit);
         syncInline?.(chatId);
@@ -394,6 +556,9 @@ export function createLinesFeature(env = {}) {
         generate: (...args) => actions?.reroll?.(...args),
         advance: (...args) => actions?.advance?.(...args),
         reroll: (...args) => actions?.reroll?.(...args),
+        openHistory,
+        isHistoryBusy: () => historyBusy,
+        reconcileHistoryStorage,
         deleteLine: (...args) => actions?.delete?.(...args),
         togglePin: (...args) => actions?.pin?.(...args),
         get sheet() { return sheet; },
@@ -403,7 +568,7 @@ export function createLinesFeature(env = {}) {
         isStreaming: () => Date.now() < lifecycle.streamUntil,
         resetCounter: () => { lifecycle.counter = 0; },
         setLastDay: value => { lifecycle.lastDay = value; },
-        onChatChanged: ({ lastSeen = -1 } = {}) => { actions?.invalidatePreflight?.('chat-boundary'); abortGeneration({ restore: false, reason: 'chat-boundary' }); lifecycle.resetChat({ lastSeen, lastDay: env.dayAnchor?.() ?? null }); return env.onChatChanged?.({ lastSeen }); },
+        onChatChanged: ({ lastSeen = -1 } = {}) => { pendingHistoryRestore = null; actions?.invalidatePreflight?.('chat-boundary'); abortGeneration({ restore: false, reason: 'chat-boundary' }); lifecycle.resetChat({ lastSeen, lastDay: env.dayAnchor?.() ?? null }); return env.onChatChanged?.({ lastSeen }); },
         renderBody,
         refreshPanel,
     };

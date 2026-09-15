@@ -33,7 +33,7 @@ const SCHEMA_VERSION = 1;
 const TYPES  = ['持续状态', '约定待办', '周期'];
 const STATES = ['活跃', '已了结'];
 let fixedMetadataPersistence = null;
-const cloneState = value => JSON.parse(JSON.stringify(value));
+const cloneState = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 import { reconcileStateAtomic as reconcileStateAtomicCore, handleUnknownPersistence } from './repository-transaction.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -43,6 +43,13 @@ import { reconcileStateAtomic as reconcileStateAtomicCore, handleUnknownPersiste
 function freshMeta() {
     return { version: SCHEMA_VERSION, entries: [], seq: 0 };
 }
+const ledgerRevision = value => {
+    let hash = 2166136261;
+    for (const ch of JSON.stringify({ entries: value?.entries || [], seq: Number(value?.seq) || 0 })) {
+        hash ^= ch.charCodeAt(0); hash = Math.imul(hash, 16777619);
+    }
+    return `ls-${(hash >>> 0).toString(16)}`;
+};
 
 // 取当前 chat 的 sp-ledger。无 chat 返回 null。
 // create=false（读路径）：不存在就返回 null，**绝不实例化**——否则「读一下」就往 chatMetadata
@@ -170,6 +177,19 @@ export function getEntry(id) {
     return m.entries.find(e => e.id === id) || null;
 }
 
+// 捕获控制器只读取最小的持久任务状态。老档已有条目或 seq>0 视为曾经初始化过，
+// 等下一次合法写入再补 initialized 标记，不为兼容迁移单独写盘。
+export function captureStateFromRoot(m) {
+    if (!m) return { initialized: false, explicitInitialized: false, checkpoint: null, ledgerRevision: ledgerRevision(null) };
+    return {
+        initialized: m.initialized === true || m.entries.length > 0 || Number(m.seq) > 0,
+        explicitInitialized: m.initialized === true,
+        checkpoint: m.provenanceCheckpoint && typeof m.provenanceCheckpoint === 'object' ? cloneState(m.provenanceCheckpoint) : null,
+        ledgerRevision: ledgerRevision(m),
+    };
+}
+export function getCaptureState() { return captureStateFromRoot(ledger()); }
+
 // 打点入库。返回补全后的条目（含分配的 id）；无 chat 返回 null。
 export function addEntry(obj) {
     const m = ledger(true);
@@ -209,12 +229,38 @@ export async function addEntriesAtomic(items) {
 }
 
 // 捕获专用一次保存：新增与现有条目 patch 同事务，任一步失败都恢复内存。
-export async function applyCapturePlanAtomic({ additions = [], patches = [] } = {}, owner = null, runtime = null) {
+export async function applyCapturePlanAtomic({ additions = [], patches = [], metaPatch = null } = {}, owner = null, runtime = null) {
     const m = runtime?.state || ledger(true); if (!m) return { added: [], patched: [] };
     const ctx = runtime?.context || getContext?.(); const readContext = runtime?.contextReader || getContext; const persist = runtime?.save || ((bound, options) => persistAwaitable(bound, options));
     const guard = () => !owner || (readContext?.()?.chatId === owner.chatId && (owner.guard ? owner.guard() : true));
     if (!guard()) throw Object.assign(new Error('capture-stale-chat'), { phase: 'capture-stale-chat' });
-    const before = cloneState({ entries: m.entries, seq: m.seq });
+    const before = cloneState(m);
+    let planned = null;
+    const addedIds = new Set();
+    const patchedBefore = new Map();
+    const metaBefore = Object.fromEntries(['initialized', 'provenanceCheckpoint'].map(key => [key, { had: Object.prototype.hasOwnProperty.call(before, key), value: cloneState(before[key]) }]));
+    const restore = () => {
+        // 只撤销仍等于本事务计划值的字段；持久化等待期间用户的新编辑/锁定/新增不得被整根快照吞掉。
+        if (!planned) return;
+        m.entries = (m.entries || []).filter(entry => {
+            if (!addedIds.has(entry?.id)) return true;
+            const expected = planned.entries.find(item => item.id === entry.id);
+            return JSON.stringify(entry) !== JSON.stringify(expected);
+        });
+        for (const [id, fields] of patchedBefore) {
+            const entry = m.entries.find(item => item.id === id), expected = planned.entries.find(item => item.id === id);
+            if (!entry || !expected) continue;
+            for (const [key, old] of Object.entries(fields)) {
+                if (JSON.stringify(entry[key]) !== JSON.stringify(expected[key])) continue;
+                if (old.had) entry[key] = cloneState(old.value); else delete entry[key];
+            }
+        }
+        for (const key of ['initialized', 'provenanceCheckpoint']) {
+            if (JSON.stringify(m[key]) !== JSON.stringify(planned[key]) || Object.prototype.hasOwnProperty.call(m, key) !== Object.prototype.hasOwnProperty.call(planned, key)) continue;
+            if (metaBefore[key].had) m[key] = cloneState(metaBefore[key].value); else delete m[key];
+        }
+        if (m.seq === planned.seq && !(m.entries || []).some(entry => /^L\d+$/.test(String(entry?.id || '')) && Number(entry.id.slice(1)) > before.seq)) m.seq = before.seq;
+    };
     try {
         if (!validLedgerIdentity(m.entries, m.seq)) throw Object.assign(new Error('capture-state-invalid'), { phase: 'capture-state-invalid' });
         const applied = [];
@@ -236,25 +282,40 @@ export async function applyCapturePlanAtomic({ additions = [], patches = [] } = 
             if (!entry || entry.状态 === '已了结' || entry.锁 === '用户锁' || ['来源已删除', '待确认'].includes(String(entry.来源状态 || ''))) continue;
             const patch = change.patch || {};
             if (patch._sourceToken && !/^F\d+[SE]$/i.test(String(patch._sourceToken))) continue;
-            for (const key of ['现状', '现状锚', '牵扯', '标签', '到期锚', '周期长度']) if (Object.prototype.hasOwnProperty.call(patch, key) && patch[key] !== undefined) entry[key] = patch[key];
+            const old = {};
+            for (const key of ['现状', '现状锚', '牵扯', '标签', '到期锚', '周期长度']) if (Object.prototype.hasOwnProperty.call(patch, key) && patch[key] !== undefined) { old[key] = { had: Object.prototype.hasOwnProperty.call(entry, key), value: cloneState(entry[key]) }; entry[key] = patch[key]; }
+            if (Object.keys(old).length) patchedBefore.set(entry.id, old);
             applied.push(entry.id);
         }
         m.entries.push(...added);
+        added.forEach(entry => addedIds.add(entry.id));
+        if (metaPatch && typeof metaPatch === 'object') {
+            if (Object.prototype.hasOwnProperty.call(metaPatch, 'initialized')) {
+                if (metaPatch.initialized === true) m.initialized = true;
+                else delete m.initialized;
+            }
+            if (Object.prototype.hasOwnProperty.call(metaPatch, 'checkpoint')) {
+                if (metaPatch.checkpoint && typeof metaPatch.checkpoint === 'object') m.provenanceCheckpoint = cloneState(metaPatch.checkpoint);
+                else delete m.provenanceCheckpoint;
+            }
+        }
+        if (m.provenanceCheckpoint?.ledgerRevision === '@after') m.provenanceCheckpoint.ledgerRevision = ledgerRevision(m);
+        planned = cloneState(m);
         if (!validLedgerIdentity(m.entries, m.seq) || (before.entries.length > 0 && m.entries.length < before.entries.length)) throw Object.assign(new Error('capture-plan-invalid'), { phase: 'capture-state-invalid' });
         if (!guard()) throw Object.assign(new Error('capture-stale-chat'), { phase: 'capture-stale-chat' });
         const saved = await persist(ctx, { ownerGuard: guard, target: owner?.target });
-        if (saved?.commitState === 'unknown') await handleUnknownPersistence(saved, () => { m.entries = before.entries; m.seq = before.seq; }, () => persist(ctx, { compensate: true, target: owner?.target }));
+        if (saved?.commitState === 'unknown') await handleUnknownPersistence(saved, restore, () => persist(ctx, { compensate: true, target: owner?.target }));
         if (saved && saved.ok === false) throw Object.assign(new Error(saved.reason || 'capture-save-failed'), { phase: 'capture-save-failed', saveResult: saved });
-        if (!validLedgerIdentity(m.entries, m.seq) || (before.entries.length > 0 && m.entries.length < before.entries.length)) await compensateOrFail(persist, ctx, owner?.target, before, () => { m.entries = before.entries; m.seq = before.seq; }, Object.assign(new Error('capture-state-invalid'), { phase: 'capture-state-invalid' }));
+        if (!validLedgerIdentity(m.entries, m.seq) || (before.entries.length > 0 && m.entries.length < before.entries.length) || JSON.stringify(m) !== JSON.stringify(planned)) await compensateOrFail(persist, ctx, owner?.target, before, restore, Object.assign(new Error('capture-state-invalid'), { phase: 'capture-state-invalid' }));
         if (!guard()) {
             if (saved?.commitState === 'legacy-unconfirmed') {
-                m.entries = before.entries; m.seq = before.seq;
+                restore();
                 throw Object.assign(new Error('capture-stale-chat'), { phase: 'capture-stale-chat', saveResult: saved });
             }
-            await compensateOrFail(persist, ctx, owner?.target, before, () => { m.entries = before.entries; m.seq = before.seq; }, Object.assign(new Error('capture-stale-chat'), { phase: 'capture-stale-chat' }));
+            await compensateOrFail(persist, ctx, owner?.target, before, restore, Object.assign(new Error('capture-stale-chat'), { phase: 'capture-stale-chat' }));
         }
-        return { added, patched: applied.map(id => ({ id })) };
-    } catch (error) { m.entries = before.entries; m.seq = before.seq; throw error; }
+        return { added, patched: applied.map(id => ({ id })), ledgerRevision: ledgerRevision(m) };
+    } catch (error) { restore(); throw error; }
 }
 
 export async function reconcileEntriesAtomic(sources, chatLength, owner = null, runtime = null) {

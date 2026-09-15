@@ -66,6 +66,10 @@ export const DEFAULT_SETTINGS = {
     ledgerCaptureEnabled : false, // 暗账标注：默认关
     ledgerCaptureInterval: 5,     // 标注节奏：每几条 AI 回复捞一次新事件
     ledgerJudgeInterval  : 4,     // 判定节奏：每几条 AI 回复重算一次现状（与标注同受 ledgerCaptureEnabled 总闸）
+    ledgerHistoryScope   : 'recent', // 首次来源溯源范围：all / recent / custom
+    ledgerHistoryLimit   : 50,       // recent 模式读取的有效可见 AI 楼数量
+    ledgerHistoryStartFloor: 0,      // custom 模式真实楼号（含）
+    ledgerHistoryEndFloor  : 999999, // custom 模式真实楼号（含）
     ledgerInject         : false, // 暗历潜伏注入主楼 AI：默认关（opt-in，多一路注入+略增 token，照 linesInject/outlineInject 的克制）
     // Memory system
     memoryEnabled  : true,
