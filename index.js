@@ -49,6 +49,7 @@ import {
     abortMigration,
     bindExternalChatStorage,
     buildCurrentChatDiagnosticPackage,
+    commitNativeMetadataRoots,
     getChatRoot,
     isExternalMode,
     isExternalReady,
@@ -6798,23 +6799,37 @@ function mountPortableImportOverlay() {
     };
 }
 
-async function commitPortableImport({ identity, originalRoots, portablePackage, selectedModules }) {
-    if (!storageChatStillCurrent(identity)) return { ok: false, reason: 'chat-changed', commitState: 'not-dispatched' };
+async function commitPortableImport({ identity, originalRoots, portablePackage, selectedModules, boundary = captureChatBoundary() }) {
+    const importStillCurrent = () => storageChatStillCurrent(identity) && isCurrentChatBoundary(boundary);
+    if (!importStillCurrent()) return { ok: false, reason: 'chat-changed', commitState: 'not-dispatched' };
     const originalPlan = createPortableImportPlan({ roots: originalRoots, portablePackage, selectedModules, targetChatId: identity.chatId });
     if (!originalPlan.ok) return originalPlan;
     if (isExternalMode()) {
         return replaceExternalRootsAtomic({
             expectedRoots: originalPlan.expectedRoots,
             replacementRoots: originalPlan.replacementRoots,
-            ownerGuard: () => storageChatStillCurrent(identity),
+            ownerGuard: importStillCurrent,
         });
     }
-    if (!portableMetadataSaver.supported) return { ok: false, reason: portableMetadataSaver.reason || 'fixed-saver-unavailable', commitState: 'not-dispatched' };
+    if (!portableMetadataSaver.supported) {
+        const saved = await commitNativeMetadataRoots({
+            ownerGuard: importStillCurrent,
+            prepareMetadata: freshMetadata => rebasePortableImportPlan({
+                originalRoots,
+                freshRoots: { 'sp-store': portableClone(freshMetadata['sp-store']), 'sp-theater': portableClone(freshMetadata['sp-theater']) },
+                portablePackage, selectedModules, targetChatId: identity.chatId,
+            }),
+        });
+        if (saved.ok && saved.commitState === 'confirmed' && importStillCurrent()) {
+            for (const [key, value] of Object.entries(saved.replacementRoots)) identity.metadata[key] = portableClone(value);
+        }
+        return saved;
+    }
     const target = getLedgerTarget();
     let freshMetadata;
     try { freshMetadata = portableClone(scriptCore.getChatMetadataSnapshot(target)); }
     catch { return { ok: false, reason: 'metadata-snapshot-unavailable', commitState: 'not-dispatched' }; }
-    if (!freshMetadata || !storageChatStillCurrent(identity)) return { ok: false, reason: 'chat-changed', commitState: 'not-dispatched' };
+    if (!freshMetadata || !importStillCurrent()) return { ok: false, reason: 'chat-changed', commitState: 'not-dispatched' };
     const freshRoots = { 'sp-store': portableClone(freshMetadata['sp-store']), 'sp-theater': portableClone(freshMetadata['sp-theater']) };
     const freshPlan = rebasePortableImportPlan({ originalRoots, freshRoots, portablePackage, selectedModules, targetChatId: identity.chatId });
     if (!freshPlan.ok) return freshPlan;
@@ -6828,14 +6843,14 @@ async function commitPortableImport({ identity, originalRoots, portablePackage, 
         target,
         afterMetadata,
         refresh: scriptCore.refreshChatWriteSnapshotsFromServer,
-        isCurrent: () => storageChatStillCurrent(identity),
+        isCurrent: importStillCurrent,
     });
     if (saved.commitState === 'unknown' && typeof saved.confirm === 'function') {
         const confirmed = await saved.confirm();
         if (confirmed?.confirmed) saved = { ...saved, ok: true, commitState: 'confirmed', confirmedAfterUnknown: true };
         else if (confirmed?.submitted === false) saved = { ...saved, ok: false, commitState: 'not-dispatched', reason: 'confirmed-not-submitted' };
     }
-    if (saved.ok && saved.commitState === 'confirmed' && storageChatStillCurrent(identity)) {
+    if (saved.ok && saved.commitState === 'confirmed' && importStillCurrent()) {
         for (const [key, value] of Object.entries(freshPlan.replacementRoots)) identity.metadata[key] = portableClone(value);
     }
     return { ...saved, replacementRoots: freshPlan.replacementRoots };
@@ -6940,7 +6955,7 @@ async function importPortableFile(file, identity) {
         }
     }
     let result;
-    try { result = await commitPortableImport({ identity, originalRoots, portablePackage, selectedModules: picked.values }); }
+    try { result = await commitPortableImport({ identity, originalRoots, portablePackage, selectedModules: picked.values, boundary }); }
     catch (error) { result = { ok: false, reason: 'import-failed', error, commitState: 'not-dispatched' }; }
     if (!importStillCurrent()) { overlay.close(); return; }
     if (result.ok && result.commitState === 'confirmed') {

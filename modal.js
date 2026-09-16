@@ -312,7 +312,7 @@ export function createDialogManager({ $, mount, getRootClass = () => '', subscri
             let choices = [];
             let selected = '';
             const $overlay = $(`<div id="${OVERLAY_ID}" class="sp-dialog-overlay">
-                <div class="sp-dialog-sheet" role="dialog" aria-modal="true" aria-labelledby="sp-dialog-title">
+                <div class="sp-dialog-sheet sp-dialog-async-sheet" role="dialog" aria-modal="true" aria-labelledby="sp-dialog-title">
                     <div id="sp-dialog-title" class="sp-dialog-head">${escapeHtml(title)}</div>
                     ${body ? `<div class="sp-dialog-body">${escapeHtml(body)}</div>` : ''}
                     <div class="sp-dialog-async-body"></div>

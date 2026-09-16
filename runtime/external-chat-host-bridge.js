@@ -85,6 +85,7 @@ export function createNativeExternalChatHostBridge({ getContext = () => null, fe
     function liveBaselineMatches(target, metadataPatch, rootKeys) {
         const live = context();
         if (!nativeTargetMatchesContext(target, live)) return false;
+        if (metadataPatch?.expectedMetadata && !same(live.chatMetadata, metadataPatch.expectedMetadata)) return false;
         if (!metadataPatch?.expectedRoots) return true;
         if (String(live.chatId || '') !== String(metadataPatch.expectedChatId || '')) return false;
         if (!same(live.chat, metadataPatch.expectedMessages)) return false;
@@ -97,15 +98,34 @@ export function createNativeExternalChatHostBridge({ getContext = () => null, fe
         return operation;
     }
 
-    async function publish({ target, beforeMessages, nextMessages, metadataPatch = null, ownerGuard = () => true, rootKeys = [], markerKey }) {
+    async function publish({ target, beforeMessages, nextMessages, metadataPatch = null, ownerGuard = () => true, rootKeys = [], markerKey, prepareMetadata = null }) {
         return serialized(async () => {
             if (!ownerGuard() || !nativeTargetMatchesContext(target, context())) {
                 return { ok: false, reason: 'reply-changed', dispatched: false, commitState: 'not-dispatched' };
             }
+            const liveMetadata = prepareMetadata ? clone(context()?.chatMetadata) : null;
+            const liveMessages = prepareMetadata ? clone(context()?.chat) : null;
             let baseline;
             try { baseline = await readTarget(target); }
             catch (error) { return { ok: false, reason: error.code || 'host-read-failed', dispatched: false, commitState: 'not-dispatched', error }; }
             if (!baseline.metadata?.integrity) return { ok: false, reason: 'host-snapshot-unavailable', dispatched: false, commitState: 'not-dispatched' };
+            if (prepareMetadata) {
+                // 普通导入不能用服务器旧头部覆盖尚未落盘的第三方 metadata 或正文。
+                if (!same(baseline.metadata, liveMetadata) || !same(baseline.messages, liveMessages)) {
+                    return { ok: false, reason: 'live-baseline-conflict', dispatched: false, commitState: 'conflict' };
+                }
+                const plan = await prepareMetadata(clone(baseline.metadata));
+                if (!plan?.ok) return plan;
+                beforeMessages = baseline.messages;
+                nextMessages = baseline.messages;
+                metadataPatch = {
+                    replacementRoots: clone(plan.replacementRoots),
+                    expectedMetadata: liveMetadata,
+                    expectedRoots: Object.fromEntries(rootKeys.map(key => [key, clone(baseline.metadata[key])])),
+                    expectedMessages: liveMessages,
+                    expectedChatId: target.chatId,
+                };
+            }
             if (!same(baseline.messages, beforeMessages)) return { ok: false, reason: 'host-message-conflict', dispatched: false, commitState: 'conflict' };
             if (metadataPatch?.expectedRoots && rootKeys.some(key => !same(baseline.metadata[key], metadataPatch.expectedRoots[key]))) {
                 return { ok: false, reason: 'host-root-conflict', dispatched: false, commitState: 'conflict' };
@@ -116,17 +136,21 @@ export function createNativeExternalChatHostBridge({ getContext = () => null, fe
 
             const afterMetadata = clone(baseline.metadata);
             if (metadataPatch) {
-                afterMetadata[markerKey] = clone(metadataPatch.marker);
-                for (const key of rootKeys) delete afterMetadata[key];
+                if (metadataPatch.replacementRoots) {
+                    for (const [key, value] of Object.entries(metadataPatch.replacementRoots)) afterMetadata[key] = clone(value);
+                } else {
+                    afterMetadata[markerKey] = clone(metadataPatch.marker);
+                    for (const key of rootKeys) delete afterMetadata[key];
+                }
             }
             const afterHeader = { ...clone(baseline.header), chat_metadata: afterMetadata };
             const afterState = { header: afterHeader, metadata: afterMetadata, messages: clone(nextMessages) };
             if (same(baseline.header, afterHeader) && same(baseline.messages, nextMessages)) {
-                return { ok: true, dispatched: false, commitState: 'confirmed' };
+                return { ok: true, dispatched: false, commitState: 'confirmed', ...(metadataPatch?.replacementRoots ? { replacementRoots: clone(metadataPatch.replacementRoots) } : {}) };
             }
 
-            // Re-read immediately before dispatch so a newer server header or
-            // message set is never overwritten by our full-file fallback.
+            // 发出整文件保存前再核对服务器；原生接口没有原子 CAS，integrity
+            // 也不随每次修改轮换，GET 到 POST 间的普通并发写仍无法保证拒绝。
             let finalBaseline;
             try { finalBaseline = await readTarget(target); }
             catch (error) { return { ok: false, reason: error.code || 'host-read-failed', dispatched: false, commitState: 'not-dispatched', error }; }
@@ -149,7 +173,7 @@ export function createNativeExternalChatHostBridge({ getContext = () => null, fe
             try { readBack = await readTarget(target); }
             catch (error) { readBackError = error; }
             if (readBack && same(readBack.header, afterState.header) && same(readBack.messages, afterState.messages)) {
-                return { ok: true, dispatched: true, commitState: 'confirmed', ...((requestError || !response?.ok) ? { confirmedAfterUnknown: true } : {}) };
+                return { ok: true, dispatched: true, commitState: 'confirmed', ...(metadataPatch?.replacementRoots ? { replacementRoots: clone(metadataPatch.replacementRoots) } : {}), ...((requestError || !response?.ok) ? { confirmedAfterUnknown: true } : {}) };
             }
             if (readBack && same(readBack.header, baseline.header) && same(readBack.messages, baseline.messages)) {
                 const status = Number(response?.status);

@@ -79,6 +79,13 @@ export function bindExternalChatStorage(options = {}) {
     if (typeof options.onChange === 'function') changeListener = options.onChange;
 }
 
+// 普通导入复用原生桥的固定目标与同一写队列，不经过迁移或外置 marker。
+export async function commitNativeMetadataRoots({ prepareMetadata, ownerGuard = () => true } = {}) {
+    const target = binding.nativeHostBridge?.captureTarget?.();
+    if (!target || typeof prepareMetadata !== 'function') return { ok: false, reason: 'missing-chat-target', dispatched: false, commitState: 'not-dispatched' };
+    return binding.nativeHostBridge.publish({ target, prepareMetadata, ownerGuard, rootKeys: ['sp-store', 'sp-theater'] });
+}
+
 // Host-aware modules register the getter they already depend on, keeping this
 // shared helper importable by pure business modules without loading ST itself.
 export function registerExternalStorageContext(getContext) {

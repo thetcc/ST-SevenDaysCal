@@ -3874,7 +3874,17 @@ select.sp-input { appearance: none; cursor: pointer; }
 .sp-dialog-single-option:hover { background: var(--sp-hover-bg); color: var(--sp-on-surface); }
 .sp-dialog-single-selected { background: color-mix(in oklab, var(--sp-primary) 16%, transparent); color: var(--sp-on-surface); }
 .sp-dialog-actions .sp-dialog-button:disabled { opacity: 0.45; cursor: default; }
-.sp-dialog-async-body { min-height: 44px; }
+.sp-dialog-async-sheet {
+    box-sizing: border-box;
+    max-height: calc(100dvh - 40px);
+}
+.sp-dialog-async-sheet > :not(.sp-dialog-async-body) { flex-shrink: 0; }
+.sp-dialog-async-sheet .sp-dialog-async-body {
+    min-height: 0;
+    overflow-y: auto;
+}
+.sp-dialog-async-sheet .sp-dialog-async-loading,
+.sp-dialog-async-sheet .sp-dialog-async-empty { min-height: 44px; }
 .sp-dialog-async-list { grid-template-columns: 1fr; gap: 0; border-top: 1px solid var(--sp-divider); }
 .sp-dialog-async-list .sp-dialog-single-option {
     width        : 100%;
