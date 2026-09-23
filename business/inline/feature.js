@@ -314,7 +314,8 @@ export function createInlineFeature(env = {}) {
         else if ((m = s.match(/(\d{1,2})\s*[时點点]/)))     time = `${+m[1]}时`;
         return { year, month, day, time };
     }
-    // 组窄条「今 …」那截：{ todayHtml(含 .sp-dash-sum-today 壳), timeHtml(时刻尾巴，贴天气后) }。
+    // 组窄条「今 …」那截：自定义历法只信通过当前月序/日数校验的结构化戳；
+    // 越界或无精确日期时回退已确认锚点，不能把 raw/公历数字回退冒充成今天。
     function clockHeadParts(isLatest, a, anchorWd, floorClock = null, calendarOverride = undefined) {
         const renderCalendar = calendarOverride === undefined ? loadCalDesc() : calendarOverride;
         const format = options => formatStoryClockHeadParts({ anchor: a, anchorWeekday: anchorWd, calendar: renderCalendar, monthName: calMonthName, escapeHtml, ...options });
@@ -332,6 +333,10 @@ export function createInlineFeature(env = {}) {
             const weekdayText = clockMeta.weekdayIndex == null ? (anchorWd || '星期未记录') : (ALM_WEEKDAYS[clockMeta.weekdayIndex] || '星期未记录');
             return format({ clockMeta: { ...clockMeta, weekdayText }, tip });
         }
+        const customCalendar = renderCalendar
+            && renderCalendar.kind !== 'gregorian'
+            && renderCalendar.id !== 'default-gregorian';
+        if (customCalendar) return fallback;
         const p = stampDate(stamp);
         if (!p) return format({ rawStamp: stamp, tip });   // 古风/无法解析 → 原样抬
         return format({ stampDate: p, tip });
@@ -426,8 +431,7 @@ export function createInlineFeature(env = {}) {
         let top = '', almStripRow = '';
         if (alm) {
             // 历整块：满宽 summary 头（点它折叠整个历单元）+ [方形今头 + 即将到来清单] 行 + 满宽六格条。
-            // summary 提到顶行上方通栏铺满（原来缩在右列、今头上方左侧留空白）；今头与清单/六格条一起
-            // 挂在 details 内，随历折叠一并收起——原生 <details> 折叠即隐藏，不再需要 :has() 联动隐藏六格条。
+            // summary 占满通栏；今头、清单与六格条一起放入 details，依靠原生折叠同步收起。
             const dashTop  = `<div class="sp-dash-top">${dashMastheadHtml(snap, floorClock, resolvedCalendar, localWeekdayRef)}<div class="sp-inline-body sp-alm-inline-body">${alm.upHtml}</div></div>`;
             const stripRow = alm.stripHtml ? `<div class="sp-alm-strip-region">${alm.stripHtml}</div>` : '';
             top = `<details class="sp-almanac-inline sp-dash-region" data-seg="almanac" open>${alm.summary}${dashTop}${stripRow}${collapseControl('历模块')}</details>`;
