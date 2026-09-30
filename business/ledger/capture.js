@@ -52,26 +52,31 @@ export function ledgerLatestAiFloorId() {
     for (let i = chat.length - 1; i >= 0; i--) if (ledgerNarrativeMessage(chat[i])) return i;
     return -1;
 }
-function sideClock(clock, side) {
+function floorCalendar(floor) { return env.calendarForFloor?.(floor) || null; }
+function parseFloorClock(text, floor) {
+    const calendar = floorCalendar(floor);
+    return { calendar, clock: env.parseClock(text, calendar) };
+}
+function sideClock(clock, side, calendar = null) {
     const meta = side === 'S' ? clock?.startMeta : clock?.endMeta;
     const stamp = side === 'S' ? clock?.start : clock?.end;
-    return { stamp, date: meta?.date || (stamp ? env.parseDate(stamp) : null) };
+    return { stamp, date: meta?.date || (stamp ? env.parseDate(stamp, calendar) : null) };
 }
 export function ledgerFloorDateContext(floor = null) {
     const chat = env.context().chat || [];
     const floorId = Number.isInteger(floor) ? floor : ledgerLatestAiFloorId();
     const message = floorId >= 0 ? chat[floorId] : null;
     if (!message || !ledgerNarrativeMessage(message)) return { floor: null, date: null };
-    const clock = env.parseClock(message.mes || '');
-    const date = sideClock(clock, 'E').date || sideClock(clock, 'S').date;
+    const { calendar, clock } = parseFloorClock(message.mes || '', floorId);
+    const date = sideClock(clock, 'E', calendar).date || sideClock(clock, 'S', calendar).date;
     return { floor: floorId, date: date || null };
 }
 function ledgerFloorRecords(predicate, limit = null) {
     const chat = env.context().chat || [], floors = [];
     for (let i = 0; i < chat.length; i++) {
         const msg = chat[i]; if (!predicate(msg)) continue;
-        const clock = env.parseClock(msg.mes); const parts = [];
-        const start = sideClock(clock, 'S'), end = sideClock(clock, 'E');
+        const { calendar, clock } = parseFloorClock(msg.mes, i); const parts = [];
+        const start = sideClock(clock, 'S', calendar), end = sideClock(clock, 'E', calendar);
         if (start.date) parts.push({ side: 'S', stamp: start.stamp, date: start.date });
         if (end.date) parts.push({ side: 'E', stamp: end.stamp, date: end.date });
     floors.push({ floor: i, signature: String(msg.mes), identity: { is_user: !!msg.is_user, is_system: !!msg.is_system, name: String(msg.name || ''), type: String(msg.extra?.type || '') }, content: env.stripTags(String(msg.mes), env.settings()).trim(), sources: parts.map(part => ({ token: `F${i}${part.side}`, floor: i, date: part.date, stamp: part.stamp, signature: String(msg.mes), fingerprint: ledgerSourceFingerprint(`F${i}${part.side}`, String(msg.mes), { floor: i, date: part.date }), legacyFingerprint: legacyLedgerSourceFingerprint(`F${i}${part.side}`, String(msg.mes)) })) });
@@ -85,12 +90,12 @@ export const ledgerSourceFloors = (limit = null) => ledgerAiFloorRecords(limit).
 export function ledgerSourceMap(sources) { return new Map((sources || []).map(source => [String(source.token), source])); }
 export function ledgerSourceAnchor(token, sourceMap) {
     const key = String(token || '').trim(); if (key === 'SET') return { 楼层: null, 历日期: null }; const source = sourceMap?.get(key); if (!source) return null;
-    const raw = env.context().chat?.[source.floor]?.mes || ''; const clock = env.parseClock(raw); const date = sideClock(clock, source.token.endsWith('S') ? 'S' : 'E').date; return date ? { 楼层: source.floor, 历日期: date } : null;
+    const raw = env.context().chat?.[source.floor]?.mes || ''; const { calendar, clock } = parseFloorClock(raw, source.floor); const date = sideClock(clock, source.token.endsWith('S') ? 'S' : 'E', calendar).date; return date ? { 楼层: source.floor, 历日期: date } : null;
 }
 export function ledgerSourcesStable(sources, chatId) { if (env.context().chatId !== chatId) return false; const chat = env.context().chat || []; return (sources || []).every(source => { const msg = chat[source.floor]; return ledgerNarrativeMessage(msg) && String(msg.mes || '') === source.signature; }); }
 export function ledgerRecordsStable(records, chatId) {
     if (env.context().chatId !== chatId) return false; const chat = env.context().chat || [];
-    return (records || []).every(record => { const msg = chat[record.floor]; if (!ledgerNarrativeMessage(msg) || String(msg.mes || '') !== record.signature) return false; const identity = record.identity || {}; if (!!msg.is_user !== !!identity.is_user || !!msg.is_system !== !!identity.is_system) return false; if (String(msg.name || '') !== String(identity.name || '') || String(msg.extra?.type || '') !== String(identity.type || '')) return false; return (record.sources || []).every(source => { const side = String(source.token || '').endsWith('S') ? 'S' : String(source.token || '').endsWith('E') ? 'E' : ''; if (!side || source.signature !== record.signature) return false; const date = sideClock(env.parseClock(String(msg.mes || '')), side).date; return !!date && date.month === source.date.month && date.day === source.date.day && (date.year == null || source.date.year == null || date.year === source.date.year) && (date.eraLabel == null || source.date.eraLabel == null || date.eraLabel === source.date.eraLabel); }); });
+    return (records || []).every(record => { const msg = chat[record.floor]; if (!ledgerNarrativeMessage(msg) || String(msg.mes || '') !== record.signature) return false; const identity = record.identity || {}; if (!!msg.is_user !== !!identity.is_user || !!msg.is_system !== !!identity.is_system) return false; if (String(msg.name || '') !== String(identity.name || '') || String(msg.extra?.type || '') !== String(identity.type || '')) return false; const { calendar, clock } = parseFloorClock(String(msg.mes || ''), record.floor); return (record.sources || []).every(source => { const side = String(source.token || '').endsWith('S') ? 'S' : String(source.token || '').endsWith('E') ? 'E' : ''; if (!side || source.signature !== record.signature) return false; const date = sideClock(clock, side, calendar).date; return !!date && date.month === source.date.month && date.day === source.date.day && (date.year == null || source.date.year == null || date.year === source.date.year) && (date.eraLabel == null || source.date.eraLabel == null || date.eraLabel === source.date.eraLabel); }); });
 }
 export function ledgerRecordCollectionStable(records, chatId, limit = null) {
     if (!ledgerRecordsStable(records, chatId)) return false;

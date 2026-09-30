@@ -3,6 +3,8 @@ export function validateCalendarDescriptor(raw) {
     const displayStyle = raw?.displayStyle === 'classical' ? 'classical' : 'numeric';
     const era = String(raw?.era || '').trim();
     if (era.length > 24) return { error: '纪年名过长' };
+    const title = String(raw?.title || '').trim();
+    if (title.length > 24) return { error: '历法时间戳名称最多 24 个字' };
     const months = Array.isArray(raw?.months) ? raw.months : [];
     if (!months.length) return { error: '至少需要一个月份' };
     if (months.length > 60) return { error: '月份数量超限' };
@@ -12,5 +14,5 @@ export function validateCalendarDescriptor(raw) {
     const epoch = {};
     for (const key of ['epochYear', 'epochOrdinal', 'epochWeekday']) if (Number.isInteger(raw?.[key])) epoch[key] = raw[key];
     if (raw?.absoluteCycle === true) epoch.absoluteCycle = true;
-    return { value: { kind: raw?.kind === 'gregorian' ? 'gregorian' : 'custom', id: String(raw?.id || 'custom-calendar'), revision: Number.isInteger(raw?.revision) && raw.revision > 0 ? raw.revision : 1, weekdayCycle: Number.isInteger(raw?.weekdayCycle) && raw.weekdayCycle > 0 ? raw.weekdayCycle : 7, era, displayStyle, months: out, ...epoch } };
+    return { value: { kind: raw?.kind === 'gregorian' ? 'gregorian' : 'custom', id: String(raw?.id || 'custom-calendar'), revision: Number.isInteger(raw?.revision) && raw.revision > 0 ? raw.revision : 1, weekdayCycle: Number.isInteger(raw?.weekdayCycle) && raw.weekdayCycle > 0 ? raw.weekdayCycle : 7, era, title, displayStyle, months: out, ...epoch } };
 }

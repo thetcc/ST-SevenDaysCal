@@ -186,7 +186,7 @@ function almItemCoversDoy(it, doy, cal = loadCalDesc()) {
 function getCalDescInjectText() {
     const cal = loadCalDesc();
     const months = cal.months.map((m, i) => `${i + 1}=${m.name}(${m.days}天)`).join('、');
-    return `${cal.era ? '纪年：' + cal.era + '；' : ''}Style: ${cal.displayStyle}；一年 ${calMonthCount(cal)} 个月、共 ${calYearLen(cal)} 天；各月：${months}`;
+    return `${cal.era ? '纪年：' + cal.era + '；' : ''}${cal.title ? '历法时间戳名称：' + cal.title + '；时间戳日期中的年份前须紧接该名称，例如「' + cal.title + '1686年10月4日」；' : ''}Style: ${cal.displayStyle}；一年 ${calMonthCount(cal)} 个月、共 ${calYearLen(cal)} 天；各月：${months}`;
 }
 
 function almMapType(t) {
@@ -296,6 +296,7 @@ function normalizeCalDesc(raw) {
     const revision = Number.isInteger(raw.revision) && raw.revision > 0 ? raw.revision : 1;
     const weekdayCycle = Number.isInteger(raw.weekdayCycle) && raw.weekdayCycle > 0 ? raw.weekdayCycle : 7;
     const era = String(raw.era || '').trim().slice(0, 24);
+    const title = String(raw.title || '').trim().slice(0, 24);
     const months = (Array.isArray(raw.months) ? raw.months : [])
         .slice(0, 60)   // 最多 60 个月，防滥用撑爆
         .map((m, i) => ({
@@ -308,7 +309,7 @@ function normalizeCalDesc(raw) {
     for (const key of ['epochYear', 'epochOrdinal', 'epochWeekday']) if (Number.isInteger(raw[key])) epoch[key] = raw[key];
     if (raw.absoluteCycle === true) epoch.absoluteCycle = true;
     const displayStyle = raw.displayStyle === 'classical' ? 'classical' : 'numeric';
-    return { kind: explicitKind, id, revision, weekdayCycle, era, displayStyle, months, ...epoch };
+    return { kind: explicitKind, id, revision, weekdayCycle, era, title, displayStyle, months, ...epoch };
 }
 
 function saveCalDesc(desc) {
@@ -327,6 +328,7 @@ const DEFAULT_CAL = Object.freeze({
     weekdayCycle: 7,
     displayStyle: 'numeric',
     era   : '',
+    title : '',
     months: Object.freeze(ALM_DAYS_IN_MONTH.map((d, i) => Object.freeze({ name: `${i + 1}月`, days: d }))),
 });
 
@@ -344,6 +346,7 @@ function calHasEra(cal)      { return !!String(_cal(cal).era || '').trim(); }
 
 const CALENDAR_LIMITS = Object.freeze({
     eraNameLength: 24,
+    titleNameLength: 24,
     monthNameLength: 12,
     monthCount: 60,
     monthDaysMin: 1,
@@ -365,6 +368,7 @@ function cloneCalDesc(cal) {
         revision: Number.isInteger(src.revision) && src.revision > 0 ? src.revision : 1,
         weekdayCycle: Number.isInteger(src.weekdayCycle) && src.weekdayCycle > 0 ? src.weekdayCycle : 7,
         era: String(src.era || ''),
+        title: String(src.title || ''),
         displayStyle: src.displayStyle === 'classical' ? 'classical' : 'numeric',
         months: (src.months || []).map(month => ({ name: String(month.name), days: Number(month.days) })),
         ...epoch,
@@ -424,6 +428,7 @@ function saveCalendarTemplates(list) {
         epochWeekday: item.epochWeekday,
         absoluteCycle: item.absoluteCycle,
         era: item.era,
+        title: item.title,
         months: item.months.map(month => ({ name: month.name, days: month.days })),
         createdAt: item.createdAt,
         updatedAt: item.updatedAt,

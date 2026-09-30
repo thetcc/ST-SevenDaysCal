@@ -191,7 +191,8 @@ export function createSpaceContext(env = {}) {
             ? ''
             : (includesAny(message, LEDGER_READ_KEYWORDS) ? env.readLedgerText?.(target) || '' : '');
         const faqText = intent.faq ? buildSpaceHelpText(env.settings?.() || {}) : '';
-        const wiContext = await env.readWorldInfo?.(ctx) || '';
+        // 旧问答只辅助确认群体回指，不进入宿主扫描或世界书标题触发文本。
+        const wiContext = await env.readWorldInfo?.(ctx, message, historySnapshot.slice(0, -1)) || '';
         const memText = await env.readMemory?.(ctx) || '';
         const recentCtx = await env.readRecent?.(ctx) || '';
         const { personaDesc = '', authorNote = '' } = env.readCardExtras?.(ctx) || {};

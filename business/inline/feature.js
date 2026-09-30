@@ -252,7 +252,9 @@ export function createInlineFeature(env = {}) {
     function dashMastheadHtml(snap, floorClock = null, calendarOverride = undefined, weekdayRefOverride = undefined) {
         let anchor = dashAnchor(snap);
         if (storyClockEnabled() && floorClock) {
-            const floorDate = parseJudgedDate(floorClock.end) || parseJudgedDate(floorClock.start);
+            // 历史楼的结构化日期已按该楼快照历法校验，优先沿用，避免当前历法误判后退回快照锚点。
+            const parsedDate = floorClock.endMeta?.date || floorClock.startMeta?.date;
+            const floorDate = parsedDate || parseJudgedDate(floorClock.end, calendarOverride) || parseJudgedDate(floorClock.start, calendarOverride);
             if (floorDate) anchor = floorDate;
         }
         const cal = calendarOverride === undefined ? loadCalDesc() : calendarOverride;
@@ -584,8 +586,9 @@ export function createInlineFeature(env = {}) {
             if (!snap) { unmount(el); return; }
         }
         const floor = Number(mid);
-        const floorClock = !isLatest && !isUser ? env.parseStoryClock?.(env.chatMessage?.(floor) || '') : null;
         const recall = !isLatest && snap ? env.resolveSnapshotCalendar?.(snap) : null;
+        const floorCalendar = recall?.resolved === false ? recall : recall?.calendar;
+        const floorClock = !isLatest && !isUser ? env.parseStoryClock?.(env.chatMessage?.(floor) || '', floorCalendar) : null;
         const html = isUser
             ? (recall && !recall.calendar ? '<div class="sp-inline-box sp-dash sp-inline-box-ro"><div class="sp-dash-summary sp-dash-summary-flat">历法未知 / 日期未知</div></div>' : env.buildUserRecall?.(snap, isLatest, recall?.calendar))
             : composeInlineBox(snap, isLatest, floorClock, floor);

@@ -415,6 +415,10 @@ q::after {
     position: relative;
 }
 .sp-content-head:active { cursor: grabbing; }
+/* Narrow desktop panels can wrap header controls at larger UI scales while keeping every control available. */
+@media (min-width: 641px) {
+    .sp-content-head { flex-wrap: wrap; row-gap: 6px; }
+}
 @media (max-width: 640px) {
     .sp-content-head { cursor: default; touch-action: auto; }
     .sp-content-head:active { cursor: default; }
@@ -1635,6 +1639,8 @@ select.sp-input { appearance: none; cursor: pointer; }
 }
 .sp-uiscale-btn:hover { background: var(--sp-hover-bg, rgba(127,127,127,0.12)); }
 .sp-uiscale-val { display: inline-block; min-width: 44px; text-align: center; font-size: var(--sp-fs-78); }
+/* The scale controls are one unbroken unit so a narrow settings row moves them below its label. */
+.sp-uiscale-controls { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; flex: 0 0 auto; }
 /* Subtle divider between logical groups within the memory section */
 .sp-mem-divider {
     border    : 0;

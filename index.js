@@ -568,6 +568,13 @@ const pointInlineRenderer = createPointInlineRenderer({
     cleanText,
 });
 const parseJudgedDate = parseJudgedDatePure;
+function calendarForStoryFloor(floor) {
+    const historical = snapshot.readSnapshot(Number(floor));
+    if (!historical) return null;
+    const fallback = readStore(keyDesc('caldesc-fallback', 'user', ''));
+    const resolution = snapshot.resolveSnapshotCalendar(historical, { fallback, marker: !!fallback, current: loadCalDesc() });
+    return resolution.resolved ? resolution.calendar : resolution;
+}
 
 // ledger 选择器注入：select.js 的打分/门槛依赖到期/距今口径 ledgerDueInfo/ledgerDaysSince
 // （二者仍滞留本文件、且另经历法助手触达），经 bindLedgerSelect 注入以免反向依赖循环引用。
@@ -579,6 +586,7 @@ bindLedgerCapture({
     context: getContext,
     parseClock: parseStoryClockPure,
     parseDate: parseJudgedDate,
+    calendarForFloor: calendarForStoryFloor,
     stripTags: (text) => memory.stripTags(text, { keepTags: getSettings().keepTags, extraTags: getSettings().extraTags }),
     settings: getSettings,
     systemTypes: system_message_types,
@@ -900,6 +908,7 @@ bindStoryClock({
     explicitWeekdayDate: (text, cal) => weekdayAdjacentDate(text, cal == null || cal === DEFAULT_CAL || cal.kind === 'gregorian' || cal.id === 'default-gregorian'),
     context: getContext,
     dayOfYear: almDayOfYear,
+    calendarForFloor: calendarForStoryFloor,
 });
 const storyClockController = createStoryClockController({
     context: getContext,
@@ -907,7 +916,7 @@ const storyClockController = createStoryClockController({
     enabled: () => getSettings().storyClockEnabled !== false,
     settings: getSettings,
     // 与用户可编辑的 v2 时间戳正文分槽：历法每次刷新现读当前聊天，默认公历不额外注入。
-    calendarContext: () => isGregorianCalendar(loadCalDesc()) ? '' : getCalDescInjectText(),
+    calendarContext: () => { const cal = loadCalDesc(); return isGregorianCalendar(cal) && !cal.title ? '' : getCalDescInjectText(); },
     peerState: () => extensionStoryClockState({ extensionNames, disabledExtensions: extension_settings.disabledExtensions, extensionSuffix: '/ST-QianQianJie', peerSettings: extension_settings.qianqianjie }),
 });
 const storyClockEnabled = () => getSettings().storyClockEnabled !== false;
@@ -970,8 +979,9 @@ const timeTravel = createTimeTravelController({
         if (chatId !== getContext().chatId || signal?.aborted) throw Object.assign(new Error('时光旅行会话已失效'), { name: 'AbortError' });
         const chat = getContext().chat || [];
         const floor = chat[Number(messageId)];
-        const clock = parseStoryClockPure(floor?.mes || '');
-        const clockDate = parseJudgedDate(clock.end) || parseJudgedDate(clock.start);
+        const floorCalendar = calendarForStoryFloor(Number(messageId)) || cal;
+        const clock = parseStoryClockPure(floor?.mes || '', floorCalendar);
+        const clockDate = clock.endMeta?.date || clock.startMeta?.date || parseJudgedDate(clock.end, floorCalendar) || parseJudgedDate(clock.start, floorCalendar);
         const key = buildDateRenderKey(messageId);
         if (clockDate) {
             const applied = applyDetectedDate(charStableKey(getContext()), clockDate, { notify: false });
@@ -1722,7 +1732,7 @@ const spaceFeature = createSpaceFeature({
                 return items.length ? formatLedgerList(items, { daysSince: ledgerDaysSince, dueInfo: ledgerDueInfo }) : '';
             } catch { return ''; }
         },
-        readWorldInfo: ctx => buildWorldInfoContext(ctx),
+        readWorldInfo: (ctx, triggerText, referenceHistory) => buildWorldInfoContext(ctx, triggerText === undefined ? undefined : { triggerText, triggerMode: 'query', referenceHistory }),
         readMemory: () => getMemText(),
         readRecent: ctx => buildRecentChatContext(ctx, 6, Infinity),
         readCardExtras,
@@ -2588,7 +2598,7 @@ inlineFeature = createInlineFeature({
         marker: !!readStore(keyDesc('caldesc-fallback', 'user', '')),
         current: loadCalDesc(),
     }),
-    chatMessage: floor => getContext()?.chat?.[floor]?.mes || '', parseStoryClock: parseStoryClockPure,
+    chatMessage: floor => getContext()?.chat?.[floor]?.mes || '', parseStoryClock: (message, calendar) => parseStoryClockPure(message, calendar),
     coordinateChanged: () => coordinateRuntime?.feature?.onChatDomChanged?.(),
     isStreaming: () => linesFeature.isStreaming(),
     syncTheme: () => syncVectorGlyphTheme(document, currentTheme, (getSettings().themeMode || 'auto') !== 'auto'),
@@ -3323,9 +3333,12 @@ function injectModal() {
 
                                     <label class="sp-mode-opt" style="margin-top:12px">
                                         <span>界面字号</span>
-                                        <button type="button" id="sp-uiscale-minus" class="sp-uiscale-btn">−</button>
-                                        <span id="sp-uiscale-val" class="sp-uiscale-val">${Math.round((Number(getSettings().uiScale) || 1) * 100)}%</span>
-                                        <button type="button" id="sp-uiscale-plus" class="sp-uiscale-btn">＋</button>
+                                        <!-- Keep the scale controls together when this setting row wraps in a narrow panel. -->
+                                        <span class="sp-uiscale-controls">
+                                            <button type="button" id="sp-uiscale-minus" class="sp-uiscale-btn">−</button>
+                                            <span id="sp-uiscale-val" class="sp-uiscale-val">${Math.round((Number(getSettings().uiScale) || 1) * 100)}%</span>
+                                            <button type="button" id="sp-uiscale-plus" class="sp-uiscale-btn">＋</button>
+                                        </span>
                                     </label>
                                     <p class="sp-cfg-hint" style="margin-top:2px">整套面板字号按此百分比缩放，<b>独立于酒馆「字体缩放」</b>。每档 5%，范围 80%–130%，默认 100%。</p>
 
@@ -5028,6 +5041,8 @@ function createQianQianJieGenerationSnapshot({ result, operationToken, participa
         reader: result?.reader || null,
         status: result?.status === 'ready' ? 'ready' : 'empty',
         text: result?.status === 'ready' ? String(result.text || '') : '',
+        cached: result?.cached === true,
+        message: result?.message || '',
     });
 }
 function qianQianJieGenerationBoundaryCurrent(boundary, ctx = getContext()) {
@@ -5062,9 +5077,9 @@ async function memoryPreCheckConfirm(request = {}) {
         if (!current()) return false;
         if (result.status === 'empty') {
             const confirmed = await spConfirm({
-                title: '千千结当前没有可用记忆',
-                body: '千千结本轮没有准备可用的前情或召回材料。',
-                note: '确认后将改用当前聊天最近最多 6 条可见 AI 回复；没有千千结记忆文本会注入。',
+                title: '千千结本轮没有可用召回',
+                body: '千千结本轮没有准备可用的召回材料。',
+                note: '确认后将改用当前聊天最近最多 6 条可见 AI 回复；不会注入千千结前情或召回文本。',
                 confirmText: '改用最近 6 楼',
                 cancelText: '取消',
             });
@@ -5633,7 +5648,7 @@ function getChatWorldNames(ctx) {
 // Fallback to character_book if no linked world book exists.
 // Each item: { key, uid, label, preview, content, source, embedded, scope, hostEnabled }
 //   scope = 'char'/'chat'/'persona'/'global' → 角色卡、当前聊天、用户 persona 或全局世界书来源
-async function getCharBookEntries(ctx) {
+async function getCharBookEntries(ctx, { includeExcluded = false } = {}) {
     const items = [];
     const seen = new Set();
 
@@ -5656,6 +5671,8 @@ async function getCharBookEntries(ctx) {
                 items.push({
                     key, uid,
                     label,
+                    title: typeof entry.comment === 'string' ? entry.comment : '',
+                    activationEntry: entry,
                     preview,
                     content: entry.content || '',
                     source : name,
@@ -5687,6 +5704,8 @@ async function getCharBookEntries(ctx) {
                 items.push({
                     key, uid,
                     label,
+                    title: typeof e.comment === 'string' ? e.comment : '',
+                    activationEntry: e,
                     preview,
                     content: e.content || '',
                     source : bookName,
@@ -5709,7 +5728,7 @@ async function getCharBookEntries(ctx) {
                 const key = `${name}::${uid}`;
                 if (seen.has(key)) continue;
                 seen.add(key);
-                items.push({ key, uid, label, preview: String(entry.content || '').replace(/\s+/g, ' ').slice(0, 120), content: entry.content || '', source: name, embedded: false, scope: 'chat', hostEnabled: entry?.disable !== true });
+                items.push({ key, uid, label, title: typeof entry.comment === 'string' ? entry.comment : '', activationEntry: entry, preview: String(entry.content || '').replace(/\s+/g, ' ').slice(0, 120), content: entry.content || '', source: name, embedded: false, scope: 'chat', hostEnabled: entry?.disable !== true });
             }
         } catch {}
     }
@@ -5734,6 +5753,8 @@ async function getCharBookEntries(ctx) {
                 items.push({
                     key, uid,
                     label,
+                    title: typeof entry.comment === 'string' ? entry.comment : '',
+                    activationEntry: entry,
                     preview,
                     content: entry.content || '',
                     source : name,
@@ -5763,6 +5784,8 @@ async function getCharBookEntries(ctx) {
                     seen.add(key);
                     items.push({
                         key, uid, label, preview,
+                        title: typeof entry.comment === 'string' ? entry.comment : '',
+                        activationEntry: entry,
                         content: entry.content || '',
                         source : personaBook,
                         embedded: false,
@@ -5777,7 +5800,7 @@ async function getCharBookEntries(ctx) {
     // 全局排除（B方案）：被拉黑的书名一律剔除——优先级压过上面任何一条收录途径。放在最末统一
     // 过滤，故设置里「按角色卡挑选」列表也看不到这些书（buildWorldInfoContext 与 renderWiList 共用本函数）。
     const excluded = getWiExcludeSet();
-    return excluded.size ? items.filter(e => !hasWiExcluded(e.source, excluded)) : items;
+    return !includeExcluded && excluded.size ? items.filter(e => !hasWiExcluded(e.source, excluded)) : items;
 }
 
 // 近期聊天上下文补足延后一组的 L0/L1 记忆与当前用户输入之间的空窗；聊天为空时返回 ''。
@@ -5887,10 +5910,15 @@ function notifyWorldInfoActivationFailure(ctx) {
     try { showToast('世界书激活失败，本次未注入世界书', null, true); } catch {}
 }
 
-async function resolveWorldInfoActivation(ctx, coreChat) {
-    const maxContext = worldInfoMaxContext(ctx);
+async function resolveWorldInfoActivation(ctx, coreChat, { independentTrigger = false, scanBudgetTokens = WORLD_INFO_TOKEN_BUDGET } = {}) {
+    const actualMaxContext = worldInfoMaxContext(ctx);
+    const scanPercent = Number(worldInfoCore.world_info_budget);
+    const scanTarget = Number.isFinite(scanPercent) && scanPercent > 0
+        ? Math.ceil((scanBudgetTokens + 2) * 100 / scanPercent) + 2
+        : Math.max(scanBudgetTokens, WORLD_INFO_TOKEN_BUDGET) * 4;
+    const maxContext = independentTrigger ? Math.max(actualMaxContext || 0, scanTarget) : actualMaxContext;
     const includeNames = worldInfoCore.world_info_include_names !== false;
-    const globalScanData = worldInfoGlobalScanData(ctx);
+    const globalScanData = independentTrigger ? { trigger: 'quiet' } : worldInfoGlobalScanData(ctx);
     const simulate = ctx?.simulateWorldInfoActivation;
     let lukerFailed = false;
     if (typeof simulate === 'function') {
@@ -5930,14 +5958,220 @@ async function resolveWorldInfoActivation(ctx, coreChat) {
     return { supported: false, failed: true, keys: new Set(), lukerFailed };
 }
 
-async function buildWorldInfoContext(ctx) {
-    const entries = await getCharBookEntries(ctx);
+const WORLD_INFO_PERSON_CATEGORIES = /^(?:人物|人物索引|人物主卡|角色|角色索引|character|characters|char)$/iu;
+const WORLD_INFO_PERSON_QUERY = /(?:性格|介绍|背景|人设|人物资料|角色资料|是谁|经历|特点|喜好|详细说说)/u;
+const WORLD_INFO_PERSON_LIST_QUERY = /(?:(?:几个|多少|有哪些|所有|全部|各个).{0,8}(?:人物|角色|char|character)|(?:人物|角色|char|character).{0,8}(?:介绍|资料|有哪些|几个|多少))/iu;
+const WORLD_INFO_GROUP_REFERENCE = /(?:他们|她们|它们|这(?:[一二两三四五六七八九十\d]+)(?:个|位|人)(?!点|天|日|日期|时间|周|月|年|事项|事件)|这(?:几|些)(?:个|位)?(?:人|人物|角色|char|character)|每个(?:人物|角色|char|character)|各个(?:人物|角色|char|character)|全部(?:人物|角色|char|character)|所有(?:人物|角色|char|character))/iu;
+const WORLD_INFO_ALL_ROLES = /(?:(?:每个|各个|全部|所有|全体)(?:人物|角色|char|character)|(?:人物|角色|char|character)(?:全部|所有|全体))/iu;
+const WORLD_INFO_ROSTER_QUERY = /(?:(?:几个|多少|有哪些|都有哪些|一共.{0,6})(?:人物|角色|char|character)|(?:人物|角色|char|character).{0,8}(?:有哪些|几个|多少|总数))/iu;
+const WORLD_INFO_SPIRIT_TOPIC = /(?:精神体|精神结构|守护灵|魂兽)/u;
+const WORLD_INFO_GROUP_INFO_TOPIC = /(?:精神体|精神结构|守护灵|魂兽|性格|介绍|背景|人设|人物资料|角色资料|是谁|经历|特点|喜好|详细说说|外貌|能力|职业|身份)/u;
+
+function worldInfoPersonSubject(title) {
+    for (const [, category, rawSubject] of String(title || '').matchAll(/<([^|<>]+)\|([^<>]+)>/gu)) {
+        if (WORLD_INFO_PERSON_CATEGORIES.test(category.trim())) return rawSubject.trim();
+    }
+    return '';
+}
+
+function worldInfoCountFromPhrase(text) {
+    const match = String(text || '').match(/(?<!第)([0-9０-９一二两三四五六七八九十]+)\s*(?:个|位|人|名)/u);
+    if (!match) return null;
+    const value = match[1].replace(/[０-９]/gu, digit => String.fromCharCode(digit.charCodeAt(0) - 0xfee0));
+    if (/^\d+$/u.test(value)) return Number(value);
+    const digits = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+    if (value === '十') return 10;
+    if (value.startsWith('十')) return 10 + (digits[value.slice(1)] || 0);
+    if (value.endsWith('十')) return (digits[value[0]] || 0) * 10;
+    if (value.includes('十')) {
+        const [tens, ones] = value.split('十');
+        return (digits[tens] || 1) * 10 + (digits[ones] || 0);
+    }
+    return digits[value] ?? null;
+}
+
+// 回指 roster 只由当前可用的人物主卡／索引标题给出；先前 assistant 正文不可信，也不进入宿主扫描。
+function resolveWorldInfoGroupReference(query, priorHistory, selectedEntries) {
+    const text = String(query || '').trim();
+    const isAllRoles = WORLD_INFO_ALL_ROLES.test(text);
+    const isGroupReference = WORLD_INFO_GROUP_REFERENCE.test(text);
+    if (!isAllRoles && !isGroupReference) return { recognized: false };
+    // 只有本轮明确询问人物资料时才接管回指；“他们呢”和日程／点／日期问句留给原问题路径。
+    if (!WORLD_INFO_GROUP_INFO_TOPIC.test(text)) return { recognized: false };
+
+    const names = [...new Set(selectedEntries.map(entry => worldInfoPersonSubject(entry.title)).filter(Boolean))];
+    if (!names.length) return { recognized: true, names: [] };
+    const checkCount = phrase => {
+        const count = worldInfoCountFromPhrase(phrase);
+        return count === null || count === names.length;
+    };
+    if (isAllRoles) return { recognized: true, names: checkCount(text) ? names : [] };
+
+    const currentCount = worldInfoCountFromPhrase(text);
+    if (currentCount !== null) return { recognized: true, names: currentCount === names.length ? names : [] };
+
+    const recentUserTurns = (Array.isArray(priorHistory) ? priorHistory : [])
+        .filter(item => item?.role === 'user' && String(item.content || '').trim())
+        .slice(-5);
+    let anchored = false;
+    for (let index = recentUserTurns.length - 1; index >= 0; index--) {
+        const previous = String(recentUserTurns[index].content || '').trim();
+        if (WORLD_INFO_ROSTER_QUERY.test(previous)) {
+            anchored = true;
+            break;
+        }
+        if (WORLD_INFO_GROUP_REFERENCE.test(previous) && WORLD_INFO_GROUP_INFO_TOPIC.test(previous)) {
+            const count = worldInfoCountFromPhrase(previous);
+            if (count !== null && count !== names.length) return { recognized: true, names: [] };
+            if (count !== null) anchored = true;
+            if (anchored) break;
+            continue;
+        }
+        break;
+    }
+    return { recognized: true, names: anchored ? names : [] };
+}
+
+function worldInfoReferenceTriggerText(query, names, entries) {
+    const topics = [...new Set([...String(query || '').matchAll(new RegExp(WORLD_INFO_GROUP_INFO_TOPIC.source, 'gu'))].map(([topic]) => topic))];
+    const spiritCategories = WORLD_INFO_SPIRIT_TOPIC.test(query)
+        ? [...new Set(entries.flatMap(entry => {
+            const title = String(entry.title || '');
+            const matches = [...title.matchAll(/<([^|<>]+)\|([^<>]+)>/gu)];
+            return matches.filter(([, , subject]) => names.includes(subject.trim()))
+                .map(([, category]) => category.trim())
+                .filter(category => /(?:精神|守护灵|魂兽)/u.test(category));
+        }))]
+        : [];
+    // 旧世界书主 key 是无空格的“姓名+主题”；保留原问题用于语义标题补充，并并列提供连续 keyword phrase。
+    return names.map(name => [name, query, ...spiritCategories, ...topics.map(topic => `${name}${topic}`)].join(' ')).join('\n');
+}
+
+function worldInfoTitleMatches(entry, query, triggerMode = 'query') {
+    const title = String(entry?.title || '').trim();
+    const text = String(query || '').trim();
+    if (!title || !text) return false;
+    const structured = [...title.matchAll(/<([^|<>]+)\|([^<>]+)>/gu)];
+    for (const [, rawCategory, rawSubject] of structured) {
+        const category = rawCategory.trim();
+        const subject = rawSubject.trim();
+        if (WORLD_INFO_PERSON_CATEGORIES.test(category)) {
+            // 间按问题意图收敛；面生成的剧情材料本身是触发范围，可由明确人名命中人物类标题。
+            if (subject.length > 1 && text.includes(subject) && (triggerMode === 'outline-story' || triggerMode === 'reference' || WORLD_INFO_PERSON_QUERY.test(text))) return true;
+            if (WORLD_INFO_PERSON_CATEGORIES.test(category) && WORLD_INFO_PERSON_LIST_QUERY.test(text)) return true;
+            continue;
+        }
+        // Structured titles require both their category and subject in the actual request;
+        // a shared character name alone must not pull relation, location, or adult entries.
+        if (category.length > 1 && subject.length > 1 && text.includes(category) && text.includes(subject)) return true;
+    }
+    const plainTitle = title.replace(/<([^|<>]+)\|([^<>]+)>/gu, '$1 $2').replace(/[<>]/gu, '').replace(/[|｜]/gu, ' ').replace(/\s+/gu, ' ').trim();
+    return plainTitle.length > 2 && text.includes(plainTitle);
+}
+
+function worldInfoKeyMatchesText(text, rawKey, entry, ctx) {
+    const key = String(typeof ctx?.substituteParams === 'function' ? ctx.substituteParams(rawKey) : rawKey || '').trim();
+    if (!key) return false;
+    const regex = worldInfoCore.parseRegexFromString?.(key);
+    if (regex) {
+        regex.lastIndex = 0;
+        return regex.test(text);
+    }
+    const caseSensitive = entry.caseSensitive ?? worldInfoCore.world_info_case_sensitive;
+    const haystack = caseSensitive ? String(text) : String(text).toLowerCase();
+    const needle = caseSensitive ? key : key.toLowerCase();
+    if (!(entry.matchWholeWords ?? worldInfoCore.world_info_match_whole_words)) return haystack.includes(needle);
+    if (needle.split(/\s+/u).length > 1) return haystack.includes(needle);
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    return new RegExp(`(?:^|\\W)(${escaped})(?:$|\\W)`).test(haystack);
+}
+
+function worldInfoTitleSupplementAllows(entry, triggerText, ctx) {
+    const raw = entry?.activationEntry || {};
+    if (raw.disable === true || (Array.isArray(raw.triggers) && raw.triggers.length && !raw.triggers.includes('quiet'))) return false;
+    const names = raw.characterFilter?.names;
+    if (Array.isArray(names) && names.length) {
+        const includesName = names.includes(getCharaFilename());
+        if (raw.characterFilter.isExclude ? includesName : !includesName) return false;
+    }
+    // Tag filters depend on host tag-map state that has no read-only resolver here; fail closed.
+    if (Array.isArray(raw.characterFilter?.tags) && raw.characterFilter.tags.length) return false;
+    // These outcomes depend on host chat/timed-effect state; a title-only path has no safe read-only equivalent.
+    if (raw.decorators?.includes?.('@@dont_activate') || raw.decorators?.includes?.('@@activate') || raw.constant || raw.group || raw.delay || raw.delayUntilRecursion || raw.cooldown || raw.sticky) return false;
+    // If an ordinary primary key already matches, only the host result may decide its
+    // secondary/probability outcome; never give a failed host roll a second chance.
+    if (Array.isArray(raw.key) && raw.key.some(key => worldInfoKeyMatchesText(triggerText, key, raw, ctx))) return false;
+    const secondary = raw.selective === true && Array.isArray(raw.keysecondary) ? raw.keysecondary.filter(value => String(value || '').trim()) : [];
+    if (secondary.length) {
+        const matched = secondary.map(key => worldInfoKeyMatchesText(triggerText, key, raw, ctx));
+        const logic = raw.selectiveLogic ?? worldInfoCore.world_info_logic?.AND_ANY ?? 0;
+        const rules = worldInfoCore.world_info_logic || { AND_ANY: 0, NOT_ALL: 1, NOT_ANY: 2, AND_ALL: 3 };
+        const pass = logic === rules.AND_ANY ? matched.some(Boolean)
+            : logic === rules.NOT_ALL ? matched.some(value => !value)
+                : logic === rules.NOT_ANY ? !matched.some(Boolean)
+                    : logic === rules.AND_ALL ? matched.every(Boolean) : false;
+        if (!pass) return false;
+    }
+    if (raw.useProbability && Number(raw.probability) !== 100) {
+        const probability = Number(raw.probability);
+        if (!Number.isFinite(probability) || Math.random() * 100 > probability) return false;
+    }
+    return true;
+}
+
+async function buildWorldInfoContext(ctx, { triggerText, triggerMode = 'query', referenceHistory } = {}) {
+    const scanEntries = triggerText !== undefined ? await getCharBookEntries(ctx, { includeExcluded: true }) : null;
+    const excluded = getWiExcludeSet();
+    const entries = scanEntries
+        ? scanEntries.filter(entry => !hasWiExcluded(entry.source, excluded))
+        : await getCharBookEntries(ctx);
     const selection = ensureCurrentWiSelection(ctx, entries);
-    const coreChat = Array.isArray(ctx?.chat) ? ctx.chat.filter(message => {
+    const selected = entries
+        .filter(e => worldInfoSelectionAllows(selection, e.key))
+        .filter(e => e.hostEnabled !== false);
+    let effectiveTriggerText = triggerText;
+    let effectiveTriggerMode = triggerMode;
+    // 「间」可凭自己的历史快照解析回指；面内只有本轮明确要求全体角色时才能直接列名单。
+    const explicitAllRosterQuery = WORLD_INFO_ALL_ROLES.test(String(triggerText || ''))
+        && WORLD_INFO_GROUP_INFO_TOPIC.test(String(triggerText || ''));
+    if (triggerText !== undefined && triggerMode === 'query' && (Array.isArray(referenceHistory) || explicitAllRosterQuery)) {
+        const reference = resolveWorldInfoGroupReference(triggerText, referenceHistory, selected);
+        if (reference.recognized) {
+            if (!reference.names.length) {
+                if (Array.isArray(referenceHistory)) {
+                    showToast('无法确认“他们”指哪些人物，请点名，或明确问“全部角色的精神体”。', null, true);
+                    throw Object.assign(new Error('人物回指不明确，请点名或明确指定全部角色'), {
+                        name: 'AbortError', reasonCode: 'world-info-reference-unresolved',
+                    });
+                }
+                // 面内当前问句要求全体但没有任何允许标题时，保留普通问答，不用缺失名单取消请求。
+            } else {
+                effectiveTriggerText = worldInfoReferenceTriggerText(triggerText, reference.names, selected);
+                effectiveTriggerMode = 'reference';
+            }
+        }
+    }
+    // Opt-in callers provide a private scan snapshot: “间” passes only this question,
+    // while manual outline creation passes only the current visible AI bodies sent as recent model context.
+    // No prior user turns are copied into that scan, and ctx.chat remains untouched.
+    const coreChat = effectiveTriggerText !== undefined
+        ? (String(effectiveTriggerText || '').trim() ? [{ name: '', is_user: true, mes: String(effectiveTriggerText).trim() }] : [])
+        : Array.isArray(ctx?.chat) ? ctx.chat.filter(message => {
         if (!message || message.is_system) return false;
         return String(message.mes ?? message.content ?? '').trim().length > 0;
     }) : [];
-    const activation = await resolveWorldInfoActivation(ctx, coreChat);
+    let scanBudgetTokens = WORLD_INFO_TOKEN_BUDGET;
+    if (effectiveTriggerText !== undefined && scanEntries.length) {
+        const content = [String(effectiveTriggerText || ''), ...scanEntries.map(entry => {
+            const raw = String(entry.content || '');
+            return typeof ctx?.substituteParams === 'function' ? ctx.substituteParams(raw) : raw;
+        })].join('\n');
+        scanBudgetTokens = (await countWorldInfoTokens(content)).tokens + scanEntries.length * 2 + 2;
+    }
+    const activation = await resolveWorldInfoActivation(ctx, coreChat, {
+        independentTrigger: effectiveTriggerText !== undefined,
+        scanBudgetTokens,
+    });
     if (activation.failed) {
         notifyWorldInfoActivationFailure(ctx);
         console.warn('[构画] 世界书激活失败诊断', {
@@ -5948,11 +6182,26 @@ async function buildWorldInfoContext(ctx) {
         });
         return '';
     }
-    const candidates = entries
-        .filter(e => worldInfoSelectionAllows(selection, e.key))
-        .filter(e => activation.keys.has(worldInfoCandidateKey(e.source, e.uid)))
+    const candidates = selected
+        .filter(e => activation.keys.has(worldInfoCandidateKey(e.source, e.uid))
+            || (effectiveTriggerText !== undefined && worldInfoTitleMatches(e, effectiveTriggerText, effectiveTriggerMode) && worldInfoTitleSupplementAllows(e, effectiveTriggerText, ctx)))
         .map(e => e.content)
         .filter(Boolean);
+    const hostBudgetCap = Number(worldInfoCore.world_info_budget_cap);
+    const hostBudgetPercent = Number(worldInfoCore.world_info_budget);
+    const scanPrompts = Object.values(ctx?.extensionPrompts || {}).filter(prompt => prompt?.scan).length;
+    if (effectiveTriggerText !== undefined && ((hostBudgetCap > 0 && hostBudgetCap < scanBudgetTokens) || !Number.isFinite(hostBudgetPercent) || hostBudgetPercent <= 0 || scanPrompts > 0)) {
+        console.warn('[构画] 世界书宿主硬预算可能在构画筛选前省略后续命中项', {
+            hostBudget: hostBudgetCap,
+            hostBudgetPercent,
+            estimatedScanTokens: scanBudgetTokens,
+            scanPromptCount: scanPrompts,
+            activatedCount: activation.keys.size,
+            titleMatchedCount: selected.filter(e => worldInfoTitleMatches(e, effectiveTriggerText, effectiveTriggerMode)).length,
+            candidateCount: candidates.length,
+            warning: '宿主 API 未返回预算溢出标记；硬上限或外部扫描 prompt 可能导致宿主在构画筛选前省略候选。',
+        });
+    }
     if (!candidates.length) return '';
 
     const kept = [];
@@ -6136,7 +6385,11 @@ const databaseMemoryAccess = createDatabaseMemoryAccess({
 const qianQianJieMemoryAccess = createQianQianJieMemoryAccess({
     globalRef: globalThis,
     contextProvider: getContext,
+    participantIdentityProvider: captureParticipantIdentity,
+    sourceEpochProvider: () => memorySourceEpoch,
     isSelected: () => getSettings().useQianQianJie === true,
+    readCache: () => readStore(keyDesc('qqj-prompt-cache', 'user', '')),
+    writeCache: (value, options) => writeStoreConfirmed(keyDesc('qqj-prompt-cache', 'user', ''), value, options),
 });
 
 // Alternate sources are mutually exclusive (enforced in bindMemoryHandlers); each
@@ -6287,11 +6540,48 @@ function readCardExtras(ctx) {
     };
 }
 
+function buildRecentGenerationHistory(ctx, historyLimit, opts = {}) {
+    const effectiveHistoryLimit = opts.memorySnapshot?.source === 'qianqianjie'
+        && opts.memorySnapshot.status === 'empty' && historyLimit === 3 ? 6 : historyLimit;
+    if (!(Number(effectiveHistoryLimit) > 0)) return [];
+    const settings = getSettings();
+    const stripOpts = { keepTags: settings.keepTags, extraTags: settings.extraTags };
+    return selectVisibleChatHistory(ctx?.chat, effectiveHistoryLimit, {
+        excludedAssistant: opts.excludedAssistant,
+        mapMessage: message => ({
+            role: message.is_user ? 'user' : 'assistant',
+            content: substituteParams(sanitizeGenerationContextText(message.mes ?? '', {
+                reroll: opts.reroll,
+                stripTags: value => memory.stripTags(value, stripOpts),
+            })),
+        }),
+    });
+}
+
+function outlineWorldInfoTriggerText(history) {
+    // 标题触发与实际发出的近期 AI 正文共享同一份清洗结果；固定 prompt 不属于剧情材料。
+    return (Array.isArray(history) ? history : []).map(message => String(message?.content ?? '')).join('\n\n');
+}
+
 // historyLimit：喂给这次调用的「最近可见 AI 楼」条数上限。默认 3。
 // 传 0 = 完全不喂近景，只靠 system 块（人设/卡描述/世界书/记忆库）。
 async function buildMessages(ctx, prompt, userName, charName, historyLimit = 3, opts = {}) {
     const char = ctx.characters?.[ctx.characterId] ?? {};
-    const wiContext = await buildWorldInfoContext(ctx);
+    // 正文窗口及其清洗只在此处生成一次，世界书标题触发复用模型将收到的同一数组。
+    let history = buildRecentGenerationHistory(ctx, historyLimit, opts);
+    if (Array.isArray(opts.ledgerSourceFloors)) {
+        history = opts.ledgerSourceFloors.map(source => ({
+            role: 'assistant',
+            content: `【刻度可信来源｜楼层 ${source.floor}｜${source.sources?.length ? source.sources.map(x => `${x.token}=${x.stamp}`).join('、') : '无合法 SDC 令牌，仅供识别正文'}】\n${source.content || ''}`,
+        }));
+    }
+    const outlineTrigger = opts.worldInfoTriggerText === true
+        ? outlineWorldInfoTriggerText(history)
+        : opts.worldInfoTriggerText;
+    const wiContext = await buildWorldInfoContext(ctx, outlineTrigger === undefined ? undefined : {
+        triggerText: outlineTrigger,
+        triggerMode: opts.worldInfoTriggerText === true ? 'outline-story' : (opts.worldInfoTriggerMode || 'query'),
+    });
     const { personaDesc, authorNote: rawAuthorNote } = readCardExtras(ctx);
     const authorNote = rawAuthorNote;
 
@@ -6310,7 +6600,9 @@ async function buildMessages(ctx, prompt, userName, charName, historyLimit = 3, 
     const memText = sanitizeGenerationContextText(rawMemText, { reroll: opts.reroll });
     const memPerspective = opts.pointView === 'char' ? charName : opts.pointView === 'user' ? userName : null;
     const memBlock = memText
-        ? `【故事记忆库】以下由本插件在对话过程中自动生成的客观摘要，反映从最早到近期的关键事件与伏笔。请**优先信任记忆库描述**，即使它与角色卡/世界书中较早的描述冲突（因为记忆库记录了事件后的最新状态）。${memPerspective ? `点视角优先关注对${memPerspective}有意义的信息。` : '请按当前聊天主角色上下文理解，不继承点的 TA 视角。'}\n\n${memText}`
+        ? opts.memorySnapshot?.source === 'qianqianjie'
+            ? `【千千结召回材料】请将以下内容作为相关回忆线索，结合当前聊天理解；缓存内容会明确标注为上次成功召回。${memPerspective ? `点视角优先关注对${memPerspective}有意义的信息。` : '请按当前聊天主角色上下文理解，不继承点的 TA 视角。'}\n\n${memText}`
+            : `【故事记忆库】以下由本插件在对话过程中自动生成的客观摘要，反映从最早到近期的关键事件与伏笔。请**优先信任记忆库描述**，即使它与角色卡/世界书中较早的描述冲突（因为记忆库记录了事件后的最新状态）。${memPerspective ? `点视角优先关注对${memPerspective}有意义的信息。` : '请按当前聊天主角色上下文理解，不继承点的 TA 视角。'}\n\n${memText}`
         : '';
 
     // 历（本世界观重要日期）：供构画生成与讨论上下文使用，不做主楼常驻注入。
@@ -6338,29 +6630,7 @@ async function buildMessages(ctx, prompt, userName, charName, historyLimit = 3, 
         almanacBlock,
         calDescBlock,
     ].filter(Boolean).join('\n\n');
-    // 常规生成默认只取最近 3 层完整、可见 AI 回复；调用方可显式传入其他预算。
     // historyLimit=0 → 完全不喂历史（history 为空），只留 system + prompt。
-    const allMsgs = ctx.chat ?? [];
-    let history = [];
-    const effectiveHistoryLimit = opts.memorySnapshot?.source === 'qianqianjie'
-        && opts.memorySnapshot.status === 'empty' && historyLimit === 3 ? 6 : historyLimit;
-    if (effectiveHistoryLimit > 0) {
-        // 标签清洗（全局 keepTags/extraTags）：先剥标签结构、再替换变量占位符，
-        // 免得展开出的内容里的尖括号被当成标签。点/线/面主生成经此统一清洗，
-        // 与记忆采集(memory.getAiFloors)、间/面讨论(buildRecentChatContext)同口径。
-        const s = getSettings();
-        const stripOpts = { keepTags: s.keepTags, extraTags: s.extraTags };
-        history = selectVisibleChatHistory(allMsgs, effectiveHistoryLimit, { excludedAssistant: opts.excludedAssistant, mapMessage: m => ({
-            role   : m.is_user ? 'user' : 'assistant',
-            content: substituteParams(sanitizeGenerationContextText(m.mes ?? '', { reroll: opts.reroll, stripTags: value => memory.stripTags(value, stripOpts) })),
-        }) });
-    }
-    if (Array.isArray(opts.ledgerSourceFloors)) {
-        history = opts.ledgerSourceFloors.map(source => ({
-            role: 'assistant',
-            content: `【刻度可信来源｜楼层 ${source.floor}｜${source.sources?.length ? source.sources.map(x => `${x.token}=${x.stamp}`).join('、') : '无合法 SDC 令牌，仅供识别正文'}】\n${source.content || ''}`,
-        }));
-    }
     return [{ role: 'system', content: sys }, ...history, { role: 'user', content: prompt }];
 }
 
@@ -6510,9 +6780,11 @@ async function readCreativeChatMemory({ ctx, userMsg, signal, selection }) {
         if (!qianQianJieGenerationSnapshotCurrent(preflight.memorySnapshot, operationToken, ctx)) {
             throw Object.assign(new Error('memory snapshot stale'), { name: 'AbortError' });
         }
-        text = preflight.memorySnapshot.text;
+        const cached = preflight.memorySnapshot.cached === true;
+        const rawRecall = preflight.memorySnapshot.text.replace(/^【千千结上次成功召回】\n/, '').trim();
+        text = rawRecall ? `${cached ? '【千千结上次成功召回】' : '【千千结本轮召回】'}\n${rawRecall}` : '';
         alreadyCapped = true;
-        return { text, recentFallback: preflight.memorySnapshot.status === 'empty' };
+        return { text, recentFallback: preflight.memorySnapshot.status === 'empty' || !rawRecall };
     } else if (selection.source === 'database') {
         const result = await databaseMemoryAccess.result({ query: userMsg });
         ensureCurrent();
@@ -6568,7 +6840,8 @@ async function composeCreativeChatMessages({ target, userMsg, historySnapshot, s
     const memoryRead = await readCreativeChatMemory({ ctx, userMsg, signal, selection: memorySelection });
     const memText = memoryRead.text;
     if (!creativeChatMemorySelectionCurrent(memorySelection)) throw Object.assign(new Error('memory source changed'), { name: 'AbortError' });
-    const wiContext = await buildWorldInfoContext(ctx);
+    // 旧面内问答仍供模型理解；世界书只由本轮问题触发，避免旧话题每轮复燃。
+    const wiContext = await buildWorldInfoContext(ctx, { triggerText: userMsg, triggerMode: 'query' });
     const recentCtx = await buildRecentChatContext(ctx, 6, memoryRead.recentFallback ? Infinity : 2500);
     if (signal?.aborted || !creativeChatMemorySelectionCurrent(memorySelection)) {
         throw Object.assign(new Error('memory source changed'), { name: 'AbortError' });
@@ -7630,6 +7903,7 @@ function readCalendarDraftForm() {
     if (!axisCalendarManager.isEditing()) return null;
     return {
         era: String($in('#sp-alm-manager-era').val() || ''),
+        title: String($in('#sp-alm-manager-title').val() || ''),
         displayStyle: String($in('#sp-alm-manager-display-style').val() || 'numeric') === 'classical' ? 'classical' : 'numeric',
         months: $inAll('#sp-almanac-wrap .sp-alm-manager-month-row').map(function () {
             return { name: String($(this).find('.sp-alm-manager-month-name').val() || ''), days: $(this).find('.sp-alm-manager-month-days').val() };
@@ -9104,10 +9378,15 @@ function onResizeStart(e) {
     $(document).on('mousemove.spresize', onResizeMove).on('mouseup.spresize', onResizeEnd);
     document.addEventListener('touchmove', onResizeMove, { passive: false });
     document.addEventListener('touchend',  onResizeEnd);
+    document.addEventListener('touchcancel', onResizeEnd);
+    window.addEventListener('blur', onResizeEnd);
 }
 
 function onResizeMove(e) {
     if (!resizeState) return;
+    // A mouseup outside the window may never reach document; buttons===0 ends
+    // that gesture on the next move so a later drag cannot reuse stale origins.
+    if (!e.touches && e.buttons === 0) { onResizeEnd(); return; }
     e.preventDefault();
     const touch = e.touches?.[0] ?? e.changedTouches?.[0];
     const cx = touch ? touch.clientX : e.clientX;
@@ -9148,6 +9427,8 @@ function onResizeEnd() {
     $(document).off('mousemove.spresize mouseup.spresize');
     document.removeEventListener('touchmove', onResizeMove);
     document.removeEventListener('touchend',  onResizeEnd);
+    document.removeEventListener('touchcancel', onResizeEnd);
+    window.removeEventListener('blur', onResizeEnd);
 }
 
 function restoreOutlineChatHeight() {
