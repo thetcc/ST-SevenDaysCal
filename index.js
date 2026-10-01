@@ -1732,7 +1732,7 @@ const spaceFeature = createSpaceFeature({
                 return items.length ? formatLedgerList(items, { daysSince: ledgerDaysSince, dueInfo: ledgerDueInfo }) : '';
             } catch { return ''; }
         },
-        readWorldInfo: (ctx, triggerText, referenceHistory) => buildWorldInfoContext(ctx, triggerText === undefined ? undefined : { triggerText, triggerMode: 'query', referenceHistory }),
+        readWorldInfo: (ctx, triggerText, referenceHistory, titleSupplementText = '') => buildWorldInfoContext(ctx, triggerText === undefined ? undefined : { triggerText, triggerMode: 'query', referenceHistory, titleSupplementText }),
         readMemory: () => getMemText(),
         readRecent: ctx => buildRecentChatContext(ctx, 6, Infinity),
         readCardExtras,
@@ -5879,7 +5879,7 @@ function worldInfoActivationEntries(result, mode) {
     return [...entries].filter(entry => entry && typeof entry === 'object' && worldInfoCandidateKey(entry.world, entry.uid));
 }
 
-const WORLD_INFO_TOKEN_BUDGET = 60000;
+const WORLD_INFO_SCAN_BUDGET = 60000;
 let lastWorldInfoFailureNoticeKey = '';
 
 async function countWorldInfoTokens(text) {
@@ -5910,12 +5910,12 @@ function notifyWorldInfoActivationFailure(ctx) {
     try { showToast('世界书激活失败，本次未注入世界书', null, true); } catch {}
 }
 
-async function resolveWorldInfoActivation(ctx, coreChat, { independentTrigger = false, scanBudgetTokens = WORLD_INFO_TOKEN_BUDGET } = {}) {
+async function resolveWorldInfoActivation(ctx, coreChat, { independentTrigger = false, scanBudgetTokens = WORLD_INFO_SCAN_BUDGET } = {}) {
     const actualMaxContext = worldInfoMaxContext(ctx);
     const scanPercent = Number(worldInfoCore.world_info_budget);
     const scanTarget = Number.isFinite(scanPercent) && scanPercent > 0
         ? Math.ceil((scanBudgetTokens + 2) * 100 / scanPercent) + 2
-        : Math.max(scanBudgetTokens, WORLD_INFO_TOKEN_BUDGET) * 4;
+        : Math.max(scanBudgetTokens, WORLD_INFO_SCAN_BUDGET) * 4;
     const maxContext = independentTrigger ? Math.max(actualMaxContext || 0, scanTarget) : actualMaxContext;
     const includeNames = worldInfoCore.world_info_include_names !== false;
     const globalScanData = independentTrigger ? { trigger: 'quiet' } : worldInfoGlobalScanData(ctx);
@@ -5959,7 +5959,6 @@ async function resolveWorldInfoActivation(ctx, coreChat, { independentTrigger = 
 }
 
 const WORLD_INFO_PERSON_CATEGORIES = /^(?:人物|人物索引|人物主卡|角色|角色索引|character|characters|char)$/iu;
-const WORLD_INFO_PERSON_QUERY = /(?:性格|介绍|背景|人设|人物资料|角色资料|是谁|经历|特点|喜好|详细说说)/u;
 const WORLD_INFO_PERSON_LIST_QUERY = /(?:(?:几个|多少|有哪些|所有|全部|各个).{0,8}(?:人物|角色|char|character)|(?:人物|角色|char|character).{0,8}(?:介绍|资料|有哪些|几个|多少))/iu;
 const WORLD_INFO_GROUP_REFERENCE = /(?:他们|她们|它们|这(?:[一二两三四五六七八九十\d]+)(?:个|位|人)(?!点|天|日|日期|时间|周|月|年|事项|事件)|这(?:几|些)(?:个|位)?(?:人|人物|角色|char|character)|每个(?:人物|角色|char|character)|各个(?:人物|角色|char|character)|全部(?:人物|角色|char|character)|所有(?:人物|角色|char|character))/iu;
 const WORLD_INFO_ALL_ROLES = /(?:(?:每个|各个|全部|所有|全体)(?:人物|角色|char|character)|(?:人物|角色|char|character)(?:全部|所有|全体))/iu;
@@ -6056,8 +6055,7 @@ function worldInfoTitleMatches(entry, query, triggerMode = 'query') {
         const category = rawCategory.trim();
         const subject = rawSubject.trim();
         if (WORLD_INFO_PERSON_CATEGORIES.test(category)) {
-            // 间按问题意图收敛；面生成的剧情材料本身是触发范围，可由明确人名命中人物类标题。
-            if (subject.length > 1 && text.includes(subject) && (triggerMode === 'outline-story' || triggerMode === 'reference' || WORLD_INFO_PERSON_QUERY.test(text))) return true;
+            if (subject.length > 1 && text.includes(subject)) return true;
             if (WORLD_INFO_PERSON_CATEGORIES.test(category) && WORLD_INFO_PERSON_LIST_QUERY.test(text)) return true;
             continue;
         }
@@ -6067,6 +6065,14 @@ function worldInfoTitleMatches(entry, query, triggerMode = 'query') {
     }
     const plainTitle = title.replace(/<([^|<>]+)\|([^<>]+)>/gu, '$1 $2').replace(/[<>]/gu, '').replace(/[|｜]/gu, ' ').replace(/\s+/gu, ' ').trim();
     return plainTitle.length > 2 && text.includes(plainTitle);
+}
+
+function worldInfoPersonTitleMatches(entry, text) {
+    const source = String(text || '');
+    if (!source) return false;
+    return [...String(entry?.title || '').matchAll(/<([^|<>]+)\|([^<>]+)>/gu)]
+        .some(([, rawCategory, rawSubject]) => WORLD_INFO_PERSON_CATEGORIES.test(rawCategory.trim())
+            && rawSubject.trim().length > 1 && source.includes(rawSubject.trim()));
 }
 
 function worldInfoKeyMatchesText(text, rawKey, entry, ctx) {
@@ -6098,9 +6104,8 @@ function worldInfoTitleSupplementAllows(entry, triggerText, ctx) {
     if (Array.isArray(raw.characterFilter?.tags) && raw.characterFilter.tags.length) return false;
     // These outcomes depend on host chat/timed-effect state; a title-only path has no safe read-only equivalent.
     if (raw.decorators?.includes?.('@@dont_activate') || raw.decorators?.includes?.('@@activate') || raw.constant || raw.group || raw.delay || raw.delayUntilRecursion || raw.cooldown || raw.sticky) return false;
-    // If an ordinary primary key already matches, only the host result may decide its
-    // secondary/probability outcome; never give a failed host roll a second chance.
-    if (Array.isArray(raw.key) && raw.key.some(key => worldInfoKeyMatchesText(triggerText, key, raw, ctx))) return false;
+    // A simple person card may be absent from the host dry-run because its scan budget
+    // was consumed earlier; the title fallback still honors every readable author gate.
     const secondary = raw.selective === true && Array.isArray(raw.keysecondary) ? raw.keysecondary.filter(value => String(value || '').trim()) : [];
     if (secondary.length) {
         const matched = secondary.map(key => worldInfoKeyMatchesText(triggerText, key, raw, ctx));
@@ -6112,14 +6117,12 @@ function worldInfoTitleSupplementAllows(entry, triggerText, ctx) {
                     : logic === rules.AND_ALL ? matched.every(Boolean) : false;
         if (!pass) return false;
     }
-    if (raw.useProbability && Number(raw.probability) !== 100) {
-        const probability = Number(raw.probability);
-        if (!Number.isFinite(probability) || Math.random() * 100 > probability) return false;
-    }
+    // 低概率是否命中只由宿主本轮 dry-run 决定；标题补充不可再掷一次概率。
+    if (raw.useProbability && Number(raw.probability) !== 100) return false;
     return true;
 }
 
-async function buildWorldInfoContext(ctx, { triggerText, triggerMode = 'query', referenceHistory } = {}) {
+async function buildWorldInfoContext(ctx, { triggerText, titleSupplementText = '', triggerMode = 'query', referenceHistory } = {}) {
     const scanEntries = triggerText !== undefined ? await getCharBookEntries(ctx, { includeExcluded: true }) : null;
     const excluded = getWiExcludeSet();
     const entries = scanEntries
@@ -6160,7 +6163,7 @@ async function buildWorldInfoContext(ctx, { triggerText, triggerMode = 'query', 
         if (!message || message.is_system) return false;
         return String(message.mes ?? message.content ?? '').trim().length > 0;
     }) : [];
-    let scanBudgetTokens = WORLD_INFO_TOKEN_BUDGET;
+    let scanBudgetTokens = WORLD_INFO_SCAN_BUDGET;
     if (effectiveTriggerText !== undefined && scanEntries.length) {
         const content = [String(effectiveTriggerText || ''), ...scanEntries.map(entry => {
             const raw = String(entry.content || '');
@@ -6184,7 +6187,8 @@ async function buildWorldInfoContext(ctx, { triggerText, triggerMode = 'query', 
     }
     const candidates = selected
         .filter(e => activation.keys.has(worldInfoCandidateKey(e.source, e.uid))
-            || (effectiveTriggerText !== undefined && worldInfoTitleMatches(e, effectiveTriggerText, effectiveTriggerMode) && worldInfoTitleSupplementAllows(e, effectiveTriggerText, ctx)))
+            || (effectiveTriggerText !== undefined && worldInfoTitleMatches(e, effectiveTriggerText, effectiveTriggerMode) && worldInfoTitleSupplementAllows(e, effectiveTriggerText, ctx))
+            || (effectiveTriggerText !== undefined && worldInfoPersonTitleMatches(e, titleSupplementText) && worldInfoTitleSupplementAllows(e, effectiveTriggerText, ctx)))
         .map(e => e.content)
         .filter(Boolean);
     const hostBudgetCap = Number(worldInfoCore.world_info_budget_cap);
@@ -6203,45 +6207,16 @@ async function buildWorldInfoContext(ctx, { triggerText, triggerMode = 'query', 
         });
     }
     if (!candidates.length) return '';
-
-    const kept = [];
-    let skipped = 0;
-    const titleCount = await countWorldInfoTokens('【世界书】\n');
-    const separatorCount = await countWorldInfoTokens('\n\n');
-    let estimatedTokens = titleCount.tokens;
-    let exactCount = titleCount.exact && separatorCount.exact;
-    for (const content of candidates) {
-        const counted = await countWorldInfoTokens(content);
-        const nextTokens = estimatedTokens + counted.tokens + (kept.length ? separatorCount.tokens : 0);
-        estimatedTokens = nextTokens;
-        exactCount = exactCount && counted.exact;
-        if (nextTokens > WORLD_INFO_TOKEN_BUDGET) {
-            skipped++;
-            estimatedTokens -= counted.tokens + (kept.length ? separatorCount.tokens : 0);
-            continue;
-        }
-        kept.push(content);
-    }
-    let finalCount = await countWorldInfoTokens(`【世界书】\n${kept.join('\n\n')}`);
-    while (finalCount.tokens > WORLD_INFO_TOKEN_BUDGET && kept.length) {
-        const removed = kept.pop();
-        skipped++;
-        estimatedTokens -= (await countWorldInfoTokens(removed)).tokens + (kept.length ? separatorCount.tokens : 0);
-        finalCount = await countWorldInfoTokens(`【世界书】\n${kept.join('\n\n')}`);
-    }
-    if (skipped) {
-        console.warn('[构画] 世界书预算跳过条目诊断', {
-            candidateCount: candidates.length,
-            activatedCount: activation.keys.size,
-            finalEntryCount: kept.length,
-            estimatedTokens: finalCount.tokens,
-            exactCount: finalCount.exact && exactCount,
-            skippedCount: skipped,
-            budget: WORLD_INFO_TOKEN_BUDGET,
-        });
-    }
-    if (!kept.length) return '';
-    return `【世界书】\n${kept.join('\n\n')}`;
+    const result = `【世界书】\n${candidates.join('\n\n')}`;
+    const estimate = await countWorldInfoTokens(result);
+    console.info('[构画] 世界书注入诊断', {
+        candidateCount: candidates.length,
+        activatedCount: activation.keys.size,
+        estimatedTokens: estimate.tokens,
+        exactCount: estimate.exact,
+        warning: '构画不裁剪已命中的世界书；宿主扫描预算仍可能使宿主在构画筛选前省略候选。',
+    });
+    return result;
 }
 
 // Read Anima's summary layer from the chat-bound worldbook. Anima persists each
@@ -6434,99 +6409,9 @@ async function _getMemTextRaw(opts = {}) {
     return memory.getMemoryContext();
 }
 
-// 记忆块 tk 预算封顶（源无关）：所有记忆源的文本都先压到预算内再交给生成，避免长故事上下文失控。
-//   full=true（历·排全年日期）→ 保覆盖：跨全程等距抽块，别掐中段（会漏中段生日/纪念日）。
-//   full=false（点/线/面/间）→ 近景优先：留最近的块 + 一小段最早梗概，中段省略。
-// 不超预算 → 原样返回、零改动。按空行块边界切（三源都用 '\n\n' 分语义单元）；遇到单个超大块时会按策略截取首部或尾部。
-// token 用一次精确总数反推「每字 token 比」，并按实际选中的块、分隔符与省略提示累计估算，避免逐块调分词器。
+// 记忆源先按各自的召回规则选材，再把已选文本原样交给生成；上下文容量由上游模型服务决定。
 async function getMemText(opts = {}) {
-    const raw = await _getMemTextRaw(opts);
-    try { return await _capMemText(raw, !!opts.full); }
-    catch (err) { console.warn('[7dayscal] 记忆预算封顶出错，回退原文', safeDiagnosticLog('memory', 'request', err, { background: true })); return raw; }
-}
-const MEMORY_TOKEN_BUDGET = 60000;
-async function _capMemText(text, full) {
-    const t = String(text || '');
-    if (!t.trim()) return t;
-    const budget = MEMORY_TOKEN_BUDGET;
-    let total;
-    try { total = await getContext().getTokenCountAsync(t); }
-    catch { total = Math.ceil(t.length / 2); }             // 分词器够不着 → 粗估 2 字/token
-    if (total <= budget) return t;                         // 没超 → 原样返回
-    // 填充按 95% 预算算，留 5% 余量：按块估 token 会漏掉块间 '\n\n'、省略标记、以及「单块内计数 vs 整体计数」的舍入差，
-    // 不留余量会以约 1% 幅度轻微超顶。固定预算压到 95% 以内更稳。
-    const eff = Math.floor(budget * 0.95);
-    const ratio = total / t.length;                        // token/字，用于按块长估算
-    const blocks = t.split(/\n{2,}/).map(b => b.trim()).filter(Boolean);
-    if (blocks.length <= 1) {
-        // 单块就超预算（少见，多为柏宝书 full 那种整段文本）：按字比截。历取头(保早期起点)、点线面取尾(保近景)。
-        const keepChars = Math.max(1, Math.floor(eff / ratio));
-        return full ? t.slice(0, keepChars) : t.slice(-keepChars);
-    }
-    const tok = b => b ? Math.max(1, Math.ceil(b.length * ratio)) : 0;
-    const SEP = '\n\n';
-    const sepCost = tok(SEP);
-    const sliceWithin = (value, allowance, fromEnd = false) => {
-        if (allowance <= 0) return '';
-        if (tok(value) <= allowance) return value;
-        const chars = Math.max(1, Math.floor(allowance / ratio));
-        let part = fromEnd ? value.slice(-chars) : value.slice(0, chars);
-        while (part.length > 1 && tok(part) > allowance) part = fromEnd ? part.slice(1) : part.slice(0, -1);
-        return tok(part) <= allowance ? part : '';
-    };
-    if (full) {
-        // 历·保覆盖：等距抽块，含首尾与中段。每个样本按剩余样本数公平分配，超大首块不会吞掉后续覆盖。
-        const avg = total / blocks.length;
-        const keep = Math.min(blocks.length, Math.max(Math.min(3, blocks.length), Math.floor(eff / Math.max(1, avg))));
-        const idxs = [];
-        for (let k = 0; k < keep; k++) {
-            const idx = keep === 1 ? 0 : Math.round(k * (blocks.length - 1) / (keep - 1));
-            if (idxs[idxs.length - 1] !== idx) idxs.push(idx);
-        }
-        const parts = ['（……为控制长度，以下为全程等距节选，非完整时间线……）'];
-        let used = tok(parts[0]);
-        for (let pos = 0; pos < idxs.length; pos++) {
-            const remaining = idxs.length - pos;
-            const allowance = Math.floor((eff - used - sepCost * remaining) / remaining);
-            const part = sliceWithin(blocks[idxs[pos]], allowance);
-            if (!part) continue;
-            parts.push(part);
-            used += sepCost + tok(part);
-        }
-        return parts.join(SEP);
-    }
-    // 点/线/面/间·近景优先：最早留一小段梗概（≤15% 预算）+ 最近塞满剩余，中段省略。
-    const ELIDE = '（……中段记忆已省略以控制长度……）';
-    const headBudget = Math.floor(eff * 0.15);
-    const head = []; let hUsed = 0, hi = 0, headTruncated = false;
-    // 最新块永远交给尾部预算，从块尾截取；早期预算不能先从它的开头切走。
-    while (hi < blocks.length - 1) {
-        const allowance = headBudget - hUsed - (head.length ? sepCost : 0);
-        const part = sliceWithin(blocks[hi], allowance);
-        if (!part) break;
-        head.push(part);
-        hUsed += (head.length > 1 ? sepCost : 0) + tok(part);
-        hi++;
-        if (part.length < blocks[hi - 1].length) { headTruncated = true; break; }
-    }
-    const fixedCost = hUsed + tok(ELIDE) + sepCost * (head.length ? 2 : 1);
-    const tailBudget = Math.max(0, eff - fixedCost);
-    const tailRev = []; let tUsed = 0, ti = blocks.length - 1, tailTruncated = false;
-    while (ti >= hi) {
-        const allowance = tailBudget - tUsed - (tailRev.length ? sepCost : 0);
-        const part = sliceWithin(blocks[ti], allowance, ti === blocks.length - 1);
-        if (!part) break;
-        tailRev.push(part);
-        tUsed += (tailRev.length > 1 ? sepCost : 0) + tok(part);
-        ti--;
-        if (part.length < blocks[ti + 1].length) { tailTruncated = true; break; }
-    }
-    const tail = tailRev.reverse();
-    const parts = [];
-    if (head.length) parts.push(...head);
-    if (hi <= ti || headTruncated || tailTruncated) parts.push(ELIDE);
-    if (tail.length) parts.push(...tail);
-    return parts.join(SEP);
+    return _getMemTextRaw(opts);
 }
 
 // user persona 描述 + 当前聊天的作者注释——点/线/面生成与间/面聊天共用同一读取口径。
@@ -6592,8 +6477,7 @@ async function buildMessages(ctx, prompt, userName, charName, historyLimit = 3, 
         const snapshot = opts.memorySnapshot;
         if (!qianQianJieGenerationSnapshotCurrent(snapshot, opts.memoryOperationToken, ctx)) throw makeDiagnosticError('memory-stale', { phase: 'memory-preflight' });
         const rawSnapshotText = snapshot.text;
-        try { rawMemText = await _capMemText(rawSnapshotText, !!opts.fullMemory); }
-        catch (err) { console.warn('[7dayscal] 记忆预算封顶出错，回退原文', safeDiagnosticLog('memory', 'request', err, { background: true })); rawMemText = rawSnapshotText; }
+        rawMemText = rawSnapshotText;
     } else {
         rawMemText = await getMemText({ full: opts.fullMemory, query: prompt });
     }
@@ -6768,7 +6652,6 @@ async function readCreativeChatMemory({ ctx, userMsg, signal, selection }) {
         if (!creativeChatMemorySelectionCurrent(selection)) throw Object.assign(new Error('memory source changed'), { name: 'AbortError' });
     };
     let text = '';
-    let alreadyCapped = false;
     if (selection.source === 'qianqianjie') {
         const operationToken = Symbol('outline-chat-memory');
         const preflight = await memoryPreCheckConfirm({ signal, contextSnapshot: ctx, operationToken });
@@ -6783,7 +6666,6 @@ async function readCreativeChatMemory({ ctx, userMsg, signal, selection }) {
         const cached = preflight.memorySnapshot.cached === true;
         const rawRecall = preflight.memorySnapshot.text.replace(/^【千千结上次成功召回】\n/, '').trim();
         text = rawRecall ? `${cached ? '【千千结上次成功召回】' : '【千千结本轮召回】'}\n${rawRecall}` : '';
-        alreadyCapped = true;
         return { text, recentFallback: preflight.memorySnapshot.status === 'empty' || !rawRecall };
     } else if (selection.source === 'database') {
         const result = await databaseMemoryAccess.result({ query: userMsg });
@@ -6794,7 +6676,7 @@ async function readCreativeChatMemory({ ctx, userMsg, signal, selection }) {
         try { text = await getAnimaMemText({ query: userMsg, strict: true }); }
         catch (error) { ensureCurrent(); throw outlineChatMemoryError(`Anima 记忆读取失败：${diagnosticMessage(error, { phase: 'request' })}`); }
         ensureCurrent();
-        if (!text.trim()) throw outlineChatMemoryError('Anima 当前聊天没有可注入的摘要');
+        return { text, recentFallback: !text.trim() };
     } else if (selection.source === 'bai-bai-book') {
         const api = globalThis.STBaiBaiBook;
         if (!api || typeof api.getInjectedHistory !== 'function') throw outlineChatMemoryError('柏宝书读取接口未就绪');
@@ -6802,30 +6684,31 @@ async function readCreativeChatMemory({ ctx, userMsg, signal, selection }) {
         try { injected = api.getInjectedHistory(); }
         catch (error) { ensureCurrent(); throw outlineChatMemoryError(`柏宝书记忆读取失败：${diagnosticMessage(error, { phase: 'request' })}`); }
         ensureCurrent();
+        text = String(injected?.relativeText || '');
         if (injected?.coverage?.complete === false) {
             const missing = injected.coverage.missingAiFloors?.length ?? '?';
             const proceed = await spConfirm({
                 title: '柏宝书记忆未覆盖完整',
                 body: `柏宝书报告缺 ${missing} 楼摘要（missingAiFloors）。`,
-                note: '继续讨论会使用当前柏宝书历史（可能不完整）。你也可以先去柏宝书补齐。',
+                note: text.trim()
+                    ? '继续讨论会使用当前柏宝书历史（可能不完整）。你也可以先去柏宝书补齐。'
+                    : '确认后将读取最近 6 条完整、可见的 AI 对话作为讨论上下文；也可以先去柏宝书补齐。',
                 confirmText: '继续讨论',
                 cancelText: '取消',
             });
             ensureCurrent();
             if (!proceed) throw Object.assign(new Error('memory read cancelled'), { name: 'AbortError' });
         }
-        text = String(injected?.relativeText || '');
-        if (!text.trim()) throw outlineChatMemoryError('柏宝书当前没有可注入的历史记忆');
+        return { text, recentFallback: !text.trim() };
     } else {
         const preflight = await memoryPreCheckConfirm({ signal, contextSnapshot: ctx });
         ensureCurrent();
         if (!preflight) throw Object.assign(new Error('memory preflight cancelled'), { name: 'AbortError' });
         try { text = await getMemText({ query: userMsg }); }
         catch (error) { ensureCurrent(); throw outlineChatMemoryError(`内置故事记忆读取失败：${diagnosticMessage(error, { phase: 'request' })}`); }
-        alreadyCapped = true;
     }
     ensureCurrent();
-    return { text: alreadyCapped ? text : await _capMemText(text, false), recentFallback: false };
+    return { text, recentFallback: false };
 }
 
 async function composeCreativeChatMessages({ target, userMsg, historySnapshot, signal }) {
@@ -6840,9 +6723,27 @@ async function composeCreativeChatMessages({ target, userMsg, historySnapshot, s
     const memoryRead = await readCreativeChatMemory({ ctx, userMsg, signal, selection: memorySelection });
     const memText = memoryRead.text;
     if (!creativeChatMemorySelectionCurrent(memorySelection)) throw Object.assign(new Error('memory source changed'), { name: 'AbortError' });
-    // 旧面内问答仍供模型理解；世界书只由本轮问题触发，避免旧话题每轮复燃。
-    const wiContext = await buildWorldInfoContext(ctx, { triggerText: userMsg, triggerMode: 'query' });
     const recentCtx = await buildRecentChatContext(ctx, 6, memoryRead.recentFallback ? Infinity : 2500);
+    if (memoryRead.recentFallback && !recentCtx) {
+        throw outlineChatMemoryError('所选记忆源没有可用摘要，最近 6 条可见 AI 对话也没有可读正文');
+    }
+    // 宿主关键词扫描只看本轮问题；人物标题补充也看本轮真正送出的问答、记忆和剧情材料。
+    const titleSupplementText = [
+        userMsg,
+        ...historySnapshot.map(message => String(message?.content ?? '')),
+        outlineCtx,
+        memText,
+        recentCtx,
+        personaDesc,
+        authorNote,
+        almanacText,
+        calDescText,
+    ].filter(Boolean).join('\n\n');
+    const wiContext = await buildWorldInfoContext(ctx, {
+        triggerText: userMsg,
+        titleSupplementText,
+        triggerMode: 'query',
+    });
     if (signal?.aborted || !creativeChatMemorySelectionCurrent(memorySelection)) {
         throw Object.assign(new Error('memory source changed'), { name: 'AbortError' });
     }

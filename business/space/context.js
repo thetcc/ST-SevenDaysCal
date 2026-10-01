@@ -191,11 +191,36 @@ export function createSpaceContext(env = {}) {
             ? ''
             : (includesAny(message, LEDGER_READ_KEYWORDS) ? env.readLedgerText?.(target) || '' : '');
         const faqText = intent.faq ? buildSpaceHelpText(env.settings?.() || {}) : '';
-        // 旧问答只辅助确认群体回指，不进入宿主扫描或世界书标题触发文本。
-        const wiContext = await env.readWorldInfo?.(ctx, message, historySnapshot.slice(0, -1)) || '';
         const memText = await env.readMemory?.(ctx) || '';
         const recentCtx = await env.readRecent?.(ctx) || '';
         const { personaDesc = '', authorNote = '' } = env.readCardExtras?.(ctx) || {};
+        const almanacText = env.readAlmanacText?.(target) || '';
+        const calDescText = env.readCalendarText?.(target) || '';
+        const personaOverride = String(env.settings?.()?.spacePersona || '').trim();
+        const historyMessages = stripWidgetsForApi(historySnapshot);
+        const titleSupplementText = [
+            message,
+            ...historyMessages.map(item => String(item?.content ?? '')),
+            intent.action === 'revise-recent' ? intent.recentWidget?.body : '',
+            intent.action === 'revise-recent'
+                && intent.recentWidget?.kind === 'schedule_widget'
+                && intent.recentWidget.editIdx != null
+                && intent.recentWidget.owner?.view === 'char'
+                ? intent.recentWidget.owner.charName : '',
+            outlineRaw,
+            pointList,
+            lineList,
+            ledgerList,
+            memText,
+            recentCtx,
+            personaDesc,
+            authorNote,
+            almanacText,
+            calDescText,
+            personaOverride,
+        ].filter(Boolean).join('\n\n');
+        // 宿主仍只按本轮问题扫描关键词；人物标题补充只读本轮真正投喂的动态材料。
+        const wiContext = await env.readWorldInfo?.(ctx, message, historySnapshot.slice(0, -1), titleSupplementText) || '';
         const system = buildSpaceChatSystemPrompt({
             userName,
             charName,
@@ -208,14 +233,14 @@ export function createSpaceContext(env = {}) {
             pointList,
             lineList,
             ledgerList,
-            almanacText: env.readAlmanacText?.(target) || '',
-            calDescText: env.readCalendarText?.(target) || '',
+            almanacText,
+            calDescText,
             faqText,
-            personaOverride: String(env.settings?.()?.spacePersona || '').trim(),
+            personaOverride,
             lineDirection: env.lineDirection?.(ctx) || 'natural',
             intent,
         });
-        const messages = [{ role: 'system', content: system }, ...stripWidgetsForApi(historySnapshot), { role: 'user', content: userMsg }];
+        const messages = [{ role: 'system', content: system }, ...historyMessages, { role: 'user', content: userMsg }];
         Object.defineProperty(messages, 'pointBaselines', { value: compactPointBaselines(pointScopes), enumerable: false });
         Object.defineProperty(messages, 'lineBaselines', { value: Object.freeze(lineBaselines), enumerable: false });
         // 本地 transport 元数据，不发送给 API；冻结本轮唯一允许应用的卡型。

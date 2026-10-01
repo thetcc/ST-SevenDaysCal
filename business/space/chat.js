@@ -38,7 +38,6 @@ export function createSpaceChat(env = {}) {
             const reply = await env.postCompletion?.({
                 config,
                 messages,
-                maxTokens: env.maxTokens ?? 30000,
                 temperature: env.temperature,
                 signal: controller.signal,
                 promptMode: 'creative',

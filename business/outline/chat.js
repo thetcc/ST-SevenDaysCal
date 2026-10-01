@@ -10,7 +10,6 @@ export function createOutlineChat({
     renderer,
     ui,
     openSettings,
-    maxTokens = 30000,
     temperature,
     now = () => Date.now(),
 } = {}) {
@@ -109,7 +108,6 @@ export function createOutlineChat({
             const reply = await postCompletion?.({
                 config,
                 messages,
-                maxTokens,
                 temperature,
                 signal: controller.signal,
                 promptMode: 'creative',

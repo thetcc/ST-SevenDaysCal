@@ -195,7 +195,7 @@ export async function postChatCompletion(options = {}) {
     }
 }
 
-async function postChatCompletionCore({ cfg, messages, maxTokens, temperature, signal: inputSignal = null, userName = '', charName = '', allowEmptyOutput = false, promptMode = PROMPT_MODES.MECHANICAL, diagnosticLifecycle = null, diagnosticTraceBase = null } = {}) {
+async function postChatCompletionCore({ cfg, messages, temperature, signal: inputSignal = null, userName = '', charName = '', allowEmptyOutput = false, promptMode = PROMPT_MODES.MECHANICAL, diagnosticLifecycle = null, diagnosticTraceBase = null } = {}) {
     const signal = normalizeAbortSignal(inputSignal);
     throwIfPreAborted(signal);
     // 总开关硬闸：插件关闭时挡住一切生成（手动 + 后台判定），防任何路径漏网。tag 供调用方识别、静默处理。
@@ -237,7 +237,6 @@ async function postChatCompletionCore({ cfg, messages, maxTokens, temperature, s
         presence_penalty      : 0,
         frequency_penalty     : 0,
     };
-    if (Number.isFinite(maxTokens))   body.max_tokens  = maxTokens;
     if (Number.isFinite(temperature)) body.temperature = temperature;
     // 剔除参数：把用户指定的字段从 body 删掉，规避不接受这些参数的兼容端点报 400
     // （如哈基米/Gemini 代理不认 frequency_penalty）。固定路由字段受保护，不会被删。
@@ -258,8 +257,8 @@ async function postChatCompletionCore({ cfg, messages, maxTokens, temperature, s
             ...(Object.hasOwn(body, 'frequency_penalty') ? { frequencyPenalty: body.frequency_penalty } : {}),
         },
     });
-    // 调试上下文明确记录是否因剔除参数而没有发送输出上限；不改写用户配置。
-    _bridge.setLastDebugPayload({ model: cfg.model || 'gpt-4o-mini', messages, outputLimit: body.max_tokens ?? null, outputLimitOmitted: !Object.hasOwn(body, 'max_tokens') });
+    // 构画不指定输出上限；上游可能仍有自己的硬限制或默认长度。
+    _bridge.setLastDebugPayload({ model: cfg.model || 'gpt-4o-mini', messages, outputLimit: null, outputLimitOmitted: true });
 
     // 全生命周期超时：内部 AbortController 同时受外部 signal 与定时器控制，
     // 覆盖建连 + 非流式 JSON 读取 + 流式 SSE 读取。超时转成明确报错而非静默卡死。
@@ -359,10 +358,8 @@ async function postChatCompletionCore({ cfg, messages, maxTokens, temperature, s
 
 export async function callCustomApi(ctx, prompt, cfg, userName, charName, signal = null, historyLimit = 3, opts = {}) {
     const messages = await _bridge.buildMessages(ctx, prompt, userName, charName, historyLimit, opts);
-    // 30000：推理模型（GLM 等）会先耗一大段思维链预算，长提示词（尤其「面」）下要留足空间，
-    // 否则正文被挤空 → 代理回 <none>。
     // opts.temperature：可选，机械/创作按需覆盖（历生成抬温让次要节日与风味更发散）；未给则跟随预设。
-    return postChatCompletion({ cfg, messages, maxTokens: 30000, temperature: Number.isFinite(opts.temperature) ? opts.temperature : GEN_TEMPERATURE, signal, userName, charName, allowEmptyOutput: opts.allowEmptyOutput === true, promptMode: opts.promptMode, diagnosticModule: opts.diagnosticModule, diagnosticChannel: opts.diagnosticChannel, diagnosticContext: opts.diagnosticContext, diagnosticSink: opts.diagnosticSink });
+    return postChatCompletion({ cfg, messages, temperature: Number.isFinite(opts.temperature) ? opts.temperature : GEN_TEMPERATURE, signal, userName, charName, allowEmptyOutput: opts.allowEmptyOutput === true, promptMode: opts.promptMode, diagnosticModule: opts.diagnosticModule, diagnosticChannel: opts.diagnosticChannel, diagnosticContext: opts.diagnosticContext, diagnosticSink: opts.diagnosticSink });
 }
 
 // Called by memory.js — minimal wrapper around user's configured API.
@@ -371,7 +368,6 @@ export async function callMemoryApi(messages, signal = null) {
     return postChatCompletion({
         cfg: loadUtilityCfg(),   // 机械任务：可分流到轻量预设（省钱/降配），未设则=主 API
         messages,
-        maxTokens: 30000,   // 上限放宽（与其它调用统一为 30000）；摘要实际长度仍由提示词约束
         temperature: 0.3,   // low temp for factual extraction
         signal,
         promptMode: PROMPT_MODES.MECHANICAL,
@@ -382,10 +378,10 @@ export async function callMemoryApi(messages, signal = null) {
 // Called by business/theater/generation.js — bare API caller (world info/persona already baked into
 // the messages by the theater generation flow via getTheaterStoryContext). Bare like callMemoryApi;
 // world info is NOT auto-injected here so the beautify pass stays clean.
-export async function callTheaterApi(messages, { maxTokens = 30000, signal = null, userName = null, charName = null, promptMode = PROMPT_MODES.MECHANICAL, diagnosticModule = 'theater', diagnosticSink = null } = {}) {
+export async function callTheaterApi(messages, { signal = null, userName = null, charName = null, promptMode = PROMPT_MODES.MECHANICAL, diagnosticModule = 'theater', diagnosticSink = null } = {}) {
     const cfg = loadCfg();
     if (!cfg.url || !cfg.key) throw makeDiagnosticError('config-missing');
     const ctx = getContext();
-    if (!userName && !charName) return postChatCompletion({ cfg, messages, maxTokens, temperature: GEN_TEMPERATURE, signal, userName: ctx?.name1 || '用户', charName: ctx?.name2 || '角色', promptMode, diagnosticModule, diagnosticSink });
-    return postChatCompletion({ cfg, messages, maxTokens, temperature: GEN_TEMPERATURE, signal, userName: userName || ctx?.name1 || '用户', charName: charName || ctx?.name2 || '角色', promptMode, diagnosticModule, diagnosticSink });
+    if (!userName && !charName) return postChatCompletion({ cfg, messages, temperature: GEN_TEMPERATURE, signal, userName: ctx?.name1 || '用户', charName: ctx?.name2 || '角色', promptMode, diagnosticModule, diagnosticSink });
+    return postChatCompletion({ cfg, messages, temperature: GEN_TEMPERATURE, signal, userName: userName || ctx?.name1 || '用户', charName: charName || ctx?.name2 || '角色', promptMode, diagnosticModule, diagnosticSink });
 }

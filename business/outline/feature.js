@@ -91,7 +91,6 @@ export function createOutlineFeature(env = {}) {
         renderer,
         ui,
         openSettings: env.openSettings,
-        maxTokens: 30000,
         temperature: env.temperature,
         now: env.now,
     });

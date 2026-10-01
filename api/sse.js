@@ -11,7 +11,7 @@ export function normalizeApiUrl(url) {
 }
 
 // 固定路由字段：这些是走 ST 代理必需的，即便用户填进剔除框也不能删（否则请求直接废掉）。
-// 剔除只针对采样参数（temperature/max_tokens/presence_penalty/frequency_penalty/top_p...）。
+// 兼容端点可能仍会在错误信息中提到 max_tokens；构画请求本身不指定输出长度。
 export const PROTECTED_BODY_KEYS = new Set(['chat_completion_source', 'reverse_proxy', 'proxy_password', 'model', 'messages']);
 
 // 把原始错误（HTTP 状态码 / 上游报文 / 网络异常）翻译成用户能照着做的提示。

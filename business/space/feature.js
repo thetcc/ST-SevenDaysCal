@@ -29,7 +29,6 @@ export function createSpaceFeature(env = {}) {
         buildMessages: context.buildMessages,
         postCompletion: env.postCompletion,
         openSettings: env.openSettings,
-        maxTokens: 30000,
         temperature: env.temperature,
         ui,
     });
