@@ -2,6 +2,7 @@ import { parseLines, serializeLines } from './schema.js';
 import { stripInternalLineLines, ticketFromCue } from './vectors/codec.js';
 import { adultPromptGuidance } from './adult.js';
 import { lineDirectionContract } from './direction.js';
+import { narrativeScaleGuidance } from '../narrative-preferences.js';
 
 export function prepareLinesInspirationContext(context = {}) { return context; }
 export const LINE_NEXT_RELEASE_CONTRACT = 'Next: 一句前瞻信号或 stall=true 的恢复条件';
@@ -20,7 +21,7 @@ function vectorPromptContext(vectorContext = {}) {
         const adult = ticket.adultSelection;
         const adultText = adult ? `；【成人选材】驱动力：${adult.drive}；行为：${adult.behavior}；节奏：${adult.pacing}；场景：${adult.scene}；后果：${adult.consequence}` : '';
         const ticketId = ticket.ticketId || `TICKET-${index + 1}`;
-        return `- 临时票据 ID=${ticketId}${poolLabel ? `（${poolLabel}）` : ''}：${ticket.selections.map(item => `${item.label}（${item.prompt}）`).join('；')}${adultText}`;
+        return `- 临时票据 ID=${ticketId}；分类：${poolLabel || '普通'}；影响角度：${ticket.selections.map(item => `${item.label}（${item.prompt}）`).join('；')}${adultText}`;
     };
     const indexed = freshTickets.map((ticket, index) => ({ ticket, index }));
     const hasPools = indexed.some(({ ticket }) => ticket.adultPool);
@@ -38,11 +39,12 @@ export function buildLinesPrompt(userName = '用户', charName = '角色', persp
     const promptContext = prepareLinesInspirationContext({ userName, charName, perspective, previousRaw, scale, vectorContext });
     ({ userName, charName, perspective, previousRaw, scale, vectorContext } = promptContext);
     const seedRun = vectorContext.intent === 'initial' || vectorContext.intent === 'reroll';
-    const scaleContract = (scale === 'macro' ? '关注势力、世界与长期局势。' : scale === 'micro' ? '关注人物当下行动、关系与短期催化。' : '兼顾人物、事件与世界局势，保持可推进的粒度。')
-        + '以已有正文、记忆与世界设定确立的事实，以及既有主体的动机、资源、行动条件和实际经过的故事时间为依据，自由判断下一变化应当激化、维持、缓和、转向、解决或淡出。既有人物、势力、机构或环境可以在场外合理推进自身进展；正文暂未提及或当前主角未参与不等于停滞，普通场外推演也不等于凭空编造。不要求每条线每轮都变化或升级阶段；分歧、关系张力、彼此试探或立场摩擦不等于必须扩大伤害。阶段只描述生命周期位置，不构成升级命令。没有充分依据时，不得突然扩大伤害或制造不可逆后果；只经过短时间时，不得强行跨越本应漫长的进程。';
+    const scaleContract = `【叙事尺度·观察焦点】${narrativeScaleGuidance(scale)}`
+        + '尺度只决定观察焦点，不决定冲突强度或故事时间速度；宏观不等于阴谋或冲突，中观不等于组织对抗，微观不等于恋爱。'
+        + '用户本轮明确的创作要求优先。以已有正文、记忆与世界设定确立的事实，以及既有主体的动机、资源、行动条件和实际经过的故事时间为依据，自由判断下一变化应当激化、维持、缓和、转向、解决或淡出。既有人物、势力、机构或环境可以在场外合理推进自身进展；正文暂未提及或当前主角未参与不等于停滞，普通场外推演也不等于凭空编造。不要求每条线每轮都变化或升级阶段；分歧、关系张力、彼此试探或立场摩擦不等于必须扩大伤害。阶段只描述生命周期位置，不构成升级命令。没有充分依据时，不得突然扩大伤害或制造不可逆后果；只经过短时间时，不得强行跨越本应漫长的进程。';
     const countContract = seedRun
         ? '首次生成或刷新可按证据输出 1–8 条自动线；不必用完票据，不为凑数硬编。'
         : '自然推进必须逐条原名、完整返回每条旧未锁活线（包括本轮刚进入终态者），可按证据自由新建；提交后的未锁非终态自动线不得超过 8 条。旧线进入终态会腾出容量；除此不设主动方或单轮出生配额。';
     const oldFormatContract = vectorContext.intent === 'reroll' ? '刷新不要求返回旧自动线。' : '旧线保持原名并完整输出 Line、Desc、Next，改名、漏写或重复续写均违规。';
-    return `请依据当前正文、记忆与世界设定推演全局平行事件线。${userName}与${charName}只是既有参与者，不是固定叙事中心。只输出结构化结果，不要解释、前言或代码块外文字。\n\n【一、选材】${scaleContract}只追踪已有证据支持、当前真正活跃且值得后续观察的事件。主动方可以是 ${userName}、${charName}、既有配角、群体、势力、机构，或能自行变化的制度/环境因素；不得凭空创造陌生人物、阴谋、灾难或极端对抗。除非剧情证据确实高度集中于 ${userName}，不要让 ${userName} 成为绝大多数线的主动方或所有线的唯一落点。\n同一主体、时间窗、现实触发事件与核心目标的后续步骤合并为同一条线，上下游分别写入 Desc / Next；互斥结果保留为同一条线的未决走向。只有核心目标、分歧来源或独立生命周期实质不同才另建；Cue 不同本身不构成新线理由。\n${lineDirectionContract(direction)}\n\n【二、主动方与 agency】每条线选择当下真正掌握推动力的既有主体。agency=player 仅表示下一步必须等待 ${userName} 的选择或行动；agency=world 表示其他人物、势力、机构或环境即使 ${userName} 暂不参与也能自行推进。不要因为事件将来可能影响 ${userName} 就标 player。Desc 只写当前状态、背景与有关各方位置；Next 写真正主动方紧邻的下一步，或事件自行发生的下一变化，不强制写成 ${userName} 的反应。\n\n【三、推进与生命周期】${countContract}${oldFormatContract}\n五个阶段共用同一生命周期：起线＝刚进入追踪；延展＝继续发展或维持；成形＝影响变得明确，而非要求事态极端化；收束＝解决、和解、形成新平衡或事务落定；淡出＝不再值得持续追踪。收束、淡出是终态，只用于输入中已有且本轮刚结束追踪的线；不要把已经结束的历史事件新建为终态线。新线必须是非终态并值得继续追踪。${adultPromptGuidance(adultMode)}\n\n【四、理想机器结构】输出一对闭合的 <storylines_widget>...</storylines_widget>。stage 只使用起线、延展、成形、收束、淡出；agency 使用 player 或 world；stall、pin 使用 true 或 false。pin 是本地保留位，AI 一律输出 pin=false。\n每条线包含以下业务字段；新线额外带本轮临时 Ticket：\nLine: 名称|阶段|时间锚点|agency|stall|pin\nTicket: <本轮列出的临时票据 ID>（仅新线）\nDesc: 当前状态、背景、有关各方位置\nNext: ${LINE_NEXT_RELEASE_CONTRACT.replace('Next: ', '')}\n名称、时间锚点、Desc、Next 和新线 Ticket 不得省略；不要截断。\n\n【当前已追踪】\n${trackedLinesForPrompt(previousRaw, vectorContext)}${vectorPromptContext(vectorContext)}`.replace(/\{\{user\}\}/g, userName).replace(/\{\{char\}\}/g, charName);
+    return `请依据当前正文、记忆与世界设定推演全局平行事件线。${userName}与${charName}只是既有参与者，不是固定叙事中心。只输出结构化结果，不要解释、前言或代码块外文字。\n\n【一、选材】${scaleContract}只追踪已有证据支持、当前真正活跃且值得后续观察的事件。主动方可以是 ${userName}、${charName}、既有配角、群体、势力、机构，或能自行变化的制度/环境因素；不得凭空创造陌生人物、阴谋、灾难或极端对抗。除非剧情证据确实高度集中于 ${userName}，不要让 ${userName} 成为绝大多数线的主动方或所有线的唯一落点。\n同一主体、时间窗、现实触发事件与核心目标的后续步骤合并为同一条线，上下游分别写入 Desc / Next；互斥结果保留为同一条线的未决走向。只有核心目标、分歧来源或独立生命周期实质不同才另建；Cue 不同本身不构成新线理由。\n${lineDirectionContract(direction)}\n\n【二、主动方与 agency】每条线选择当下真正掌握推动力的既有主体。agency=player 仅表示下一步必须等待 ${userName} 的选择或行动；agency=world 表示其他人物、势力、机构或环境即使 ${userName} 暂不参与也能自行推进。不要因为事件将来可能影响 ${userName} 就标 player。Desc 只写当前状态、背景与有关各方位置；Next 写真正主动方紧邻的下一步，或事件自行发生的下一变化，不强制写成 ${userName} 的反应。\n\n【三、推进与生命周期】${countContract}${oldFormatContract}\n五个阶段共用同一生命周期：起线＝刚进入追踪；延展＝继续发展或维持；成形＝影响变得明确，而非要求事态极端化；收束＝解决、和解、形成新平衡或事务落定；淡出＝不再值得持续追踪。收束、淡出是终态，只用于输入中已有且本轮刚结束追踪的线；不要把已经结束的历史事件新建为终态线。新线必须是非终态并值得继续追踪。${adultPromptGuidance(adultMode)}\n\n【四、理想机器结构】输出一对闭合的 <storylines_widget>...</storylines_widget>。stage 只使用起线、延展、成形、收束、淡出；agency 使用 player 或 world；stall、pin 使用 true 或 false。pin 是本地保留位，AI 一律输出 pin=false。\n每条线包含以下业务字段；新线额外带本轮临时 Ticket：\nLine: 名称|阶段|时间锚点|agency|stall|pin\nTicket: <本轮列出的临时票据 ID>\nDesc: 当前状态、背景、有关各方位置\nNext: ${LINE_NEXT_RELEASE_CONTRACT.replace('Next: ', '')}\n新线才填写 Ticket，且字段中只写纯编号（例如 TICKET-1），不要附分类括号或解释；分类仅是上方本地票据清单的说明。示例编号必须替换为本轮实际列出的 Ticket。名称、时间锚点、Desc、Next 和新线 Ticket 不得省略；不要截断。\n\n【当前已追踪】\n${trackedLinesForPrompt(previousRaw, vectorContext)}${vectorPromptContext(vectorContext)}`.replace(/\{\{user\}\}/g, userName).replace(/\{\{char\}\}/g, charName);
 }
