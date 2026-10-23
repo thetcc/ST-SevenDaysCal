@@ -1,3 +1,4 @@
+import { icon } from './utils/icons.js';
 const OVERLAY_ID = 'sp-addon-dialog';
 
 function escapeHtml(value) {
@@ -123,7 +124,7 @@ export function createDialogManager({ $, mount, getRootClass = () => '', subscri
                 const raw = typeof validate === 'function' ? validate(value) : '';
                 const error = typeof raw === 'string' ? raw : '';
                 if (error) {
-                    $overlay.find('.sp-dialog-input-error').html(`<i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> ${escapeHtml(error)}`);
+                    $overlay.find('.sp-dialog-input-error').html(`${icon("alert-triangle")} ${escapeHtml(error)}`);
                     $overlay.find('.sp-dialog-input').trigger('focus');
                     return;
                 }
@@ -136,6 +137,51 @@ export function createDialogManager({ $, mount, getRootClass = () => '', subscri
                 else if (event.key === 'Escape') { event.preventDefault(); session.close(); }
             });
             setTimeout(() => $overlay.find('.sp-dialog-input').trigger('focus').trigger('select'), 0);
+        });
+    }
+
+    function custom({ title = '', content, confirmText = '确定', cancelText = '取消', submit, onClose } = {}) {
+        if (!content || typeof submit !== 'function') throw new TypeError('自定义弹窗内容无效');
+        return new Promise(resolve => {
+            prepareDialog();
+            let previousFocus = globalThis.document?.activeElement;
+            while (previousFocus?.shadowRoot?.activeElement) previousFocus = previousFocus.shadowRoot.activeElement;
+            const cancelButton = cancelText === '' || cancelText === null ? '' : `<button class="sp-dialog-button sp-dialog-button-secondary sp-dialog-cancel" type="button">${escapeHtml(cancelText)}</button>`;
+            const $overlay = $(`<div id="${OVERLAY_ID}" class="sp-dialog-overlay">
+                <div class="sp-dialog-sheet sp-dialog-sheet-custom" role="dialog" aria-modal="true" aria-labelledby="sp-dialog-title">
+                    <div id="sp-dialog-title" class="sp-dialog-head">${escapeHtml(title)}</div>
+                    <div class="sp-dialog-custom"></div>
+                    <div class="sp-dialog-input-error" aria-live="polite"></div>
+                    <div class="sp-dialog-actions">
+                        ${cancelButton}
+                        <button class="sp-dialog-button sp-dialog-button-primary sp-dialog-submit" type="button">${escapeHtml(confirmText)}</button>
+                    </div>
+                </div>
+            </div>`);
+            $overlay.find('.sp-dialog-custom')[0]?.appendChild?.(content);
+            const session = mountDialog($overlay, resolve, { onClose: () => { try { onClose?.(); } finally { if (previousFocus?.isConnected) previousFocus.focus(); } } });
+            let submitting = false;
+            const runSubmit = async () => {
+                if (submitting || session.isDone()) return;
+                submitting = true; $overlay.find('.sp-dialog-input-error').empty();
+                try { const value = await submit(); session.finish(value ?? true); }
+                catch (error) {
+                    submitting = false;
+                    $overlay.find('.sp-dialog-input-error').html(`${icon("alert-triangle")} ${escapeHtml('操作失败，请重试。')}`);
+                }
+            };
+            $overlay.find('.sp-dialog-submit').on('click', runSubmit);
+            $overlay.find('.sp-dialog-cancel').on('click', session.close);
+            if (String(content.tagName ?? content.tag ?? '').toLowerCase() === 'form') {
+                content.addEventListener?.('submit', event => { event.preventDefault(); runSubmit(); });
+                content.addEventListener?.('keydown', event => {
+                    const target = event.target;
+                    const type = String(target?.type ?? target?.getAttribute?.('type') ?? 'text').toLowerCase();
+                    if (String(target?.tagName ?? target?.tag ?? '').toLowerCase() !== 'input' || !['text', 'search', 'url', 'tel', 'email', 'password', 'number', 'date', 'datetime-local', 'month', 'time', 'week'].includes(type) || event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+                    event.preventDefault(); runSubmit();
+                });
+            }
+            setTimeout(() => $overlay.find('.sp-dialog-submit').trigger('focus'), 0);
         });
     }
 
@@ -195,7 +241,7 @@ export function createDialogManager({ $, mount, getRootClass = () => '', subscri
                 const raw = typeof validate === 'function' ? validate(result) : '';
                 const error = typeof raw === 'string' ? raw : '';
                 if (error) {
-                    $overlay.find('.sp-dialog-input-error').html(`<i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> ${escapeHtml(error)}`);
+                    $overlay.find('.sp-dialog-input-error').html(`${icon("alert-triangle")} ${escapeHtml(error)}`);
                     if (customValue && values.includes(customValue) && !inputValue) $overlay.find('.sp-dialog-custom-input').trigger('focus');
                     return;
                 }
@@ -279,7 +325,7 @@ export function createDialogManager({ $, mount, getRootClass = () => '', subscri
                 const raw = typeof validate === 'function' ? validate(result) : '';
                 const error = typeof raw === 'string' ? raw : '';
                 if (error) {
-                    $overlay.find('.sp-dialog-input-error').html(`<i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> ${escapeHtml(error)}`);
+                    $overlay.find('.sp-dialog-input-error').html(`${icon("alert-triangle")} ${escapeHtml(error)}`);
                     if (customValue && selected === customValue) $overlay.find('.sp-dialog-custom-input').trigger('focus');
                     return;
                 }
@@ -332,7 +378,7 @@ export function createDialogManager({ $, mount, getRootClass = () => '', subscri
                     ? `<div class="sp-dialog-single-list sp-dialog-async-list" role="radiogroup">${choices.map(choice => {
                         const value = String(choice?.value ?? '');
                         const on = value === selected;
-                        return `<button type="button" role="radio" class="sp-dialog-single-option${on ? ' sp-dialog-single-selected' : ''}" data-dialog-value="${escapeHtml(value)}" aria-checked="${String(on)}"><i class="${on ? 'fa-solid fa-circle-check' : 'fa-regular fa-circle'}" aria-hidden="true"></i><span>${escapeHtml(choice?.label ?? value)}</span></button>`;
+                        return `<button type="button" role="radio" class="sp-dialog-single-option${on ? ' sp-dialog-single-selected' : ''}" data-dialog-value="${escapeHtml(value)}" aria-checked="${String(on)}">${icon(on ? 'circle-check' : 'circle')}<span>${escapeHtml(choice?.label ?? value)}</span></button>`;
                     }).join('')}</div>`
                     : `<div class="sp-dialog-async-empty">${escapeHtml(emptyText)}</div>`;
                 $overlay.find('.sp-dialog-async-body').html(html);
@@ -347,7 +393,7 @@ export function createDialogManager({ $, mount, getRootClass = () => '', subscri
                 $overlay.find('.sp-dialog-input-error').empty();
                 $overlay.find('.sp-dialog-submit').prop('disabled', true);
                 $overlay.find('.sp-dialog-async-refresh').prop('disabled', true);
-                $overlay.find('.sp-dialog-async-body').html(`<div class="sp-dialog-async-loading"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> ${escapeHtml(loadingText)}</div>`);
+                $overlay.find('.sp-dialog-async-body').html(`<div class="sp-dialog-async-loading">${icon("loader-2", "sp-icon-spin")} ${escapeHtml(loadingText)}</div>`);
                 try {
                     const loaded = await loadChoices({ signal: requestAbort.signal });
                     if (session.isDone() || myRun !== runId) return;
@@ -356,7 +402,7 @@ export function createDialogManager({ $, mount, getRootClass = () => '', subscri
                 } catch (error) {
                     if (session.isDone() || myRun !== runId || error?.name === 'AbortError') return;
                     const message = typeof loadErrorText === 'function' ? loadErrorText(error) : loadErrorText;
-                    $overlay.find('.sp-dialog-async-body').html(`<div class="sp-dialog-async-empty"><i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> ${escapeHtml(message || '读取失败，请稍后重试')}</div>`);
+                    $overlay.find('.sp-dialog-async-body').html(`<div class="sp-dialog-async-empty">${icon("alert-triangle")} ${escapeHtml(message || '读取失败，请稍后重试')}</div>`);
                     $overlay.find('.sp-dialog-input-error').empty();
                 } finally {
                     if (!session.isDone() && myRun === runId) {
@@ -382,7 +428,7 @@ export function createDialogManager({ $, mount, getRootClass = () => '', subscri
             const limit = Number(maxLength) > 0 ? Number(maxLength) : 4000;
             const $overlay = $(`<div id="${OVERLAY_ID}" class="sp-dialog-overlay"><div class="sp-dialog-sheet sp-dialog-editor-sheet" role="dialog" aria-modal="true" aria-labelledby="sp-dialog-title"><div id="sp-dialog-title" class="sp-dialog-head">${escapeHtml(title)}</div>${body ? `<div class="sp-dialog-body">${escapeHtml(body)}</div>` : ''}<textarea class="sp-dialog-custom-input" rows="${normalizeTextareaRows(rows)}" maxlength="${limit}" placeholder="${escapeHtml(placeholder)}">${escapeHtml(initialValue)}</textarea><div class="sp-dialog-input-error" aria-live="polite"></div><div class="sp-dialog-actions"><button class="sp-dialog-button sp-dialog-button-secondary sp-dialog-cancel" type="button">${escapeHtml(cancelText)}</button><button class="sp-dialog-button sp-dialog-button-primary sp-dialog-submit" type="button">${escapeHtml(confirmText)}</button></div></div></div>`);
             const session = mountDialog($overlay, resolve);
-            const submit = () => { const value = String($overlay.find('.sp-dialog-custom-input').val() ?? ''); const error = typeof validate === 'function' ? validate(value) : ''; if (typeof error === 'string' && error) { $overlay.find('.sp-dialog-input-error').html(`<i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> ${escapeHtml(error)}`); return; } session.finish(value); };
+            const submit = () => { const value = String($overlay.find('.sp-dialog-custom-input').val() ?? ''); const error = typeof validate === 'function' ? validate(value) : ''; if (typeof error === 'string' && error) { $overlay.find('.sp-dialog-input-error').html(`${icon("alert-triangle")} ${escapeHtml(error)}`); return; } session.finish(value); };
             $overlay.find('.sp-dialog-submit').on('click', submit); $overlay.find('.sp-dialog-cancel').on('click', session.close); $overlay.find('.sp-dialog-custom-input').on('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); session.close(); } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); submit(); } });
             setTimeout(() => $overlay.find('.sp-dialog-custom-input').trigger('focus'), 0);
         });
@@ -405,5 +451,5 @@ export function createDialogManager({ $, mount, getRootClass = () => '', subscri
         });
     }
 
-    return Object.freeze({ confirm, choose, prompt, promptTextarea, promptFields, selectMany, selectOne, selectOneAsync, cancelActive });
+    return Object.freeze({ confirm, choose, prompt, promptTextarea, promptFields, selectMany, selectOne, selectOneAsync, custom, cancelActive });
 }

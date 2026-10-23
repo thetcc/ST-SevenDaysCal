@@ -1,3 +1,4 @@
+import { icon } from '../../utils/icons.js';
 // 楼内统一渲染窗口：宿主只注入内容 builder、快照与运行时依赖。
 // 这里不保存业务数据；DOM 生命周期与观察器由本 feature 独占。
 
@@ -355,11 +356,11 @@ export function createInlineFeature(env = {}) {
         const inner = `${head}${chipsHtml}`;
         // 只有日期没有任何区 → 纯日期条：<div> 包、无箭头、不可折叠（点了也没东西展开）。
         if (flat) return `<div class="sp-dash-summary sp-dash-summary-flat">${inner}</div>`;
-        return `<summary class="sp-dash-summary">${inner}<i class="fa-solid fa-chevron-down sp-dash-sum-caret"></i></summary>`;
+        return `<summary class="sp-dash-summary">${inner}${icon("chevron-down", "sp-dash-sum-caret")}</summary>`;
     }
 
     // 组合轴、标注池、点、线内容；只有日期或内容均为空时才不挂楼内块。
-    function composeInlineBox(snap, isLatest, floorClock = null, floor = null) {
+    function composeInlineBox(snap, isLatest, floorClock = null, floor = null, coldItems = null) {
         const readOnly = !isLatest;
         const fallbackRecord = readStore(keyDesc('caldesc-fallback', 'user', ''));
         const resolvedResult = isLatest ? { resolved: true, calendar: loadCalDesc() } : snapshot.resolveSnapshotCalendar(snap, { fallback: fallbackRecord, marker: !!fallbackRecord, current: loadCalDesc() });
@@ -369,7 +370,7 @@ export function createInlineFeature(env = {}) {
         const localWeekdayRef = isLatest ? undefined : createWeekdayConsumerContext({ snapshotRef: snap?.weekdayRef, floor, resolveLocal: f => storyWeekdayRefPure(getContext(), resolvedCalendar, ALM_CHAT_SCAN_LIMIT, f) }).weekdayRef;
         const alm        = _buildAlmanacBlockHtml(snap ? (snap.almanac || []) : null, snap ? snap.anchor : null, resolvedCalendar, localWeekdayRef);
         const schInner   = _buildScheduleBlockHtml(snap ? (snap.point || '') : null, readOnly, resolvedCalendar, localWeekdayRef);
-        const linesInner = linesFeature.inlineHtml(snap ? (snap.line || '') : null, readOnly);
+        const linesInner = linesFeature.inlineHtml(snap ? (snap.line || '') : null, readOnly, coldItems ?? snap?.cold);
         // 标注池：AI 楼实际打捞到的暗历条目（快照 pool 字段驱动；最新楼读活账，空则不出块）。
         const ledgerInner = _buildLedgerBlockHtml(snap ? (snap.pool || []) : null, readOnly, resolvedCalendar);
 
@@ -380,7 +381,7 @@ export function createInlineFeature(env = {}) {
         // 展开面板仅在轴或点区域存在时显示日期大头。
         const hasDateRegion = !!alm || !!schInner;
 
-        const collapseControl = label => `<button type="button" class="sp-inline-region-collapse" aria-label="收起${label}" title="收起${label}"><i class="fa-solid fa-chevron-up" aria-hidden="true"></i><span>收起</span></button>`;
+        const collapseControl = label => `<button type="button" class="sp-inline-region-collapse" aria-label="收起${label}" title="收起${label}">${icon("chevron-up")}<span>收起</span></button>`;
         const region = (cls, seg, label, inner) => inner
             ? `<details class="${cls} sp-dash-region" data-seg="${seg}" open>${inner}${collapseControl(label)}</details>`
             : '';
@@ -534,8 +535,11 @@ export function createInlineFeature(env = {}) {
         const isUser = el.getAttribute('is_user') === 'true';
         const mid = el.getAttribute('mesid');
         const renderKey = renderedBoxKey(el);
-        let snap = null;
-        if (isLatest) env.freezeSnapshot?.(mid);
+        let snap = null, coldItems = null;
+        if (isLatest) {
+            const frozen = env.freezeSnapshot?.(mid);
+            if (!isUser && Array.isArray(frozen?.cold)) coldItems = frozen.cold;
+        }
         else {
             snap = mid != null ? env.readSnapshot?.(Number(mid)) : null;
             if (!snap) { unmount(el); return; }
@@ -546,7 +550,7 @@ export function createInlineFeature(env = {}) {
         const floorClock = !isLatest && !isUser ? env.parseStoryClock?.(env.chatMessage?.(floor) || '', floorCalendar) : null;
         const html = isUser
             ? (recall && !recall.calendar ? '<div class="sp-inline-box sp-dash sp-inline-box-ro"><div class="sp-dash-summary sp-dash-summary-flat">历法未知 / 日期未知</div></div>' : env.buildUserRecall?.(snap, isLatest, recall?.calendar))
-            : composeInlineBox(snap, isLatest, floorClock, floor);
+            : composeInlineBox(snap, isLatest, floorClock, floor, coldItems);
         const boxes = directBoxes(msg);
         const rendered = renderedBoxes.get(renderKey);
         syncRenderedOpen(rendered);

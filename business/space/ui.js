@@ -1,3 +1,4 @@
+import { icon } from '../../utils/icons.js';
 import { extractWidgets, spaceMessagePlainText } from './schema.js';
 import { normalizeOutlineResponse, parseOutline } from '../outline/schema.js';
 
@@ -56,7 +57,7 @@ export function createSpaceUi(host = {}) {
         for (let index = history.length - 1; index >= 0; index -= 1) {
             const message = history[index];
             if (message?.role !== 'assistant' || message.portableReadonly === true) continue;
-            if (message.expectedWidgetKind === 'outline_widget'
+            if ((message.expectedWidgetKind === 'outline_widget' || message.allowedWidgetKinds?.includes?.('outline_widget'))
                 && typeof message.outlineRawToken === 'string' && message.outlineRawToken
                 && normalizeOutlineResponse(message.content)) return index;
         }
@@ -67,12 +68,13 @@ export function createSpaceUi(host = {}) {
         query('#sp-space-msgs')?.empty?.();
         const latestOutline = latestOutlineCandidateIndex(history);
         history.forEach((message, index) => {
-            const hasOutlineCandidate = message.expectedWidgetKind === 'outline_widget'
+            const hasOutlineCandidate = message.expectedWidgetKind === 'outline_widget' || message.allowedWidgetKinds?.includes?.('outline_widget')
                 || extractWidgets(message.content).widgets.some(widget => widget.kind === 'outline_widget');
             appendMessage(message.role === 'assistant' ? 'ai' : message.role, message.content, index, {
                 pointBaselines: message.pointBaselines,
                 lineBaselines: message.lineBaselines,
                 expectedWidgetKind: message.expectedWidgetKind,
+                allowedWidgetKinds: message.allowedWidgetKinds,
                 outlineRawToken: message.outlineRawToken,
                 currentOutlineRaw: host.currentOutlineRaw?.() || '',
                 historyIndex: index,
@@ -191,10 +193,10 @@ export function createSpaceUi(host = {}) {
             const oldTimer = $button.data('sp-copy-reset');
             if (oldTimer) clearTimeout(oldTimer);
             const copied = await host.copyText?.(spaceMessagePlainText(controllers.chat.history()[index]));
-            $button.html(copied ? '<i class="fa-solid fa-check"></i>' : '<i class="fa-solid fa-xmark"></i>')
+            $button.html(copied ? `${icon("check")}` : `${icon("x")}`)
                 .attr('title', copied ? '已复制' : '复制失败');
             const timer = setTimeout(() => {
-                $button.html('<i class="fa-solid fa-copy"></i>').attr('title', '复制').removeData('sp-copy-reset');
+                $button.html(`${icon("copy")}`).attr('title', '复制').removeData('sp-copy-reset');
             }, 1200);
             $button.data('sp-copy-reset', timer);
         });

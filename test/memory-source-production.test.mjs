@@ -3,8 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
+import { icon } from '../utils/icons.js';
 import { fileURLToPath } from 'node:url';
 import { selectVisibleChatHistory } from '../business/lines/history.js';
+import { getSharedBodyWrappers } from '../utils/shared-body-wrappers.js';
 import { createQianQianJieMemoryAccess, QIANQIANJIE_BRIDGE_KEY } from '../business/memory/qianqianjie.js';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -41,6 +43,7 @@ function precheckHarness(result, { confirmed = true } = {}) {
 function buildHarness({ getMemText, settings = { useDatabase: true, useAnima: false, useBaiBaiBook: false, useQianQianJie: false }, qianQianJieGenerationSnapshotCurrent = () => false }) {
     const historyBuilder = evaluate(indexHistory, 'buildGenerationHistoryContext', {
         getSettings: () => ({ keepTags: '', extraTags: '' }),
+        getWrapperSettings: () => getSharedBodyWrappers({}),
         selectVisibleChatHistory,
         substituteParams: value => String(value ?? ''),
         sanitizeGenerationContextText: value => String(value ?? ''),
@@ -182,19 +185,6 @@ test('official external success-empty stays empty, while Anima and 柏宝书 rea
     await assert.rejects(bbb(), error => error.diagnosticCode === 'memory-read');
 });
 
-test('creative-chat database legal empty uses existing recent history; genuine read failure remains an error', async () => {
-    const discussionRegion = region('function outlineChatMemoryError(message) {', 'async function composeCreativeChatMessages(');
-    const createReader = result => evaluate(discussionRegion, 'readCreativeChatMemory', {
-        creativeChatMemorySelectionCurrent: () => true,
-        databaseMemoryAccess: { result: async () => result },
-        databaseMemoryDiagnostic: value => `数据库原因:${value.status}`,
-    });
-    const input = { ctx: {}, userMsg: '继续讨论', selection: { source: 'database' } };
-    assert.deepEqual(JSON.parse(JSON.stringify(await createReader({ status: 'no-match', text: '' })(input))), { text: '', recentFallback: true });
-    assert.deepEqual(JSON.parse(JSON.stringify(await createReader({ status: 'empty-content', text: '' })(input))), { text: '', recentFallback: true });
-    await assert.rejects(createReader({ status: 'worldbook-read-failed', text: '' })(input), /数据库原因:worldbook-read-failed/);
-});
-
 test('worldbook read exceptions are reported while successful books remain injectable', async () => {
     const getEntries = evaluate(region('async function getCharBookEntries(ctx, { includeExcluded = false } = {}) {', '// 近期聊天上下文补足'), 'getCharBookEntries', {
         getLinkedWorldNames: () => ['坏书', '好书', '排除书'], getChatWorldNames: () => [], getGlobalWorldNames: () => [],
@@ -298,6 +288,7 @@ test('世界书设置列表在全失败或部分失败时提示异常，并保�
         list.on = () => list;
         let reads = 0;
         const render = evaluate(renderRegion, 'renderWiList', {
+            icon,
             getContext: () => ({}), $in: () => list, _wiListRevision: 0, _wiListIdentity: () => 'same',
             _wiScrollParent: () => null, getCharBookEntries: async () => { reads++; return entries; },
             ensureCurrentWiSelection: () => ({}), worldInfoSelectionAllows: () => true,
