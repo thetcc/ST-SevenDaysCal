@@ -2378,6 +2378,7 @@ jQuery(async () => {
         ledgerCaptureCounter = 0;
         ledgerLastJudgedMsgId = lastSeen;
         ledgerJudgeCounter = 0;
+        ledgerRegeneratedMsgId = -1;
         currentView = 'user';
         charViewName = null;
         outlineMode = false;
@@ -2556,6 +2557,16 @@ jQuery(async () => {
     _stListeners.genStart = (genType, _opts, dryRun) => {
         refreshStoryClockInjection();
         linesFeature.onGenerationStarted({ genType, dryRun });
+        if (dryRun || genType === 'quiet') return;
+        finishLedgerRegeneration();
+        const chat = getContext().chat;
+        const last = Array.isArray(chat) ? chat.length - 1 : -1;
+        if (genType === 'regenerate' && ledgerNarrativeMessage(chat?.[last])) {
+            ledgerRegeneratedMsgId = last;
+            // 同一 AI 楼的替换不贡献新楼计数；END 早于 CMR 时也保留已见楼号。
+            ledgerLastCapturedMsgId = Math.max(ledgerLastCapturedMsgId, last);
+            ledgerLastJudgedMsgId = Math.max(ledgerLastJudgedMsgId, last);
+        }
     };
     eventSource.on(event_types.GENERATION_STARTED, _stListeners.genStart);
     if (_stListeners.streamTok) eventSource.removeListener?.(event_types.STREAM_TOKEN_RECEIVED, _stListeners.streamTok);
@@ -2564,9 +2575,11 @@ jQuery(async () => {
     if (_stListeners.genEnd) eventSource.removeListener?.(event_types.GENERATION_ENDED, _stListeners.genEnd);
     if (_stListeners.genStopped) eventSource.removeListener?.(event_types.GENERATION_STOPPED, _stListeners.genStopped);
     _stListeners.genEnd = () => {
+        finishLedgerRegeneration();
         linesFeature.onGenerationEnded({ stopped: false });
     };
     _stListeners.genStopped = () => {
+        finishLedgerRegeneration();
         linesFeature.onGenerationEnded({ stopped: true });
     };
     eventSource.on(event_types.GENERATION_ENDED, _stListeners.genEnd);
@@ -2985,6 +2998,7 @@ let   ledgerAutomationQueue  = Promise.resolve();
 let   ledgerAutomationEpoch  = 0;
 let   ledgerCaptureQueued    = false;
 let   ledgerJudgeQueued      = false;
+let   ledgerRegeneratedMsgId = -1;
 function enqueueLedgerAutomation(task) {
     const epoch = ledgerAutomationEpoch;
     const queued = ledgerAutomationQueue.catch(() => {}).then(() => epoch === ledgerAutomationEpoch ? task() : { status: 'cancelled', reason: 'superseded' });
@@ -2997,13 +3011,23 @@ function invalidateLedgerAutomationQueue() {
     ledgerCaptureQueued = false;
     ledgerJudgeQueued = false;
 }
-function rewindLedgerAutomationAfterDeletion() {
-    const latest = ledgerLatestAiFloorId();
-    ledgerLastCapturedMsgId = Math.min(ledgerLastCapturedMsgId, latest - 1);
-    ledgerLastJudgedMsgId = Math.min(ledgerLastJudgedMsgId, latest - 1);
-    ledgerCaptureCounter = Math.min(ledgerCaptureCounter, Math.max(0, getLedgerCaptureInterval() - 1));
-    ledgerJudgeCounter = Math.min(ledgerJudgeCounter, Math.max(0, getLedgerJudgeInterval() - 1));
+function rewindLedgerAutomationAfterDeletion(messageId) {
+    const replacingLastAi = ledgerRegeneratedMsgId >= 0 && messageId === ledgerRegeneratedMsgId && getContext().chat?.length === ledgerRegeneratedMsgId;
+    if (!replacingLastAi) {
+        ledgerRegeneratedMsgId = -1;
+        const latest = ledgerLatestAiFloorId();
+        ledgerLastCapturedMsgId = Math.min(ledgerLastCapturedMsgId, latest - 1);
+        ledgerLastJudgedMsgId = Math.min(ledgerLastJudgedMsgId, latest - 1);
+        ledgerCaptureCounter = Math.min(ledgerCaptureCounter, Math.max(0, getLedgerCaptureInterval() - 1));
+        ledgerJudgeCounter = Math.min(ledgerJudgeCounter, Math.max(0, getLedgerJudgeInterval() - 1));
+    }
     invalidateLedgerAutomationQueue();
+}
+function finishLedgerRegeneration() {
+    const floor = ledgerRegeneratedMsgId;
+    ledgerRegeneratedMsgId = -1;
+    // 旧 AI 已删除、替代回复尚未落地就中止时，下一条回复仍应按新楼计数。
+    if (floor >= 0 && !ledgerNarrativeMessage(getContext().chat?.[floor])) rewindLedgerAutomationAfterDeletion();
 }
 
 // 历·API 兜底判定的间隔（缺省/非法 → 3；≥1）。抄 getOutlineJudgeInterval。
@@ -5513,7 +5537,7 @@ function checkMemoryMigrationNotice() {
 
 // Called by the three generation triggers (schedule/outline/lines).
 // 千千结分支同时返回绑定本次 owner 的只读快照；其它记忆源仍沿用 boolean 协议。
-const QQJ_MEMORY_SNAPSHOT_VERSION = 1;
+const QQJ_MEMORY_SNAPSHOT_VERSION = 2;
 let memorySourceEpoch = 0;
 
 let memoryCheckFeedbackBoundary = null;
@@ -5553,20 +5577,8 @@ function setMemoryCheckFeedback(message) {
     memoryCheckFeedbackBoundary = captureMemoryCheckFeedbackBoundary();
 }
 
-function createQianQianJieGenerationSnapshot({ result, operationToken, participantIdentity, hostIdentity, sourceEpoch }) {
-    return Object.freeze({
-        version: QQJ_MEMORY_SNAPSHOT_VERSION,
-        source: 'qianqianjie',
-        operationToken,
-        participantIdentity,
-        hostIdentity,
-        sourceEpoch,
-        reader: result?.reader || null,
-        status: result?.status === 'ready' ? 'ready' : 'empty',
-        text: result?.status === 'ready' ? String(result.text || '') : '',
-        cached: result?.cached === true,
-        message: result?.message || '',
-    });
+function createQianQianJieGenerationSnapshot({ reader, operationToken, participantIdentity, hostIdentity, sourceEpoch }) {
+    return Object.freeze({ version: QQJ_MEMORY_SNAPSHOT_VERSION, source: 'qianqianjie', status: 'read-required', operationToken, participantIdentity, hostIdentity, sourceEpoch, reader });
 }
 function qianQianJieGenerationBoundaryCurrent(boundary, ctx = getContext()) {
     return boundary?.sourceEpoch === memorySourceEpoch
@@ -5577,6 +5589,7 @@ function qianQianJieGenerationBoundaryCurrent(boundary, ctx = getContext()) {
 function qianQianJieGenerationSnapshotCurrent(snapshot, operationToken, ctx = getContext()) {
     return snapshot?.version === QQJ_MEMORY_SNAPSHOT_VERSION
         && snapshot.source === 'qianqianjie'
+        && snapshot.status === 'read-required'
         && snapshot.operationToken === operationToken
         && snapshot.reader === qianQianJieMemoryAccess.reader()
         && qianQianJieGenerationBoundaryCurrent(snapshot, ctx);
@@ -5605,30 +5618,14 @@ async function memoryPreCheckConfirm(request = {}) {
         const participantIdentity = request.participantIdentity || captureParticipantIdentity(contextSnapshot);
         const hostIdentity = captureQianQianJieHostIdentity(contextSnapshot);
         const sourceEpoch = memorySourceEpoch;
-        const result = await qianQianJieMemoryAccess.result({ signal: request.signal });
-        if (request.signal?.aborted || result.status === 'cancelled' || result.status === 'stale') return false;
+        const reader = qianQianJieMemoryAccess.reader();
+        const result = qianQianJieMemoryAccess.status();
+        if (request.signal?.aborted) return false;
         const boundary = { participantIdentity, hostIdentity, sourceEpoch };
-        const current = () => {
-            const live = getContext();
-            return !request.signal?.aborted
-                && result.reader === qianQianJieMemoryAccess.reader()
-                && sameParticipantIdentity(participantIdentity, captureParticipantIdentity(live))
-                && qianQianJieGenerationBoundaryCurrent(boundary, live);
-        };
-        if (!current()) return false;
-        if (result.status === 'empty') {
-            const confirmed = await spConfirm({
-                title: '千千结本轮没有可用记忆材料',
-                body: '千千结本轮没有准备可用的前情或召回材料。',
-                note: '确认后将改用当前聊天最近最多 6 条可见 AI 回复；不会注入千千结前情或召回文本。',
-                confirmText: '改用最近 6 楼',
-                cancelText: '取消',
-            });
-            if (!confirmed || !current()) return false;
-        } else if (result.status !== 'ready') {
-            return Object.freeze({ proceed: false, memoryError: qianQianJieMemoryDiagnostic(result) });
-        }
-        const snapshot = createQianQianJieGenerationSnapshot({ result, operationToken: request.operationToken, participantIdentity, hostIdentity, sourceEpoch });
+        if (reader !== qianQianJieMemoryAccess.reader() || !qianQianJieGenerationBoundaryCurrent(boundary)) return false;
+        if (result.status !== 'ready') return Object.freeze({ proceed: false, memoryError: qianQianJieMemoryDiagnostic(result) });
+        // 预检不提前猜取材话题；实际问题就绪后由 buildMessages 单次读取。
+        const snapshot = createQianQianJieGenerationSnapshot({ reader, operationToken: request.operationToken, participantIdentity, hostIdentity, sourceEpoch });
         if (!qianQianJieGenerationSnapshotCurrent(snapshot, request.operationToken, getContext())) return false;
         return Object.freeze({ proceed: true, memorySnapshot: snapshot });
     }
@@ -6978,8 +6975,6 @@ const qianQianJieMemoryAccess = createQianQianJieMemoryAccess({
     participantIdentityProvider: captureParticipantIdentity,
     sourceEpochProvider: () => memorySourceEpoch,
     isSelected: () => getSettings().useQianQianJie === true,
-    readCache: () => readStore(keyDesc('qqj-prompt-cache', 'user', '')),
-    writeCache: (value, options) => writeStoreConfirmed(keyDesc('qqj-prompt-cache', 'user', ''), value, options),
 });
 
 // Alternate sources are mutually exclusive; only an explicitly confirmed per-request
@@ -6993,12 +6988,17 @@ async function _getMemTextRaw(opts = {}) {
                 : s.useBaiBaiBook ? 'bai-bai-book' : 'builtin');
     if (selectedSource === 'qianqianjie') {
         try {
-            const result = await qianQianJieMemoryAccess.result(sourceOpts);
-            if (['read-failed', 'timed-out', 'error', 'api-unavailable', 'disabled', 'stale'].includes(result.status)) {
+            const context = getContext();
+            const scopedContext = Number.isInteger(maxFloor) ? { ...context, chat: (context.chat || []).slice(0, maxFloor + 1) } : context;
+            const recentText = sourceOpts.recentText ?? buildGenerationHistoryContext(scopedContext, 6).history.map(message => message.content).join('\n\n');
+            const result = await qianQianJieMemoryAccess.result({ ...sourceOpts, recentText, maxFloor });
+            if (result.status === 'cancelled') throw new DOMException('The operation was aborted.', 'AbortError');
+            if (['read-failed', 'timed-out', 'error', 'api-unavailable', 'disabled', 'stale', 'not-ready', 'unavailable'].includes(result.status)) {
                 throw makeDiagnosticError('memory-read', { phase: 'memory' });
             }
             return result.text || '';
         } catch (err) {
+            if (err?.name === 'AbortError') throw err;
             console.warn('[7dayscal] 千千结取记忆出错', safeDiagnosticLog('memory', 'request', err, { background: true }));
             throw err?.diagnosticCode ? err : makeDiagnosticError('memory-read', { phase: 'memory' });
         }
@@ -7046,7 +7046,7 @@ async function _getMemTextRaw(opts = {}) {
     return memory.getMemoryContext({ excludeMesIds, includeRecentRaw: true, maxFloor });
 }
 
-// 记忆源先按各自的召回规则选材，再把已选文本原样交给生成；上下文容量由上游模型服务决定。
+// 记忆源先按各自的召回规则选材；千千结仅本地按本次问题筛选正式资料，不依赖上次召回。
 async function getMemText(opts = {}) {
     return _getMemTextRaw(opts);
 }
@@ -7126,6 +7126,23 @@ async function buildMessages(ctx, prompt, userName, charName, historyLimit = 3, 
             .filter(floor => Number.isInteger(Number(floor)))
             .map(String);
     }
+    let qqjMemoryText;
+    if (opts.includeMemory !== false && opts.memorySnapshot?.source === 'qianqianjie') {
+        if (!qianQianJieGenerationSnapshotCurrent(opts.memorySnapshot, opts.memoryOperationToken, ctx)) throw makeDiagnosticError('memory-stale', { phase: 'memory-preflight' });
+        reportPhase('memory');
+        qqjMemoryText = await getMemText({ source: 'qianqianjie', query: prompt, recentText: history.map(message => message.content).join('\n\n'), signal: opts.signal, maxFloor: opts.ledgerCutoffFloor });
+        throwIfAborted();
+        if (!qianQianJieGenerationSnapshotCurrent(opts.memorySnapshot, opts.memoryOperationToken, ctx)) throw makeDiagnosticError('memory-stale', { phase: 'memory-preflight' });
+        if (!String(qqjMemoryText || '').trim()) {
+            const fallbackLimit = historyLimit === 3 ? 6 : historyLimit;
+            const confirmed = await spConfirm({ title: '千千结暂无相关记忆材料', body: '当前问题没有读到可用的千千结记忆。', note: fallbackLimit > 0 ? `确认后改用当前聊天最近最多 ${fallbackLimit} 条可见 AI 回复。` : '确认后继续；当前请求不会加入近期正文。', confirmText: fallbackLimit > 0 ? '改用近期正文' : '继续', cancelText: '取消' });
+            throwIfAborted();
+            if (!confirmed) throw new DOMException('The operation was aborted.', 'AbortError');
+            if (!qianQianJieGenerationSnapshotCurrent(opts.memorySnapshot, opts.memoryOperationToken, ctx)) throw makeDiagnosticError('memory-stale', { phase: 'memory-preflight' });
+            const fallback = buildGenerationHistoryContext(ctx, fallbackLimit, opts);
+            history = fallback.history; memoryExcludeMesIds = fallback.excludeMesIds;
+        }
+    }
     const outlineTrigger = opts.worldInfoTriggerText === true
         ? outlineWorldInfoTriggerText(history)
         : opts.worldInfoTriggerText;
@@ -7151,7 +7168,7 @@ async function buildMessages(ctx, prompt, userName, charName, historyLimit = 3, 
             const snapshot = opts.memorySnapshot;
             if (snapshot?.source === 'qianqianjie') {
                 if (!qianQianJieGenerationSnapshotCurrent(snapshot, opts.memoryOperationToken, ctx)) throw makeDiagnosticError('memory-stale', { phase: 'memory-preflight' });
-                rawMemText = snapshot.text;
+                rawMemText = qqjMemoryText;
             } else if (snapshot?.status === 'fallback-confirmed') {
                 if (!isConfirmedMemoryFallback(snapshot)) throw makeDiagnosticError('memory-stale', { phase: 'memory-preflight' });
                 rawMemText = '';
@@ -7175,7 +7192,7 @@ async function buildMessages(ctx, prompt, userName, charName, historyLimit = 3, 
         && !memorySettings.useQianQianJie && !memorySettings.useAnima && !memorySettings.useDatabase && !memorySettings.useBaiBaiBook;
     const memBlock = memText
         ? opts.memorySnapshot?.source === 'qianqianjie'
-            ? `【千千结记忆材料】请将以下内容作为相关回忆线索，结合当前聊天理解；缓存内容会明确标注为上次成功召回。${memPerspective ? `点视角优先关注对${memPerspective}有意义的信息。` : '请按当前聊天主角色上下文理解，不继承点的 TA 视角。'}\n\n${memText}`
+            ? `【千千结记忆材料】以下是按本次问题读取的正式剧情资料；作者侧背景与人物各自经历已分区，请保持知情范围。${memPerspective ? `点视角优先关注对${memPerspective}有意义的信息。` : '请按当前聊天主角色上下文理解，不继承点的 TA 视角。'}\n\n${memText}`
             : `【故事记忆库】${builtInMemorySelected ? '以下包含已验证摘要与标注为“尚未摘要的近期正文”的内置 AI 原文，请按来源标签区分并保持连贯。' : '以下由当前选定的记忆源提供，请结合当前聊天理解并保持连贯。'}${memPerspective ? `点视角优先关注对${memPerspective}有意义的信息。` : '请按当前聊天主角色上下文理解，不继承点的 TA 视角。'}\n\n${memText}`
         : '';
 
