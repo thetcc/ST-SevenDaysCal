@@ -1,4 +1,4 @@
-import { readPanelViewport, bindOutsideClose, fitDesktopPanel } from './ui/panel-window.js';
+import { readPanelViewport, syncDialogViewport, bindOutsideClose, fitDesktopPanel } from './ui/panel-window.js';
 import { primaryTextColor, syncUiTheme } from './utils/ui-theme.js';
 import { icon, setIcon } from './utils/icons.js';
 import { getContext, extension_settings, extensionNames, extensionTypes } from '../../../extensions.js';
@@ -161,7 +161,7 @@ import { createDateDetectionController } from './business/axis/date-detection.js
 
 // Source and bundled entries both live at the plugin root.
 const EXT_BASE = new URL('.', import.meta.url).href;
-// Both Shadow roots must load the stylesheet paired with this build, even when
+// Owned Shadow roots must load the stylesheet paired with this build, even when
 // the browser still has an older unversioned style.css cached.
 const STYLESHEET_URL = typeof __GOUHUA_STYLESHEET_REVISION__ === 'string'
     ? `${EXT_BASE}style.css?v=${__GOUHUA_STYLESHEET_REVISION__}`
@@ -369,7 +369,7 @@ let _spShadow = null;
 let _spDialogShadow = null;
 let userNameMask = null;
 let userNameMaskDiscovery = [];
-const userNameSurfaceSelector = '.sp-inline-box, .sp-progress-card, #sp-toast-wrap, [data-sp-user-name-surface]';
+const userNameSurfaceSelector = '.sp-inline-box, #sp-portable-import-overlay, #sp-toast-host, [data-sp-user-name-surface]';
 function refreshUserNameMask(scope) { userNameMask?.refresh(scope); }
 function syncUserNameMask() {
     const enabled = getSettings().userNameBlurEnabled === true;
@@ -3199,14 +3199,17 @@ function injectExtButton() {
 // sp-btn-generating/done，两套并存互不干扰。计数只增减、不直接读 pointState.isGenerating 那些分散旗标，
 // 天然免漏灯/卡灯。
 let _fabBusyCount = 0;
+function getFabButton() {
+    return document.getElementById(FAB_ID)?.shadowRoot?.querySelector('.sp-fab-btn') || null;
+}
 function setFabBusy(on) {
     _fabBusyCount = Math.max(0, _fabBusyCount + (on ? 1 : -1));
-    $(`#${FAB_ID} .sp-fab-btn`).toggleClass('sp-fab-busy', _fabBusyCount > 0);
+    $(getFabButton()).toggleClass('sp-fab-busy', _fabBusyCount > 0);
 }
 
 function setExtBtnState(state) {
     // 魔法棒(#sp_open_wand)生成态变色太不显眼、用户根本看不到，故不再给它挂状态类——生成指示统一交给悬浮球呼吸灯。
-    const $fab = $(`#${FAB_ID} .sp-fab-btn`);
+    const $fab = $(getFabButton());
     $fab.removeClass('sp-btn-generating sp-btn-done');
     if (state) $fab.addClass(`sp-btn-${state}`);
     // 点生成中只锁「我/TA」子切换（本次生成绑定当前视角，中途换视角无意义，另有 .sp-view-btn 守卫兜底）；
@@ -3223,13 +3226,15 @@ function injectFab() {
     const posStyle = (!mobile && savedPos)
         ? `left:${savedPos.left}px;top:${savedPos.top}px;right:auto;bottom:auto;`
         : '';
-    const html = `<div id="${FAB_ID}" style="position:fixed;z-index:2000004;${posStyle}${fabEnabled() && pluginEnabled() ? '' : 'display:none'}">
+    const html = `<div id="${FAB_ID}" style="position:fixed;z-index:2000004;${posStyle}${fabEnabled() && pluginEnabled() ? '' : 'display:none'}"></div>`;
+    document.documentElement.insertAdjacentHTML('beforeend', html);
+    const fab = document.getElementById(FAB_ID);
+    const shadow = fab.attachShadow({ mode: 'open' });
+    shadow.innerHTML = `<link rel="stylesheet" href="${STYLESHEET_URL}">
         <button class="sp-fab-btn sp-${currentTheme}" title="构画"
             style="transform:translateZ(0);clip:auto;">
             ${PEN_ICON_SVG}
-        </button>
-    </div>`;
-    document.documentElement.insertAdjacentHTML('beforeend', html);
+        </button>`;
 
     let wasMobile = isMobile();
     window.addEventListener('resize', () => {
@@ -3257,8 +3262,7 @@ function injectFab() {
         wasMobile = nowMobile;
     });
 
-    const fab = document.getElementById(FAB_ID);
-    const fabButton = fab?.querySelector('.sp-fab-btn');
+    const fabButton = getFabButton();
     if (globalThis.__TAURITAVERN__?.abiVersion >= 1) fab?.setAttribute('data-tt-mobile-surface', 'free-window');
     if (!fab || !fabButton) return;
     fabButton.addEventListener('pointerdown', function (e) {
@@ -3352,6 +3356,8 @@ function injectModal() {
     bindDailyMenuDialogEvents();
     bindWardrobeDialogEvents();
     document.documentElement.appendChild(dialogHost);
+    bindViewportSync();
+    syncDialogViewport(dialogHost);
     const html = `
             <div class="sp-backdrop"></div>
             <div class="sp-sheet">
@@ -4024,7 +4030,7 @@ function injectModal() {
     host.id = MODAL_ID;
     if (globalThis.__TAURITAVERN__?.abiVersion >= 1) host.setAttribute('data-tt-mobile-surface', 'fullscreen-window');
     host.className = `sp-root sp-${currentTheme}`;
-    host.style.cssText = 'display:none;position:fixed;inset:0;width:100dvw;height:100dvh;pointer-events:auto;z-index:2000001';
+    host.style.cssText = 'display:none;position:fixed;inset:0;width:100dvw;height:100dvh;pointer-events:none;z-index:2000001';
     const root = host.attachShadow({ mode: 'open' });
     _spShadow = root;
     // 键盘边界：shadow 内 input 的 keydown 是 composed 事件，冒泡到 document 时 ST 的
@@ -4087,8 +4093,8 @@ function injectModal() {
         $(this).toggleClass('sp-btn-active', nowEnabled);
     });
     $in('.sp-theme-toggle-btn').on('click', cycleThemeMode);
-    bindOutsideClose({ target: host, panel: inEl('.sp-sheet'), close: closePanel,
-        canClose: () => host.style.display !== 'none' && !_spDialogShadow?.querySelector('.sp-dialog-overlay, .sp-confirm-overlay'),
+    bindOutsideClose({ target: document, panel: inEl('.sp-sheet'), close: closePanel,
+        canClose: () => isMobile() && host.style.display !== 'none' && !_spDialogShadow?.querySelector('.sp-dialog-overlay, .sp-confirm-overlay'),
     });
 
     // 模块介绍气泡：点标题旁的 ? 弹出当前模块简介，点外部/切模块即关
@@ -7611,13 +7617,16 @@ function mountPortableImportOverlay() {
     document.getElementById('sp-portable-import-overlay')?.remove();
     const overlay = document.createElement('div');
     overlay.id = 'sp-portable-import-overlay';
+    // Explicit viewport dimensions also cover ST's transformed html with a fixed body.
+    overlay.style.cssText = 'all:initial;position:fixed;inset:0;width:100dvw;height:100dvh;z-index:2147483647';
+    const shadow = overlay.attachShadow({ mode: 'open' });
     const overlayTheme = `sp-${currentTheme}${(getSettings().themeMode || 'auto') !== 'auto' ? ` sp-forced-${currentTheme}` : ''}`;
-    overlay.className = 'sp-progress-overlay';
-    overlay.innerHTML = `<div class="sp-root sp-progress-card sp-dialog-sheet ${overlayTheme}" role="dialog" aria-modal="true">
+    shadow.innerHTML = `<link rel="stylesheet" href="${STYLESHEET_URL}">
+      <div class="sp-progress-overlay"><div class="sp-root sp-progress-card sp-dialog-sheet ${overlayTheme}" role="dialog" aria-modal="true">
         <div class="sp-dialog-head">正在导入所选模块</div>
         <div data-sp-portable-status class="sp-dialog-body">正在应用所选模块并更新界面…</div>
         <button class="sp-dialog-button sp-dialog-button-primary" data-sp-portable-close type="button" hidden>关闭</button>
-    </div>`;
+    </div></div>`;
     const block = event => { if (!overlay.contains(event.target)) { event.preventDefault(); event.stopImmediatePropagation(); } };
     for (const name of ['keydown', 'keyup', 'pointerdown', 'mousedown', 'touchstart', 'click']) document.addEventListener(name, block, true);
     document.documentElement.appendChild(overlay);
@@ -9276,8 +9285,11 @@ function syncInlineTheme(theme = detectSTTheme()) {
 function applyTheme(theme) {
     currentTheme = theme;
     const forced = (getSettings().themeMode || 'auto') !== 'auto';
-    const roots = document.querySelectorAll(`#${MODAL_ID}, #${FAB_ID} .sp-fab-btn, #sp-toast-wrap, .sp-progress-card`);
+    const roots = document.querySelectorAll(`#${MODAL_ID}`);
     for (const root of roots) syncUiTheme(root, theme, forced);
+    for (const root of [getFabButton(), getToastContainer(), document.getElementById('sp-portable-import-overlay')?.shadowRoot?.querySelector('.sp-progress-card')]) {
+        if (root) syncUiTheme(root, theme, forced);
+    }
     for (const scope of [_spShadow, _spDialogShadow]) {
         scope?.querySelectorAll('.sp-root').forEach(root => syncUiTheme(root, theme, forced));
     }
@@ -9484,6 +9496,7 @@ function bindViewportSync() {
             : setTimeout(callback, 16);
     };
     window.addEventListener('resize', onViewportChange);
+    window.addEventListener('scroll', onViewportChange);
     window.addEventListener('orientationchange', onViewportChange);
     if (window.visualViewport) {
         window.visualViewport.addEventListener('resize', onViewportChange);
@@ -9492,6 +9505,8 @@ function bindViewportSync() {
 }
 
 function syncPanelViewport() {
+    const dialogHost = document.getElementById(DIALOG_HOST_ID);
+    if (dialogHost) syncDialogViewport(dialogHost);
     const root  = document.getElementById(MODAL_ID);
     const sheet = inEl('.sp-sheet');   // .sp-sheet 在 shadow 内：document.querySelector('#sp-modal-root .sp-sheet') 跨不过边界→null→整个移动端视口同步静默失效；用 inEl 查 shadow root
     if (!root || !sheet || root.style.display === 'none') return;
@@ -9511,7 +9526,8 @@ function syncPanelViewport() {
     const savedScrollTop = settingsBody?.scrollTop;
     if (isMobile()) {
         sheet.style.left = `${view.left + view.width / 2}px`;
-        sheet.style.top = `${view.top + Math.max(40, safeTop)}px`;
+        // Match QQJ's mobile default; the viewport offset already accounts for keyboard/pan movement.
+        sheet.style.top = `${view.top + Math.max(20, safeTop)}px`;
         sheet.style.right = 'auto';
         sheet.style.transform = '';
         sheet.style.width = `${Math.max(0, view.width - 20)}px`;
@@ -9546,19 +9562,26 @@ function syncPanelViewport() {
 }
 
 // ─── Toast (top) ──────────────────────────────────────────────────────────────
-// toast 容器必须留在 light DOM；检测到第三方主题加载器时，showToast 另走原生 toastr 分支，
-// 由第三方样式作用于原生 toast。全屏提示仍需独立于主窗口显示。
+// 自绘提示使用独立 Shadow Root；第三方提示主题通过 showToast 的 toastr 分支接管。
+
+function getToastContainer() {
+    return document.getElementById('sp-toast-host')?.shadowRoot?.querySelector('#sp-toast-wrap') || null;
+}
 
 function injectToastContainer() {
-    // 带上主题类：#sp-toast-wrap 挂在 <html> 下、在 .sp-root 之外，拿不到 .sp-night/.sp-day
-    // 作用域里的 --sp-*-legacy 令牌。双层背景的不透明底板 var(--sp-surface-legacy) 会落空→透底。
-    // 加 sp-${theme} 把 legacy 令牌带进作用域（applyTheme 会随主题切换更新）。
+    if (document.getElementById('sp-toast-host')) return;
     const nav = globalThis.navigator;
     const userAgent = nav?.userAgent || '';
     const isIos = /iphone|ipad|ipod/i.test(userAgent)
         || ((nav?.maxTouchPoints || 0) > 1 && (nav?.platform === 'MacIntel' || /Macintosh/i.test(userAgent)));
     const tauriIosAttr = globalThis.__TAURITAVERN__?.abiVersion >= 1 && isIos ? ' data-sp-tauritavern-ios' : '';
-    if (!$('#sp-toast-wrap').length) document.documentElement.insertAdjacentHTML('beforeend', `<div id="sp-toast-wrap" class="sp-${currentTheme}"${tauriIosAttr}></div>`);
+    const host = document.createElement('div');
+    host.id = 'sp-toast-host';
+    host.style.cssText = 'all:initial;position:fixed;inset:0;pointer-events:none;z-index:2000002';
+    const shadow = host.attachShadow({ mode: 'open' });
+    const forcedTheme = (getSettings().themeMode || 'auto') !== 'auto' ? ` sp-forced-${currentTheme}` : '';
+    shadow.innerHTML = `<link rel="stylesheet" href="${STYLESHEET_URL}"><div id="sp-toast-wrap" class="sp-${currentTheme}${forcedTheme}"${tauriIosAttr}></div>`;
+    document.documentElement.appendChild(host);
 }
 
 function showToast(msg, onClick, isError = false) {
@@ -9584,7 +9607,7 @@ function showToast(msg, onClick, isError = false) {
         ${icon(isFailure ? 'alert-circle' : isInfo ? 'info-circle' : 'calendar-check')}
         <span>${escapeHtml(msg)}</span>
     </div>`);
-    $('#sp-toast-wrap').append($t);
+    $(getToastContainer()).append($t);
     requestAnimationFrame(() => $t.addClass('sp-toast-show'));
     if (onClick) $t.css('cursor', 'pointer').on('click', () => { onClick(); $t.remove(); });
     else if (isFailure) $t.css('cursor', 'pointer').on('click', () => { $t.removeClass('sp-toast-show'); setTimeout(() => $t.remove(), 350); });   // 失败 toast 停留久，允许点掉提前消失，免堆叠挡视线
