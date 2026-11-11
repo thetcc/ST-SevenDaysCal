@@ -3230,7 +3230,9 @@ function injectFab() {
     document.documentElement.insertAdjacentHTML('beforeend', html);
     const fab = document.getElementById(FAB_ID);
     const shadow = fab.attachShadow({ mode: 'open' });
-    shadow.innerHTML = `<link rel="stylesheet" href="${STYLESHEET_URL}">
+    // The later stylesheet supplies display:flex once the complete FAB style is ready.
+    shadow.innerHTML = `<style>.sp-fab-btn { display: none; }</style>
+        <link rel="stylesheet" href="${STYLESHEET_URL}">
         <button class="sp-fab-btn sp-${currentTheme}" title="构画"
             style="transform:translateZ(0);clip:auto;">
             ${PEN_ICON_SVG}
@@ -4044,8 +4046,8 @@ function injectModal() {
     });
     // shadow 内第一层 wrapper 必须带 sp-root + 主题类：style.css 的 `.sp-root ...` 前缀选择器、
     // .sp-night/.sp-day 色板、.sp-forced-* 强制主题覆盖全靠它匹配
-    // （applyTheme 同步它的主题类）。display:contents 不产生布局盒子，fixed 语义
-    // 仍由 .sp-sheet 承担；host 无 transform/filter，内部 position:fixed 相对视口不变。
+    // （applyTheme 同步它的主题类）。display:contents 不产生布局盒子，
+    // .sp-sheet 使用主窗的可视视口坐标。
     root.innerHTML = `
         <link rel="stylesheet" href="${STYLESHEET_URL}">
         <div class="sp-root sp-${currentTheme}" style="display:contents">${html}</div>`;
@@ -9485,12 +9487,16 @@ function positionPanel() {
 function bindViewportSync() {
     if (viewportSyncBound) return;
     viewportSyncBound = true;
-    const onViewportChange = () => {
+    const onViewportChange = event => {
         closeActionMenus();
         onDragEnd(null, false);
         onResizeEnd(null, false);
-        if (viewportSyncFrame !== null) return;
-        const callback = () => { viewportSyncFrame = null; syncPanelViewport(); };
+        if (viewportSyncFrame !== null) {
+            if (event?.type !== 'orientationchange') return;
+            if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(viewportSyncFrame);
+            else clearTimeout(viewportSyncFrame);
+        }
+        const callback = () => { viewportSyncFrame = null; syncPanelViewport(event?.type !== 'orientationchange'); };
         viewportSyncFrame = typeof window.requestAnimationFrame === 'function'
             ? window.requestAnimationFrame(callback)
             : setTimeout(callback, 16);
@@ -9504,12 +9510,26 @@ function bindViewportSync() {
     }
 }
 
-function syncPanelViewport() {
+function syncPanelViewport(preserveEditingGeometry = false) {
     const dialogHost = document.getElementById(DIALOG_HOST_ID);
     if (dialogHost) syncDialogViewport(dialogHost);
     const root  = document.getElementById(MODAL_ID);
     const sheet = inEl('.sp-sheet');   // .sp-sheet 在 shadow 内：document.querySelector('#sp-modal-root .sp-sheet') 跨不过边界→null→整个移动端视口同步静默失效；用 inEl 查 shadow root
     if (!root || !sheet || root.style.display === 'none') return;
+    if (preserveEditingGeometry && isMobile()) {
+        const focused = _spShadow?.activeElement;
+        const editing = focused?.isContentEditable || !focused?.readOnly && (focused?.tagName === 'TEXTAREA'
+            || focused?.tagName === 'INPUT' && ['text', 'search', 'url', 'tel', 'email', 'password', 'number'].includes(focused.type));
+        // 内部文本编辑交给浏览器聚焦滚动，避免键盘事件再次改写主窗几何。
+        if (editing) return;
+    }
+    const mobile = isMobile();
+    // 手机零原点保留原 fixed 层级，非零原点沿既有补偿。
+    root.style.transform = mobile ? '' : 'translate(0px, 0px)';
+    const origin = root.getBoundingClientRect();
+    if (!mobile || origin.left !== 0 || origin.top !== 0) {
+        root.style.transform = `translate(${-origin.left}px, ${-origin.top}px)`;
+    }
 
     // Read safe-area insets from CSS env() via a probe element.
     // Fallback to 0 when unsupported (older Android browsers).
@@ -9524,7 +9544,7 @@ function syncPanelViewport() {
     const view = readPanelViewport(window);
     const settingsBody = settingsOpen ? inEl('.sp-settings-body') : null;
     const savedScrollTop = settingsBody?.scrollTop;
-    if (isMobile()) {
+    if (mobile) {
         sheet.style.left = `${view.left + view.width / 2}px`;
         // Match QQJ's mobile default; the viewport offset already accounts for keyboard/pan movement.
         sheet.style.top = `${view.top + Math.max(20, safeTop)}px`;

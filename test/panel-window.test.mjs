@@ -93,17 +93,19 @@ test('normal mobile sync keeps viewport margins with one safe-area inset and ign
   const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
   assert.match(css, /\.sp-sheet\s*\{[^}]*top\s*:\s*max\(20px, env\(safe-area-inset-top, 0px\)\)/);
-  const start = source.indexOf('function syncPanelViewport() {');
+  const start = source.indexOf('function syncPanelViewport(');
   const end = source.indexOf('// ─── Toast (top)', start);
   for (const width of [390, 320]) {
-    const sheet = { style: {} }, root = { style: {} };
+    let originTop = 0;
+    const sheet = { style: {} }, root = { style: {}, getBoundingClientRect: () => rect(0, originTop, width, 844) };
     const nodes = { chat: rect(10, 50, width - 20, 700) };
     const win = { innerWidth: width, innerHeight: 844 };
     let safeTop = 0, safeBottom = 0;
     const document = { ...fixture(nodes), getElementById: id => id === 'panel' ? root : fixture(nodes).getElementById(id),
       createElement: () => ({ style: {} }), body: { appendChild() {}, removeChild() {} } };
     const context = { document, window: win, MODAL_ID: 'panel', DIALOG_HOST_ID: 'dialog', syncDialogViewport: layout.syncDialogViewport, settingsOpen: false, inEl: () => sheet,
-      isMobile: () => true, readPanelViewport: layout.readPanelViewport,
+      isMobile: () => win.innerWidth <= 640, readPanelViewport: layout.readPanelViewport,
+      fitDesktopPanel: layout.fitDesktopPanel, localStorage: { getItem: () => null }, SIZE_KEY: 'size', POS_KEY: 'position',
       getComputedStyle: () => ({ top: `${safeTop}px`, bottom: `${safeBottom}px` }) };
     runInNewContext(source.slice(start, end), context);
     context.syncPanelViewport();
@@ -111,6 +113,7 @@ test('normal mobile sync keeps viewport margins with one safe-area inset and ign
     assert.equal(sheet.style.height, '764px');
     assert.equal(sheet.style.top, '20px');
     assert.equal(sheet.style.left, `${width / 2}px`);
+    assert.equal(root.style.transform, '', '手机主窗保持原视口 fixed 层');
     const original = { ...sheet.style };
     nodes.chat = rect(100, 300, 100, 50);
     nodes.form_sheld = rect(100, 350, 100, 400);
@@ -126,6 +129,20 @@ test('normal mobile sync keeps viewport margins with one safe-area inset and ign
     context.syncPanelViewport();
     assert.equal(sheet.style.height, '305px');
     assert.equal(sheet.style.top, '80px');
+    assert.equal(root.style.transform, '', '内部输入后可视视口收缩不会新增 fixed 包含块');
+    originTop = -500;
+    win.innerWidth = 900;
+    win.visualViewport = { offsetLeft: 0, offsetTop: 0, width: 900, height: 844 };
+    context.syncPanelViewport();
+    assert.equal(root.style.transform, 'translate(0px, 500px)', '桌面继续补偿原点');
+    win.innerWidth = width;
+    win.visualViewport = { offsetLeft: 0, offsetTop: 260, width, height: 350 };
+    context.syncPanelViewport();
+    assert.equal(root.style.transform, 'translate(0px, 500px)', '手机遇真实文档偏移继续必要补偿');
+    originTop = 0; context.syncPanelViewport();
+    assert.equal(root.style.transform, '', '恢复零原点时清掉桌面遗留补偿');
+    assert.equal(sheet.style.top, '310px');
+    assert.equal(sheet.style.height, '255px');
   }
 });
 
@@ -140,8 +157,8 @@ test('document capture consumes only a completed dismissing click and never hand
   assert.ok(capture.every(([, options]) => options === true));
   assert.equal(target.listeners.has('wheel'), false);
   child = true; click(); assert.equal(prevented, 0); assert.equal(closes, 0);
-  child = false; click(); assert.equal(closes, 1); assert.equal(prevented, 1); assert.equal(stopped, 1);
-  click(); assert.equal(closes, 1); assert.equal(prevented, 1);
+  child = false; click(); assert.equal(closes, 1); assert.equal(prevented, 0); assert.equal(stopped, 0);
+  click(); assert.equal(closes, 1); assert.equal(prevented, 0);
 });
 
 test('main desktop layer passes hit testing while sheet and mobile backdrop retain their interaction', () => {
@@ -151,11 +168,11 @@ test('main desktop layer passes hit testing while sheet and mobile backdrop reta
   assert.match(source, /bindOutsideClose\(\{ target: document,/);
   assert.match(css, /\.sp-backdrop\s*\{[^}]*pointer-events:\s*none/);
   assert.match(css, /\.sp-sheet\s*\{[^}]*pointer-events\s*:\s*auto/);
-  assert.match(css, /@media \(max-width: 640px\) \{[^@]*\.sp-backdrop\s*\{[^}]*pointer-events\s*:\s*auto/);
+  assert.match(css, /@media \(max-width: 640px\) \{[^@]*\.sp-backdrop\s*\{[^}]*pointer-events\s*:\s*none/);
 });
 
 
-test('foreign fixed shadow window remains interactive while ordinary host clicks dismiss', () => {
+test('foreign fixed shadow window remains interactive while outside blank dismisses', () => {
   const target = new Target(), ownHost = {}, foreignHost = {}, foreignRoot = { nodeType: 11, host: foreignHost };
   const panel = { getRootNode: () => ({ host: ownHost }), ownerDocument: { defaultView: { getComputedStyle: () => ({ position: 'fixed' }) } } };
   let closes = 0; layout.bindOutsideClose({ target, panel, close: () => closes++ });
@@ -183,7 +200,7 @@ test('production main panel outside-close follows current640 breakpoint without 
   target.emit('pointerdown'); win.innerWidth = 390; target.emit('pointerup'); target.emit('click');
   assert.equal(closes, 0, 'desktop-down does not become a mobile close');
   for (const width of [640, 390]) { host.style.display = 'block'; win.innerWidth = width; click(); }
-  assert.equal(closes, 2); assert.equal(consumed, 2);
+  assert.equal(closes, 2); assert.equal(consumed, 0);
 });
 
 test('dialog viewport sizing compensates transformed roots and document scroll independently of the main panel', () => {
@@ -208,7 +225,7 @@ test('dialog viewport sizing compensates transformed roots and document scroll i
 
 test('production viewport sync updates an independent dialog while the main panel is hidden', () => {
   const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
-  const start = source.indexOf('function syncPanelViewport() {');
+  const start = source.indexOf('function syncPanelViewport(');
   const end = source.indexOf('// ─── Toast (top)', start);
   const host = { style: {}, getBoundingClientRect: () => rect(0, -400, 820, 0) };
   const root = { style: { display: 'none' } };
@@ -220,4 +237,88 @@ test('production viewport sync updates an independent dialog while the main pane
   assert.equal(host.style.width, '820px');
   assert.equal(host.style.height, '1180px');
   assert.equal(host.style.top, '400px');
+});
+
+
+test('foreign standard dialogs and popup semantics retain clicks while fixed-body blank still dismisses', () => {
+  const target = new Target(), panel = { contains: () => false };
+  let closes = 0, blocked = 0;
+  layout.bindOutsideClose({ target, panel, close: () => closes++ });
+  const click = path => {
+    for (const type of ['pointerdown', 'pointerup', 'click']) target.emit(type, { composedPath: () => path,
+      preventDefault: () => blocked++, stopImmediatePropagation: () => blocked++ });
+  };
+  for (const selector of ['button', 'input', 'textarea', 'a[href]', 'label', 'summary', '[role~="button"]', '[tabindex]:not([tabindex="-1"])', 'dialog', 'select', 'input[list]', '[role~="dialog"]', '[role~="alertdialog"]', '[role~="menu"]', '[role~="listbox"]', '[role~="combobox"]', '[aria-haspopup]', '[popover]']) {
+    const popup = selector === '[popover]' ? { popover: 'auto', matches: value => value === ':popover-open' }
+      : selector === '[aria-haspopup]' ? { getAttribute: name => name === 'aria-haspopup' ? 'menu' : null }
+        : { matches: selectors => selectors.split(',').map(value => value.trim()).includes(selector === 'input[list]' ? 'input' : selector) };
+    const before = closes;
+    click([{}, popup, target]);
+    const protectedWindow = ['dialog', '[role~="dialog"]', '[role~="alertdialog"]', '[role~="menu"]', '[role~="listbox"]', '[role~="combobox"]', '[popover]'].includes(selector);
+    assert.equal(closes, before + (protectedWindow ? 0 : 1), selector); assert.equal(blocked, 0, selector);
+  }
+  const beforeBody = closes;
+  const fixedBody = { matches: () => false, style: { position: 'fixed' } };
+  click([panel, fixedBody, target]); assert.equal(closes, beforeBody, 'own panel remains internal');
+  click([fixedBody, target]); assert.equal(closes, beforeBody + 1, 'ordinary fixed ancestors are not foreign popups');
+});
+
+
+test('mobile host input closes without consuming the click, while redirected panel taps stay harmless', () => {
+  const target = new Target(), panel = { getBoundingClientRect: () => ({ left: 10, top: 20, width: 370, height: 764 }) };
+  let closes = 0, blocked = 0;
+  layout.bindOutsideClose({ target, panel, close: () => closes++ });
+  const input = { matches: selectors => selectors.split(',').includes('input') };
+  for (const type of ['pointerdown', 'pointerup', 'click']) target.emit(type, { composedPath: () => [input, target],
+    preventDefault: () => blocked++, stopImmediatePropagation: () => blocked++ });
+  assert.equal(closes, 1); assert.equal(blocked, 0, 'host input receives its original click');
+  for (const type of ['pointerdown', 'pointerup']) target.emit(type, { clientX: 4, clientY: 400, composedPath: () => [panel, target] });
+  target.emit('click', { clientX: 12, clientY: 400, composedPath: () => [panel, target],
+    preventDefault: () => blocked++, stopImmediatePropagation: () => blocked++ });
+  assert.equal(closes, 2, 'outside physical endpoints remain outside after browser touch adjustment');
+  assert.equal(blocked, 2, 'retargeted own-panel action is consumed');
+});
+
+test('mobile internal text focus keeps main geometry while dialog, rotation and explicit placement continue', () => {
+  const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  const start = source.indexOf('function bindViewportSync() {'), end = source.indexOf('// ─── Toast (top)', start);
+  const frames = new Map(); let nextFrame = 0, originTop = 0;
+  const win = new Target(); Object.assign(win, { innerWidth: 390, innerHeight: 844,
+    requestAnimationFrame(callback) { frames.set(++nextFrame, callback); return nextFrame; }, cancelAnimationFrame(id) { frames.delete(id); } });
+  win.visualViewport = new Target(); Object.assign(win.visualViewport, { offsetLeft: 0, offsetTop: 0, width: 390, height: 844 });
+  const flush = () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(callback => callback()); };
+  const root = { style: {}, getBoundingClientRect: () => rect(0, originTop, 390, 844) }, sheet = { style: {} }, shadow = { activeElement: null };
+  const dialog = { style: {}, getBoundingClientRect() { return { left: parseFloat(this.style.left) || 0, top: parseFloat(this.style.top) || 0 }; } };
+  const document = { getElementById: id => id === 'panel' ? root : id === 'dialog' ? dialog : null,
+    createElement: () => ({ style: {} }), body: { appendChild() {}, removeChild() {} } };
+  const context = { document, window: win, MODAL_ID: 'panel', DIALOG_HOST_ID: 'dialog', _spShadow: shadow,
+    inEl: () => sheet, isMobile: () => win.innerWidth <= 640, settingsOpen: false,
+    readPanelViewport: layout.readPanelViewport, syncDialogViewport: host => layout.syncDialogViewport(host, win), fitDesktopPanel: layout.fitDesktopPanel,
+    localStorage: { getItem: () => null }, SIZE_KEY: 'size', POS_KEY: 'position',
+    getComputedStyle: () => ({ top: '0px', bottom: '0px' }), closeActionMenus() {}, onDragEnd() {}, onResizeEnd() {} };
+  runInNewContext('let viewportSyncBound=false,viewportSyncFrame=null;'+source.slice(start, end), context);
+  context.bindViewportSync(); context.syncPanelViewport(); const before = { ...sheet.style };
+  win.emit('resize', { type: 'resize' });
+  shadow.activeElement = { tagName: 'TEXTAREA' }; originTop = -260;
+  Object.assign(win.visualViewport, { offsetTop: 260, height: 350 }); flush();
+  assert.deepEqual(sheet.style, before, '执行RAF时核真实焦点，键盘不改主窗');
+  assert.equal(root.style.transform, ''); assert.equal(dialog.style.height, '350px');
+  for (const control of [{ tagName: 'INPUT', type: 'password' }, { isContentEditable: true }]) {
+    shadow.activeElement = control; win.visualViewport.emit('resize', { type: 'resize' }); flush(); assert.deepEqual(sheet.style, before);
+  }
+  originTop = -500; win.visualViewport.offsetTop = 0;
+  win.visualViewport.emit('scroll', { type: 'scroll' }); flush(); assert.deepEqual(sheet.style, before);
+  document.activeElement = { tagName: 'TEXTAREA' }; shadow.activeElement = null; win.emit('resize', { type: 'resize' }); flush();
+  assert.equal(sheet.style.height, '270px'); assert.equal(root.style.transform, 'translate(0px, 500px)');
+  for (const control of [...['checkbox', 'radio', 'range', 'button', 'color', 'file'].map(type => ({ tagName: 'INPUT', type })),
+    { tagName: 'TEXTAREA', readOnly: true }, { tagName: 'INPUT', type: 'text', readOnly: true }, { tagName: 'SELECT' }]) {
+    shadow.activeElement = control; win.visualViewport.height++;
+    win.visualViewport.emit('resize', { type: 'resize' }); flush(); assert.equal(sheet.style.height, `${win.visualViewport.height - 80}px`, JSON.stringify(control));
+  }
+  shadow.activeElement = { tagName: 'INPUT', type: 'text' }; win.visualViewport.height = 400;
+  win.visualViewport.emit('resize', { type: 'resize' }); win.emit('orientationchange', { type: 'orientationchange' }); flush();
+  assert.equal(sheet.style.height, '320px', '旋转覆盖已排队的键盘resize');
+  win.visualViewport.height = 450; context.syncPanelViewport(); assert.equal(sheet.style.height, '370px');
+  win.innerWidth = 1200; win.visualViewport.width = 1200; win.visualViewport.height = 900;
+  win.emit('resize', { type: 'resize' }); flush(); assert.equal(sheet.style.height, '600px');
 });
