@@ -1,4 +1,5 @@
 import { readPanelViewport, syncDialogViewport, bindOutsideClose, fitDesktopPanel } from './ui/panel-window.js';
+import { bindWindowDiagnosticControls } from './ui/window-diagnostics.js';
 import { primaryTextColor, syncUiTheme } from './utils/ui-theme.js';
 import { icon, setIcon } from './utils/icons.js';
 import { getContext, extension_settings, extensionNames, extensionTypes } from '../../../extensions.js';
@@ -235,6 +236,11 @@ import {
 // 坐标与楼内框各自持有唯一 runtime 句柄。
 let coordinateRuntime = null;
 let inlineFeature = null;
+const pendingInlineRootBindings = [];
+function registerInlineRootBinding(key, binder) {
+    if (inlineFeature?.bindRoots) inlineFeature.bindRoots(key, binder);
+    else pendingInlineRootBindings.push({ key, binder });
+}
 
 function refreshInlineWindow(immediate = false) { return inlineFeature?.refresh?.(immediate); }
 function _clearAllInlineBoxes() { return inlineFeature?.clear?.(); }
@@ -2143,6 +2149,7 @@ const _injectIdsByText  = new Map();
 let   _injectIdSeq      = 0;
 let viewportSyncBound   = false;
 let viewportSyncFrame = null;
+let windowDiagnostics = null;
 
 const isMobile = () => window.innerWidth <= 640;
 
@@ -2381,6 +2388,7 @@ jQuery(async () => {
         ledgerLastJudgedMsgId = lastSeen;
         ledgerJudgeCounter = 0;
         ledgerRegeneratedMsgId = -1;
+        ledgerRegenerationDeleted = false;
         currentView = 'user';
         charViewName = null;
         outlineMode = false;
@@ -2560,7 +2568,7 @@ jQuery(async () => {
         refreshStoryClockInjection();
         linesFeature.onGenerationStarted({ genType, dryRun });
         if (dryRun || genType === 'quiet') return;
-        finishLedgerRegeneration();
+        finishLedgerRegeneration(true);
         const chat = getContext().chat;
         const last = Array.isArray(chat) ? chat.length - 1 : -1;
         if (genType === 'regenerate' && ledgerNarrativeMessage(chat?.[last])) {
@@ -2958,6 +2966,7 @@ inlineFeature = createInlineFeature({
     getLinesCacheKey, parseLines, linesFeature, snapshot, keyDesc, createWeekdayConsumerContext,
     storyWeekdayRefPure, ALM_CHAT_SCAN_LIMIT, pointInlineRenderer, axisInlineRenderer, $, _buildLedgerBlockHtml,
     buildUserRecall: _buildUserRecallBoxHtml,
+    stylesheetUrl: STYLESHEET_URL,
     pluginEnabled, documentRef: document, windowRef: window,
     freezeSnapshot: freezeSnapshotToFloor,
     readSnapshot: id => snapshot.readSnapshot(id),
@@ -2969,12 +2978,15 @@ inlineFeature = createInlineFeature({
     chatMessage: floor => getContext()?.chat?.[floor]?.mes || '', parseStoryClock: (message, calendar) => parseStoryClockPure(message, calendar),
     coordinateChanged: input => coordinateRuntime?.feature?.onChatDomChanged?.(input),
     isStreaming: () => linesFeature.isStreaming(),
-    syncTheme: (_doc, box) => {
+    syncTheme: (root, box) => {
         const theme = detectSTTheme();
+        if (root?.host) syncUiTheme(root.host, theme);
         syncUiTheme(box, theme);
-        syncVectorGlyphTheme(document, theme);
+        syncVectorGlyphTheme(root || box, theme);
+        if (root?.host) refreshUserNameMask(root.host);
     },
 });
+for (const { key, binder } of pendingInlineRootBindings.splice(0)) inlineFeature.bindRoots?.(key, binder);
 if (document.querySelector('#chat')) inlineFeature.init();
 // ─── 线·伏笔潜伏注入（隐形注入主楼 AI）────────────────────────────────────────
 // 把当前视角的活跃线（跳过终态 stage）以 SYSTEM 角色注入聊天上下文（IN_CHAT + depth），
@@ -3001,6 +3013,7 @@ let   ledgerAutomationEpoch  = 0;
 let   ledgerCaptureQueued    = false;
 let   ledgerJudgeQueued      = false;
 let   ledgerRegeneratedMsgId = -1;
+let   ledgerRegenerationDeleted = false;
 function enqueueLedgerAutomation(task) {
     const epoch = ledgerAutomationEpoch;
     const queued = ledgerAutomationQueue.catch(() => {}).then(() => epoch === ledgerAutomationEpoch ? task() : { status: 'cancelled', reason: 'superseded' });
@@ -3015,8 +3028,10 @@ function invalidateLedgerAutomationQueue() {
 }
 function rewindLedgerAutomationAfterDeletion(messageId) {
     const replacingLastAi = ledgerRegeneratedMsgId >= 0 && messageId === ledgerRegeneratedMsgId && getContext().chat?.length === ledgerRegeneratedMsgId;
-    if (!replacingLastAi) {
+    if (replacingLastAi) ledgerRegenerationDeleted = true;
+    else {
         ledgerRegeneratedMsgId = -1;
+        ledgerRegenerationDeleted = false;
         const latest = ledgerLatestAiFloorId();
         ledgerLastCapturedMsgId = Math.min(ledgerLastCapturedMsgId, latest - 1);
         ledgerLastJudgedMsgId = Math.min(ledgerLastJudgedMsgId, latest - 1);
@@ -3025,11 +3040,16 @@ function rewindLedgerAutomationAfterDeletion(messageId) {
     }
     invalidateLedgerAutomationQueue();
 }
-function finishLedgerRegeneration() {
+function finishLedgerRegeneration(nextGeneration = false) {
     const floor = ledgerRegeneratedMsgId;
+    if (floor < 0) return;
+    const hasReplacement = ledgerNarrativeMessage(getContext().chat?.[floor]);
+    // 结束/停止通知可能早于删楼或替代正文落地；缺失是否已成定局，留到下一次真正生成时确认。
+    if (!nextGeneration && (!ledgerRegenerationDeleted || !hasReplacement)) return;
     ledgerRegeneratedMsgId = -1;
+    ledgerRegenerationDeleted = false;
     // 旧 AI 已删除、替代回复尚未落地就中止时，下一条回复仍应按新楼计数。
-    if (floor >= 0 && !ledgerNarrativeMessage(getContext().chat?.[floor])) rewindLedgerAutomationAfterDeletion();
+    if (!hasReplacement) rewindLedgerAutomationAfterDeletion();
 }
 
 // 历·API 兜底判定的间隔（缺省/非法 → 3；≥1）。抄 getOutlineJudgeInterval。
@@ -3174,17 +3194,28 @@ function initChatObserver() {
 
 function injectExtButton() {
     // 侧栏入口由魔杖或悬浮按钮打开。
+    const contentHtml = `
+        <div class="extensionsMenuExtensionButton sp-menu-icon" title="打开构画">${PEN_MENU_ICON_SVG}</div>
+        <span>构画</span>`;
     const wandHtml = `
         <div id="sp_open_wand" class="list-group-item flex-container flexGap5" style="display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;white-space:nowrap">
-            <div class="extensionsMenuExtensionButton sp-menu-icon" title="打开构画">${PEN_MENU_ICON_SVG}</div>
-            <span>构画</span>
+            ${contentHtml}
         </div>`;
 
     function mountWandBtn() {
+        if (document.getElementById('sp_open_wand')) return true;
         const c = document.getElementById('sp_wand_container') || document.getElementById('extensionsMenu');
-        if (!c || document.getElementById('sp_open_wand')) return false;
+        if (!c) return false;
         c.insertAdjacentHTML('beforeend', wandHtml);
-        document.getElementById('sp_open_wand')?.addEventListener('click', () => openSchedule());
+        const entry = document.getElementById('sp_open_wand');
+        // 保留 Light DOM 内容供酒馆识别名称与键盘入口；不设 slot，实际绘制只使用根内内容。
+        const shadow = entry.attachShadow({ mode: 'open' });
+        shadow.innerHTML = `<style>
+            .sp-menu-icon { width:20px;height:20px;flex:0 0 20px;display:flex;align-items:center;justify-content:center;align-self:center;pointer-events:none; }
+            .sp-menu-pen-icon { width:18px;height:18px;display:block; }
+            span { font:inherit;color:inherit; }
+        </style>${contentHtml}`;
+        entry.addEventListener('click', () => openSchedule());
         return true;
     }
     if (!mountWandBtn()) {
@@ -3927,7 +3958,7 @@ function injectModal() {
                                         <summary class="sp-settings-section-title">诊断管理</summary>
                                         <div class="sp-settings-section-body">
                                             <div class="sp-diagnostics-block">
-                                                <label class="sp-cfg-group">AI 输入</label>
+                                                <div class="sp-cfg-group">AI 输入</div>
                                                 <p class="sp-cfg-hint"><strong>仅供本人排查。</strong>这里是最近一次实际发给 AI 的完整输入，可能包含最近聊天、上下文、世界书和提示词等敏感内容，不建议公开分享。</p>
                                                 <details class="sp-diagnostics-preview sp-diagnostics-preview-empty" id="sp-diagnostics-ai-input-preview">
                                                     <summary class="sp-diagnostics-preview-title">查看最近 AI 输入</summary>
@@ -3939,14 +3970,25 @@ function injectModal() {
                                             </div>
                                             <hr class="sp-mem-divider">
                                             <div class="sp-diagnostics-block">
-                                                <label class="sp-cfg-group">请求诊断</label>
+                                                <div class="sp-cfg-group">请求诊断</div>
                                                 <p class="sp-cfg-hint"><strong>适合发给开发者。</strong>复制最近 30 条安全诊断日志；不含正文、提示词、API Key 或 URL。</p>
                                                 <button id="sp-diagnostic-export" class="sp-save-btn" type="button">${icon("copy")} 复制最近诊断日志</button>
                                             </div>
                                             <div class="sp-diagnostics-block">
-                                                <div class="sp-diagnostics-label">当前聊天诊断包</div>
+                                                <div class="sp-cfg-group">当前聊天诊断包</div>
                                                 <p class="sp-cfg-hint">包含两楼 AI 输入与原始回复，可能含剧情。它不是完整可导入备份，也不会包含 API 密钥、地址或请求头。</p>
                                                 <button id="sp-current-diagnostic-export" class="sp-save-btn" type="button">${icon("file-export")} 导出当前聊天诊断包</button>
+                                            </div>
+                                            <hr class="sp-mem-divider">
+                                            <div class="sp-diagnostics-block">
+                                                <div class="sp-cfg-group">窗口排查</div>
+                                                <p class="sp-cfg-hint">开始记录后返回间复现，收起键盘再回来复制。仅记录界面信息，一分钟后自动停止。</p>
+                                                <div class="sp-mem-actions">
+                                                    <button id="sp-window-diagnostic-start" class="sp-save-btn" type="button"><span id="sp-window-diagnostic-start-label">开始记录</span></button>
+                                                    <button id="sp-window-diagnostic-copy" class="sp-save-btn" type="button" title="复制窗口诊断" aria-label="复制窗口诊断" disabled>${icon("copy")} 复制结果</button>
+                                                    <button id="sp-window-diagnostic-export" class="sp-save-btn" type="button" title="导出窗口诊断文件" aria-label="导出窗口诊断文件" disabled>${icon("file-export")} 导出文件</button>
+                                                </div>
+                                                <span id="sp-window-diagnostic-status" class="sp-cfg-hint" role="status" aria-live="polite">尚未开始记录。</span>
                                             </div>
                                         </div>
                                     </details>
@@ -3987,8 +4029,14 @@ function injectModal() {
 
                         <div class="sp-space-wrap" id="sp-space-wrap" style="display:none;flex-direction:column;flex:1;min-height:0">
                             <div class="sp-space-pages" id="sp-space-pages" role="tablist" aria-label="讨论窗口" hidden>
-                                <button type="button" role="tab" data-space-page="1" aria-selected="true">窗口1</button>
-                                <button type="button" role="tab" data-space-page="2" aria-selected="false" tabindex="-1">窗口2</button>
+                                <span class="sp-space-page" data-space-page-slot="1" role="presentation">
+                                    <button type="button" role="tab" data-space-page="1" aria-selected="true">窗口1</button>
+                                    <button type="button" class="sp-icon-btn sp-space-page-close" data-space-close-page="1" title="关闭窗口1" aria-label="关闭窗口1">${icon("x")}</button>
+                                </span>
+                                <span class="sp-space-page" data-space-page-slot="2" role="presentation">
+                                    <button type="button" role="tab" data-space-page="2" aria-selected="false" tabindex="-1">窗口2</button>
+                                    <button type="button" class="sp-icon-btn sp-space-page-close" data-space-close-page="2" title="关闭窗口2" aria-label="关闭窗口2">${icon("x")}</button>
+                                </span>
                             </div>
                             <div class="sp-space-failure-slot" id="sp-space-failure-slot"></div>
                             <div class="sp-chat-msgs" id="sp-space-msgs"></div>
@@ -3996,8 +4044,8 @@ function injectModal() {
                                 <div class="sp-action-menu sp-space-more-menu">
                                     <button type="button" id="sp-space-more" class="sp-icon-btn sp-action-menu-toggle" title="更多" aria-label="更多讨论操作" aria-expanded="false" aria-controls="sp-space-more-list">${icon("dots-vertical")}</button>
                                     <div class="sp-action-menu-list" id="sp-space-more-list" hidden>
+                                        <button type="button" id="sp-space-add-page" class="sp-action-menu-item">${icon("plus")}新增</button>
                                         <button type="button" id="sp-space-clear" class="sp-action-menu-item">${icon("clear-all")}清屏</button>
-                                        <button type="button" id="sp-space-add-page" class="sp-action-menu-item">${icon("plus")}新增窗口</button>
                                     </div>
                                 </div>
                                 <textarea id="sp-space-input" class="sp-input sp-chat-input-ta" rows="1" placeholder="聊点什么？"></textarea>
@@ -4270,6 +4318,24 @@ function injectModal() {
         if (text) injectToST(text);
     });
 
+    // 楼内 ShadowRoot 的真实委托容器：与 Light DOM #chat 保持同一套业务入口。
+    // 只登记稳定 key；inlineFeature 会在冷启动和每个后续楼内根创建时调用。
+    const bindInlineChatEvents = target => {
+        if (!target) return;
+        const $target = target?.on && target?.off ? target : $(target);
+        $target.off?.('.spInlineChat');
+        $target.on('click.spInlineChat', '.sp-refresh-lines, .sp-inline-refresh-lines', function (e) { e.stopPropagation(); linesFeature.actions.reroll(); });
+        $target.on('click.spInlineChat', '.sp-advance-lines, .sp-inline-advance-lines', function (e) { e.stopPropagation(); linesFeature.actions.advance(); });
+        $target.on('click.spInlineChat', '.sp-inline-refresh-dashed', function (e) { e.stopPropagation(); linesFeature.dashed.run({ reroll: true }); });
+        $target.on('click.spInlineChat', '.sp-line-del-one', function (e) { e.stopPropagation(); const idx = Number($(this).attr('data-line-idx')); if (Number.isInteger(idx)) linesFeature.actions.delete(idx); });
+        $target.on('click.spInlineChat', '.sp-line-pin-toggle', function (e) { e.stopPropagation(); const idx = Number($(this).attr('data-line-idx')); if (Number.isInteger(idx)) linesFeature.actions.pin(idx); });
+        $target.on('click.spInlineChat', '.sp-adult-sensitive', revealAdult);
+        $target.on('keydown.spInlineChat', '.sp-adult-sensitive', revealAdultKey);
+        $target.on('click.spInlineChat', '.sp-sch-del-one', function (e) { e.stopPropagation(); const day = $(this).attr('data-day'); const idx = Number($(this).attr('data-ev')); if (Number.isInteger(idx)) triggerDeletePointEvent(day === 'future' ? 'future' : Number(day), idx, { view: 'user', charName: '' }); });
+        $target.on('click.spInlineChat', '.sp-inject-btn', function () { const text = _injectTexts[$(this).data('iid')]; if (text) injectToST(text); });
+    };
+    registerInlineRootBinding('chat-events', bindInlineChatEvents);
+
     // 点/线面板底部引导只切到间，不预填、不生成；用户需说明目标并请求可应用方案
     // 点与线的入口都由同一委托处理。
     $inAll('#sp-body, #sp-lines-wrap').on('click', '.sp-jump-link', () => $in('.sp-view-btn[data-view="space"]').trigger('click'));
@@ -4303,7 +4369,7 @@ function injectModal() {
         batchBar.find('.sp-batch-exec').prop('disabled', count === 0);
     };
     bindLedgerEvents({
-        almanac: $almanac, chat: $('#chat'), $,
+        almanac: $almanac, chat: $('#chat'), bindInlineRoots: binder => registerInlineRootBinding('ledger', binder), $,
         capture: { run: runLedgerCaptureStep, abort: () => ledgerCaptureController.abort(), prepareAbandon: () => ledgerCaptureController.prepareAbandon?.(), abandon: token => ledgerCaptureController.abandon?.(token), confirmAbandon: () => spConfirm({ title: '放弃未确认候选', body: '只会放弃仍未找到可靠来源的候选；已经逐批保存的刻度条目不会删除。', confirmText: '放弃待查', cancelText: '继续保留' }) },
         judge: { run: runLedgerJudgeStep }, captureState: () => ({ busy: ledgerCaptureController.isBusy, controller: ledgerCaptureController.abortController }), actions: ledgerActions,
         render: renderAlmanacPanel,
@@ -4548,6 +4614,17 @@ function injectModal() {
         });
     });
     $in('#sp-current-diagnostic-export').on('click', () => { void exportCurrentChatDiagnosticPackage(); });
+    windowDiagnostics?.stop('remount');
+    windowDiagnostics = bindWindowDiagnosticControls({
+        root: _spShadow, windowRef: window, sourceUrl: import.meta.url,
+        elements: () => ({ root: document.getElementById(MODAL_ID), sheet: inEl('.sp-sheet'), shadow: _spShadow,
+            dialogHost: document.getElementById(DIALOG_HOST_ID), fab: document.getElementById(FAB_ID),
+            input: inEl('#sp-space-input'), settingsBody: inEl('.sp-settings-body'), messages: inEl('#sp-space-msgs') }),
+        readUiState: () => ({ module: _lastMainView, settingsOpen }),
+        copyText: copyPlainText, promptTextarea: options => customDialog.promptTextarea(options),
+        downloadJson: data => downloadDiagnosticPackage(data),
+        notify: (message, isError) => showToast(message, null, isError),
+    });
     bindApiPresetEvents();
     $in('#sp-qr-shortcuts').on('change', 'input[data-qr-shortcut]', function () {
         const key = this.dataset.qrShortcut;
@@ -5341,6 +5418,7 @@ function pointScheduleEmptyHtml() {
 }
 
 function showPanel() {
+    windowDiagnostics?.record('panel.open-requested');
     const $root  = $(`#${MODAL_ID}`);
     const sheet  = inEl('.sp-sheet');
     // Clear inline animation so the CSS open-animation replays on every show
@@ -5359,6 +5437,7 @@ function showPanel() {
 }
 
 function closePanel() {
+    windowDiagnostics?.record('panel.close-requested');
     onDragEnd(null, false);
     onResizeEnd(null, false);
     // 关闭主面板时取消活动确认，但独立弹窗宿主本身不隐藏。
@@ -5372,6 +5451,8 @@ function closePanel() {
     customDialog.cancelActive();
     $(`#${MODAL_ID}`).stop(true).animate({ opacity: 0 }, 150, function () {
         $(this).css('display', 'none');
+        windowDiagnostics?.record('panel.closed');
+        windowDiagnostics?.stop('panel-closed');
     });
 }
 
@@ -6069,9 +6150,8 @@ function getDateAnchor(charKey) {
         if (local.calibration) {
             if (!local.calibration || !Number.isInteger(local.calibration.weekday)) return null;
             const current = latestStoryClockPure(getContext(), ALM_CHAT_SCAN_LIMIT);
-            // 半残 SDC 只能作为人工校准的日期相位，不能提前停用校准；
-            // 只有当前 AI 楼的 start/end 两侧都完整且无重复歧义时才允许接管。
-            if (completeStoryClockPure(current)) {
+            // 可靠日期与星期才允许接管人工星期锚；未知时刻不影响星期依据。
+            if (current && !current.duplicate && current.ordered && current.endMeta?.date && Number.isInteger(current.endMeta?.weekdayIndex)) {
                 const calibrationFloor = local.calibration?.floor;
                 if (!Number.isInteger(calibrationFloor) || current.floor !== calibrationFloor) return null;
             }
@@ -9286,6 +9366,12 @@ function syncPrimaryTextColor(theme) {
 function syncInlineTheme(theme = detectSTTheme()) {
     document.querySelectorAll('.sp-inline-box').forEach(root => syncUiTheme(root, theme));
     syncVectorGlyphTheme(document, theme);
+    for (const shadowRoot of inlineFeature?.getRoots?.() || []) {
+        const box = shadowRoot.querySelector?.('.sp-inline-box');
+        if (box) syncUiTheme(box, theme);
+        syncVectorGlyphTheme(shadowRoot, theme);
+        if (shadowRoot.host) refreshUserNameMask(shadowRoot.host);
+    }
 }
 
 function applyTheme(theme) {
@@ -9491,12 +9577,16 @@ function positionPanel() {
 function bindViewportSync() {
     if (viewportSyncBound) return;
     viewportSyncBound = true;
-    const onViewportChange = () => {
+    const onViewportChange = event => {
         closeActionMenus();
         onDragEnd(null, false);
         onResizeEnd(null, false);
-        if (viewportSyncFrame !== null) return;
-        const callback = () => { viewportSyncFrame = null; syncPanelViewport(); };
+        if (viewportSyncFrame !== null) {
+            if (event?.type !== 'orientationchange') return;
+            if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(viewportSyncFrame);
+            else clearTimeout(viewportSyncFrame);
+        }
+        const callback = () => { viewportSyncFrame = null; syncPanelViewport(event?.type !== 'orientationchange'); };
         viewportSyncFrame = typeof window.requestAnimationFrame === 'function'
             ? window.requestAnimationFrame(callback)
             : setTimeout(callback, 16);
@@ -9510,13 +9600,24 @@ function bindViewportSync() {
     }
 }
 
-function syncPanelViewport() {
+function syncPanelViewport(preserveEditingGeometry = false) {
+    windowDiagnostics?.record('sync.requested', { preserveEditingGeometry });
     const dialogHost = document.getElementById(DIALOG_HOST_ID);
     if (dialogHost) syncDialogViewport(dialogHost);
     const root  = document.getElementById(MODAL_ID);
     const sheet = inEl('.sp-sheet');   // .sp-sheet 在 shadow 内：document.querySelector('#sp-modal-root .sp-sheet') 跨不过边界→null→整个移动端视口同步静默失效；用 inEl 查 shadow root
-    if (!root || !sheet || root.style.display === 'none') return;
+    if (!root || !sheet || root.style.display === 'none') { windowDiagnostics?.record('sync.inactive'); return; }
     const mobile = isMobile();
+    if (preserveEditingGeometry && mobile) {
+        const userAgent = globalThis.navigator?.userAgent || '';
+        const phoneBrowser = /iPhone|iPod/i.test(userAgent) && (/Version\/[\d.]+.*Safari\//i.test(userAgent) || /FxiOS\//i.test(userAgent));
+        const focused = _spShadow?.activeElement;
+        const editing = focused?.isContentEditable || !focused?.readOnly && (focused?.tagName === 'TEXTAREA'
+            || focused?.tagName === 'INPUT' && ['text', 'search', 'url', 'tel', 'email', 'password', 'number'].includes(focused.type));
+        // 手机浏览器已为输入框平移页面时，保留主窗几何，避免再缩短窗口把输入区送出屏幕。
+        // 显式打开和旋转继续定位；独立弹窗已在上方同步。
+        if (phoneBrowser && editing) { windowDiagnostics?.record('sync.preserved', { preserveEditingGeometry, mobile }); return; }
+    }
     // 手机键盘平移时保留浏览器给 fixed 层的可视坐标；仅真实页面滚动才补偿
     // 宿主 html 的 fixed 包含块，避免把 visualViewport.offsetTop 再算成上移量。
     root.style.transform = mobile ? '' : 'translate(0px, 0px)';
@@ -9564,6 +9665,8 @@ function syncPanelViewport() {
         sheet.style.maxWidth = `${Math.max(0, view.width - 20)}px`;
         sheet.style.maxHeight = `${Math.max(0, view.height - 20)}px`;
     }
+    windowDiagnostics?.record('sync.applied', { preserveEditingGeometry, mobile,
+        safeTop, safeBottom: safeBot, rootOriginLeft: origin.left, rootOriginTop: origin.top });
     if (!settingsBody) return;
     if (settingsBody.scrollTop !== savedScrollTop) settingsBody.scrollTop = savedScrollTop;
 

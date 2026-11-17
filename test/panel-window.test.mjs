@@ -103,7 +103,7 @@ test('normal mobile sync keeps viewport margins with one safe-area inset and ign
     let safeTop = 0, safeBottom = 0;
     const document = { ...fixture(nodes), getElementById: id => id === 'panel' ? root : fixture(nodes).getElementById(id),
       createElement: () => ({ style: {} }), body: { appendChild() {}, removeChild() {} } };
-    const context = { document, window: win, MODAL_ID: 'panel', DIALOG_HOST_ID: 'dialog', syncDialogViewport: layout.syncDialogViewport, settingsOpen: false, inEl: () => sheet,
+    const context = { document, window: win, windowDiagnostics: null, MODAL_ID: 'panel', DIALOG_HOST_ID: 'dialog', syncDialogViewport: layout.syncDialogViewport, settingsOpen: false, inEl: () => sheet,
       isMobile: () => win.innerWidth <= 640, readPanelViewport: layout.readPanelViewport,
       fitDesktopPanel: layout.fitDesktopPanel, localStorage: { getItem: () => null }, SIZE_KEY: 'size', POS_KEY: 'position', _spShadow: { activeElement: null },
       getComputedStyle: () => ({ top: `${safeTop}px`, bottom: `${safeBottom}px` }) };
@@ -229,7 +229,7 @@ test('production viewport sync updates an independent dialog while the main pane
   const end = source.indexOf('// ─── Toast (top)', start);
   const host = { style: {}, getBoundingClientRect: () => rect(0, -400, 820, 0) };
   const root = { style: { display: 'none' } };
-  const context = { document: { getElementById: id => id === 'dialog' ? host : root },
+  const context = { windowDiagnostics: null, document: { getElementById: id => id === 'dialog' ? host : root },
     DIALOG_HOST_ID: 'dialog', MODAL_ID: 'panel', inEl: () => null,
     syncDialogViewport: node => layout.syncDialogViewport(node, { innerWidth: 820, innerHeight: 1180 }) };
   runInNewContext(source.slice(start, end), context);
@@ -291,7 +291,7 @@ test('mobile internal text focus follows keyboard geometry, page scrolling and r
   const dialog = { style: {}, getBoundingClientRect() { return { left: parseFloat(this.style.left) || 0, top: parseFloat(this.style.top) || 0 }; } };
   const document = { getElementById: id => id === 'panel' ? root : id === 'dialog' ? dialog : null,
     createElement: () => ({ style: {} }), body: { appendChild() {}, removeChild() {} } };
-  const context = { document, window: win, MODAL_ID: 'panel', DIALOG_HOST_ID: 'dialog', _spShadow: shadow,
+  const context = { document, window: win, windowDiagnostics: null, MODAL_ID: 'panel', DIALOG_HOST_ID: 'dialog', _spShadow: shadow,
     inEl: () => sheet, isMobile: () => win.innerWidth <= 640, settingsOpen: false,
     readPanelViewport: layout.readPanelViewport, syncDialogViewport: host => layout.syncDialogViewport(host, win), fitDesktopPanel: layout.fitDesktopPanel,
     localStorage: { getItem: () => null }, SIZE_KEY: 'size', POS_KEY: 'position',
@@ -331,4 +331,110 @@ test('mobile internal text focus follows keyboard geometry, page scrolling and r
   win.visualViewport.emit('scroll', { type: 'scroll' }); flush();
   assert.equal(root.style.transform, '', '键盘平移沿用可视视口坐标');
   assert.equal(sheet.style.top, '280px');
+});
+
+const phoneSafariAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1';
+const phoneFirefoxAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/145.0 Mobile/15E148 Safari/605.1.15';
+
+function editingViewportFixture(userAgent = phoneSafariAgent, width = 390) {
+  const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  const start = source.indexOf('function bindViewportSync() {'), end = source.indexOf('// ─── Toast (top)', start);
+  const frames = new Map(); let nextFrame = 0;
+  const win = new Target(); Object.assign(win, { innerWidth: width, innerHeight: 844,
+    requestAnimationFrame(callback) { frames.set(++nextFrame, callback); return nextFrame; },
+    cancelAnimationFrame(id) { frames.delete(id); } });
+  win.visualViewport = new Target(); Object.assign(win.visualViewport, { offsetLeft: 0, offsetTop: 0, width, height: 844 });
+  const root = { style: {}, getBoundingClientRect: () => rect(0, 0, width, 844) }, sheet = { style: {} }, shadow = { activeElement: null };
+  const dialog = { style: {}, getBoundingClientRect() { return { left: parseFloat(this.style.left) || 0, top: parseFloat(this.style.top) || 0 }; } };
+  const document = { getElementById: id => id === 'panel' ? root : id === 'dialog' ? dialog : null,
+    createElement: () => ({ style: {} }), body: { appendChild() {}, removeChild() {} } };
+  const context = { document, window: win, windowDiagnostics: null, navigator: { userAgent }, MODAL_ID: 'panel', DIALOG_HOST_ID: 'dialog', _spShadow: shadow,
+    inEl: () => sheet, isMobile: () => win.innerWidth <= 640, settingsOpen: false,
+    readPanelViewport: layout.readPanelViewport, syncDialogViewport: host => layout.syncDialogViewport(host, win), fitDesktopPanel: layout.fitDesktopPanel,
+    localStorage: { getItem: () => null }, SIZE_KEY: 'size', POS_KEY: 'position',
+    getComputedStyle: () => ({ top: '0px', bottom: '0px' }), closeActionMenus() {}, onDragEnd() {}, onResizeEnd() {} };
+  runInNewContext('let viewportSyncBound=false,viewportSyncFrame=null;'+source.slice(start, end), context);
+  context.bindViewportSync(); context.syncPanelViewport();
+  return { win, root, sheet, shadow, dialog, document, context,
+    flush() { const pending = [...frames.values()]; frames.clear(); pending.forEach(callback => callback()); } };
+}
+
+test('phone Safari preserves main geometry during native input panning while dialogs still resize', () => {
+  const { win, root, sheet, shadow, dialog, context, flush } = editingViewportFixture();
+  const before = { ...sheet.style }, rootBefore = { ...root.style };
+  win.emit('resize', { type: 'resize' });
+  shadow.activeElement = { tagName: 'TEXTAREA' };
+  root.getBoundingClientRect = () => rect(0, -500, 390, 844);
+  Object.assign(win.visualViewport, { height: 350, offsetTop: 0 }); flush();
+  assert.deepEqual(sheet.style, before, 'queued keyboard resize must read the current shadow focus');
+  assert.deepEqual(root.style, rootBefore, 'native input panning must not change the fixed containing block');
+  assert.equal(dialog.style.height, '350px', 'independent dialogs continue to follow the keyboard viewport');
+  for (const control of [{ tagName: 'INPUT', type: 'password' }, { isContentEditable: true }]) {
+    shadow.activeElement = control; win.visualViewport.offsetTop += 10;
+    win.visualViewport.emit('scroll', { type: 'scroll' }); flush(); assert.deepEqual(sheet.style, before);
+  }
+  shadow.activeElement = null; root.getBoundingClientRect = () => rect(0, 0, 390, 844);
+  Object.assign(win.visualViewport, { height: 844, offsetTop: 0 });
+  win.visualViewport.emit('resize', { type: 'resize' }); flush();
+  assert.deepEqual(sheet.style, before, 'normal viewport synchronization resumes after editing');
+  shadow.activeElement = { tagName: 'TEXTAREA' }; win.visualViewport.height = 400;
+  context.syncPanelViewport(); assert.equal(sheet.style.height, '320px', 'explicit opening still positions the panel');
+  win.emit('resize', { type: 'resize' }); shadow.activeElement = null; win.visualViewport.height = 450;
+  flush(); assert.equal(sheet.style.height, '370px', 'queued events must also notice focus leaving before execution');
+});
+
+test('phone Safari rotation overrides queued keyboard events and non-editable controls keep synchronizing', () => {
+  const { win, sheet, shadow, document, flush } = editingViewportFixture();
+  shadow.activeElement = { tagName: 'TEXTAREA' }; win.visualViewport.height = 350;
+  win.emit('resize', { type: 'resize' }); win.emit('orientationchange', { type: 'orientationchange' }); flush();
+  assert.equal(sheet.style.height, '270px', 'rotation must not inherit a queued editing freeze');
+  win.visualViewport.height = 400;
+  win.emit('orientationchange', { type: 'orientationchange' }); win.emit('resize', { type: 'resize' }); flush();
+  assert.equal(sheet.style.height, '320px', 'later keyboard events must not replace a queued rotation');
+  for (const control of [{ tagName: 'TEXTAREA', readOnly: true }, { tagName: 'INPUT', type: 'text', readOnly: true },
+    ...['checkbox', 'radio', 'range', 'button', 'color', 'file'].map(type => ({ tagName: 'INPUT', type })), { tagName: 'SELECT' }, null]) {
+    shadow.activeElement = control; win.visualViewport.height++;
+    win.visualViewport.emit('resize', { type: 'resize' }); flush(); assert.equal(sheet.style.height, `${win.visualViewport.height - 80}px`);
+  }
+  document.activeElement = { tagName: 'TEXTAREA' }; shadow.activeElement = null; win.visualViewport.height = 450;
+  win.emit('resize', { type: 'resize' }); flush(); assert.equal(sheet.style.height, '370px', 'host input does not freeze our panel');
+});
+
+test('phone Firefox also preserves editing geometry and still follows explicit rotation', () => {
+  const { win, sheet, shadow, flush } = editingViewportFixture(phoneFirefoxAgent);
+  const before = { ...sheet.style };
+  shadow.activeElement = { tagName: 'TEXTAREA' }; win.visualViewport.height = 350;
+  win.visualViewport.emit('resize', { type: 'resize' }); flush();
+  assert.deepEqual(sheet.style, before, 'FxiOS without Version must receive the phone editing behavior');
+  win.emit('orientationchange', { type: 'orientationchange' }); flush();
+  assert.equal(sheet.style.height, '270px');
+});
+
+test('window diagnostics observe the actual preserved, applied and hidden viewport paths', () => {
+  const { win, root, shadow, context, flush } = editingViewportFixture(phoneFirefoxAgent);
+  const records = []; context.windowDiagnostics = { record: (event, decision) => records.push({ event, decision }) };
+  shadow.activeElement = { tagName: 'TEXTAREA' }; win.visualViewport.height = 350;
+  win.emit('resize', { type: 'resize' }); flush();
+  assert.deepEqual(records.map(item => item.event), ['sync.requested', 'sync.preserved']);
+  assert.equal(records.at(-1).decision.mobile, true);
+  win.emit('orientationchange', { type: 'orientationchange' }); flush();
+  assert.equal(records.at(-1).event, 'sync.applied'); assert.equal(records.at(-1).decision.preserveEditingGeometry, false);
+  root.style.display = 'none'; context.syncPanelViewport(); assert.equal(records.at(-1).event, 'sync.inactive');
+});
+
+test('the phone editing change leaves Android, Chrome iOS, desktop and iPad geometry unchanged', () => {
+  const cases = [
+    ['Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/142.0 Mobile Safari/537.36', 390],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/142.0 Mobile/15E148 Safari/604.1', 390],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148', 390],
+    ['Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/26.0 Safari/605.1.15', 1200],
+    ['Mozilla/5.0 (iPad; CPU OS 26_0 like Mac OS X) AppleWebKit/605.1.15 Version/26.0 Mobile/15E148 Safari/604.1', 820],
+    [phoneSafariAgent, 844],
+  ];
+  for (const [agent, width] of cases) {
+    const { win, sheet, shadow, flush } = editingViewportFixture(agent, width);
+    shadow.activeElement = { tagName: 'TEXTAREA' }; win.visualViewport.height = 350;
+    win.visualViewport.emit('resize', { type: 'resize' }); flush();
+    assert.equal(sheet.style.height, width <= 640 ? '270px' : '330px', `${width}: ${agent}`);
+  }
 });
